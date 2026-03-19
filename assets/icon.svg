@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Background: dark volcanic rounded rect -->
+  <rect width="1024" height="1024" rx="230" ry="230" fill="#1A1A1A"/>
+
+  <!--
+    Group centered at (512, 512).
+    Menlo Bold 480px: "o" advance ≈ 288px, glyph height ≈ 260px.
+    Group width: 288 (o) + 18 (gap) + 52 (bar) = 358px → left edge at -179.
+    dominant-baseline="central" vertically centers text on y=0 within the group.
+    Cursor bar: x=127, y=-130, h=260 → vertically centered on y=0.
+  -->
+  <g transform="translate(512, 512)">
+    <text
+      x="-179"
+      y="0"
+      font-family="'JetBrains Mono', 'Menlo', monospace"
+      font-size="480"
+      font-weight="700"
+      fill="#F4F4F5"
+      dominant-baseline="central"
+    >o</text>
+    <!-- Cursor bar — ochre, taller than the "o" glyph -->
+    <rect x="127" y="-175" width="52" height="350" rx="8" ry="8" fill="#CC7722"/>
+  </g>
+</svg>

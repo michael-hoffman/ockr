@@ -1,0 +1,35 @@
+# Rust
+/target/
+Cargo.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Stories / internal planning docs
+stories/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI tooling
+.claude/
+.cursor/
+.aider*
+.copilot/
+.continue/
+claude.md
+CLAUDE.md
+
+# Build / dist artifacts
+dist/
+*.app/
+
+# Env / secrets
+.env
+.env.*

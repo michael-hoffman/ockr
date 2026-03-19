@@ -1,0 +1,174 @@
+mod actions;
+mod command;
+mod compiler;
+mod editor;
+mod session;
+mod ui;
+mod vault;
+
+use actions::*;
+use command::{CommandEntry, CommandRegistry};
+use gpui::{
+    App, AppContext, Application, Bounds, KeyBinding, PathPromptOptions, SharedString,
+    TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
+use vault::VaultState;
+
+fn main() {
+    Application::new().run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        set_dock_icon();
+        // Initialize the command registry as a GPUI global.
+        let mut registry = CommandRegistry::new();
+        register_builtin_commands(&mut registry);
+        cx.set_global(registry);
+
+        // Create the reactive vault entity (empty until a vault is opened).
+        let vault = cx.new(|_| VaultState::empty());
+
+        // Restore the last-opened vault from the session, if present.
+        if let Some(last_path) = session::load_last_vault() {
+            vault.update(cx, |state, _cx| {
+                *state = VaultState::open(last_path);
+            });
+        }
+
+        // Keybindings.
+        cx.bind_keys([
+            KeyBinding::new("cmd-p", OpenCommandPalette, None),
+            KeyBinding::new("cmd-shift-p", OpenCommandPalette, None),
+            KeyBinding::new("cmd-o", OpenVault, None),
+            KeyBinding::new("cmd-n", NewNote, None),
+            KeyBinding::new("cmd-s", SaveFile, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-k", OpenQuickSwitch, None),
+            KeyBinding::new("cmd-shift-f", VaultSearch, None),
+            KeyBinding::new("cmd-backslash", SplitPaneVertical, None),
+            KeyBinding::new("cmd-shift-backslash", SplitPaneHorizontal, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
+
+        // App-level action handlers.
+        let vault_for_open = vault.clone();
+        cx.on_action(move |_: &OpenVault, cx| {
+            let vault = vault_for_open.clone();
+            let rx = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Open Vault".into()),
+            });
+            cx.spawn(async move |cx| {
+                // rx resolves to Result<Result<Option<Vec<PathBuf>>, Error>, Canceled>
+                if let Ok(Ok(Some(paths))) = rx.await {
+                    if let Some(path) = paths.into_iter().next() {
+                        session::save_last_vault(&path);
+                        cx.update(|cx| {
+                            vault.update(cx, |state, cx| {
+                                *state = VaultState::open(path);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+        });
+
+        cx.on_action(|_: &OpenCommandPalette, _cx| {
+            // Story 08: launch Command Palette UI
+        });
+        cx.on_action(|_: &NewNote, _cx| {
+            // Story 02+: create new note in vault
+        });
+        cx.on_action(|_: &SaveFile, _cx| {
+            // Story 06: save active file
+        });
+        cx.on_action(|_: &OpenQuickSwitch, _cx| {
+            // Story 11: quick note switcher
+        });
+        cx.on_action(|_: &VaultSearch, _cx| {
+            // Story 02+: vault-wide full-text search
+        });
+        cx.on_action(|_: &Quit, cx| cx.quit());
+
+        // Quit when the last window closes.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        // Open main window.
+        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let vault_for_window = vault.clone();
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from("ockr")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            move |window, cx| {
+                cx.new(|cx| {
+                    let view = ui::MainWindow::new(vault_for_window, cx);
+                    view.focus_handle.focus(window);
+                    view
+                })
+            },
+        )
+        .unwrap();
+
+        cx.activate(true);
+    });
+}
+
+/// Set the macOS Dock icon from the embedded 1024×1024 PNG.
+///
+/// When running outside a `.app` bundle, macOS shows a generic Terminal icon.
+/// This replaces it with the ockr `o|` icon at startup.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::AnyThread;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+
+    const ICON_PNG: &[u8] =
+        include_bytes!("../assets/ockr.iconset/icon_512x512@2x.png");
+
+    unsafe {
+        let mtm = MainThreadMarker::new_unchecked();
+        let data = NSData::with_bytes(ICON_PNG);
+        if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+            let app = NSApplication::sharedApplication(mtm);
+            app.setApplicationIconImage(Some(&image));
+            let _: Retained<NSImage> = image;
+        }
+    }
+}
+
+fn register_builtin_commands(registry: &mut CommandRegistry) {
+    let cmds: &[(&'static str, &'static str, Option<&'static str>)] = &[
+        ("open-command-palette", "Open Command Palette", Some("Cmd-P")),
+        ("open-vault", "Open Vault", Some("Cmd-O")),
+        ("new-note", "New Note", Some("Cmd-N")),
+        ("save-file", "Save File", Some("Cmd-S")),
+        ("toggle-sidebar", "Toggle Sidebar", Some("Cmd-B")),
+        ("split-pane-vertical", "Split Pane Vertical", Some("Cmd-\\")),
+        (
+            "split-pane-horizontal",
+            "Split Pane Horizontal",
+            Some("Cmd-Shift-\\"),
+        ),
+        ("open-quick-switch", "Quick Switch", Some("Cmd-K")),
+        ("vault-search", "Vault Search", Some("Cmd-Shift-F")),
+    ];
+    for &(id, name, hint) in cmds {
+        registry.register(CommandEntry::new(id, name, hint, |_cx| {}));
+    }
+}
