@@ -37,7 +37,7 @@ use gpui::{
     MouseDownEvent, Render, Window, div, prelude::*, px,
 };
 
-use crate::actions::SaveFile;
+use crate::actions::{OpenCommandPalette, SaveFile};
 use crate::compiler::{CompileRequest, CompilerHandle};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -62,6 +62,9 @@ pub struct EditorPane {
     compiler: Option<CompilerHandle>,
     preview: Option<Entity<PreviewPane>>,
     vault_root: Option<PathBuf>,
+    /// Vault-relative path of the open file (e.g. `"notes/foo.typ"`).
+    /// Sent with every CompileRequest so the world resolves imports correctly.
+    file_rel_path: Option<String>,
 }
 
 impl EditorPane {
@@ -74,6 +77,7 @@ impl EditorPane {
             compiler: None,
             preview: None,
             vault_root: None,
+            file_rel_path: None,
         }
     }
 
@@ -104,6 +108,11 @@ impl EditorPane {
         self.state = EditorState::new();
         self.state.path = Some(file.abs_path.clone());
         self.state.is_dirty = false;
+        // Compute vault-relative path for correct import resolution.
+        self.file_rel_path = file.abs_path
+            .strip_prefix(&vault_root)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
         self.vault_root = Some(vault_root);
         self.undo_history.clear();
         self.trigger_compile();
@@ -115,6 +124,7 @@ impl EditorPane {
             compiler.send(CompileRequest {
                 source: self.buffer.text(),
                 vault_root: self.vault_root.clone(),
+                file_path: self.file_rel_path.clone(),
             });
         }
     }
@@ -218,6 +228,16 @@ impl EditorPane {
             return;
         }
 
+        // OpenPalette is a UI command — dispatch it to the window action chain.
+        // Must be deferred: we're inside a window update (the key-down handler),
+        // so the window slot is already taken. dispatch_action would silently
+        // fail trying to re-enter the same window. Deferring lets the window
+        // update cycle finish before the action is dispatched.
+        if cmd == EditorCommand::OpenPalette {
+            cx.defer(|cx| cx.dispatch_action(&OpenCommandPalette));
+            return;
+        }
+
         // Snapshot before any mutating command.
         if is_buffer_mutating(&cmd) {
             self.push_undo();
@@ -291,11 +311,14 @@ impl Render for EditorPane {
         let mode = self.state.mode;
         let selection = self.state.selection;
 
+        let front_matter_end = front_matter_end(&self.buffer, line_count);
+
         let mut line_elements = Vec::with_capacity(line_count);
         for i in 0..line_count {
             let text = self.buffer.line(i).to_string();
             let in_selection = is_line_in_visual_selection(i, mode, &selection);
-            line_elements.push(render_line(i, text, cursor, mode, in_selection));
+            let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
+            line_elements.push(render_line(i, text, cursor, mode, in_selection, is_front_matter));
         }
 
         let mode_label = match mode {
@@ -407,12 +430,26 @@ fn is_line_in_visual_selection(line: usize, mode: Mode, sel: &Selection) -> bool
     }
 }
 
+/// Returns the index of the first heading line (`= ...`), which marks the end
+/// of the front matter block. Returns `None` if no heading is found (no
+/// dimming applied) or if the heading is on line 0 (nothing to dim).
+fn front_matter_end(buffer: &InMemoryBuffer, line_count: usize) -> Option<usize> {
+    for i in 0..line_count {
+        let line = buffer.line(i);
+        if line.starts_with("= ") || line.starts_with("== ") || line.starts_with("=== ") {
+            return if i > 0 { Some(i) } else { None };
+        }
+    }
+    None
+}
+
 fn render_line(
     line_idx: usize,
     text: String,
     cursor: Pos,
     mode: Mode,
     in_selection: bool,
+    is_front_matter: bool,
 ) -> impl gpui::IntoElement {
     let line_height = px(20.0);
 
@@ -425,9 +462,14 @@ fn render_line(
     };
 
     if line_idx != cursor.line {
+        let text_color = if is_front_matter {
+            gpui::rgb(theme::TEXT_FAINT)
+        } else {
+            gpui::rgb(theme::TEXT_MUTED)
+        };
         let mut row = div()
             .min_h(line_height)
-            .text_color(gpui::rgb(theme::TEXT_MUTED))
+            .text_color(text_color)
             .text_sm()
             .font_family("Menlo")
             .child(if text.is_empty() { " ".to_string() } else { text });
@@ -512,6 +554,12 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
     // Guard against Cmd/Ctrl combos (those are handled in handle_key_down).
     if k.modifiers.platform || k.modifiers.control {
         return Noop;
+    }
+    // `:` opens the command palette (Helix-mode convention, like Zed).
+    // Check key_char because GPUI reports the physical key name (";") in k.key,
+    // and the shifted character (":") in k.key_char.
+    if k.key_char.as_deref() == Some(":") || k.key == ":" {
+        return OpenPalette;
     }
     match k.key.as_str() {
         "h" => MoveLeft,

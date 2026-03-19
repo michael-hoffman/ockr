@@ -472,6 +472,8 @@ pub fn apply<B: Buffer>(
             (state, None)
         }
 
+        // OpenPalette is handled in the UI layer before reaching apply().
+        OpenPalette => (state, None),
         Noop => (state, None),
     }
 }

@@ -10,11 +10,14 @@ actions!(
     [
         // Application
         Quit,
+        ForceQuit,
         // Command palette
         OpenCommandPalette,
         // Vault / file operations
         NewNote,
         SaveFile,
+        SaveFileAndQuit,
+        ReloadFile,
         OpenVault,
         // Layout
         ToggleSidebar,
@@ -23,5 +26,8 @@ actions!(
         // Navigation
         OpenQuickSwitch,
         VaultSearch,
+        BufferNext,
+        BufferPrevious,
+        BufferClose,
     ]
 );

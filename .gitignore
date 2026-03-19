@@ -33,3 +33,5 @@ dist/
 # Env / secrets
 .env
 .env.*
+
+ockr_design_*

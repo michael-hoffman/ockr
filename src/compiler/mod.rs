@@ -35,6 +35,10 @@ pub struct CompileRequest {
     pub source: String,
     /// Vault root at the time of the request (may change if user opens a new vault).
     pub vault_root: Option<PathBuf>,
+    /// Vault-relative path of the file being compiled (e.g. `"notes/foo.typ"`).
+    /// Used to set the correct virtual path on the main `FileId` so that
+    /// relative imports like `#import "../_template.typ"` resolve correctly.
+    pub file_path: Option<String>,
 }
 
 /// A diagnostic produced by the typst compiler.
@@ -136,7 +140,8 @@ fn compiler_loop(
         if let Some(root) = req.vault_root {
             world.set_vault_root(root);
         }
-        world.replace_source(req.source);
+        let path = req.file_path.as_deref().unwrap_or("main.typ");
+        world.set_source(path, req.source);
 
         // Compile, catching any panics so the thread stays alive.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

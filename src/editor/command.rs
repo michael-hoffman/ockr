@@ -85,6 +85,10 @@ pub enum EditorCommand {
     /// Enter Normal mode (Escape / Ctrl-[).
     EnterNormal,
 
+    // ── UI commands (dispatched to the window, not the buffer) ─────────────
+    /// Open the command palette (`:` in Normal mode, Cmd-P globally).
+    OpenPalette,
+
     // ── No-op ──────────────────────────────────────────────────────────────
     /// Discard the key with no effect (unknown binding in Normal mode, etc.).
     Noop,

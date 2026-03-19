@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, ObjectFit, Render, RenderImage, Window, div, img, prelude::*};
+use gpui::{ClipboardItem, Context, MouseButton, ObjectFit, Render, RenderImage, Window, div, img, prelude::*};
 
 use crate::ui::theme;
 use image::Frame;
@@ -68,26 +68,58 @@ impl PreviewPane {
 }
 
 impl Render for PreviewPane {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = gpui::rgb(theme::BG_PANEL);
 
         if let Some(ref err) = self.error {
+            let err_text = err.clone();
             return div()
                 .size_full()
+                .overflow_hidden()
                 .bg(bg)
                 .p_4()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .child(
+                    // Header row: label + copy button.
                     div()
-                        .text_color(gpui::rgb(0xff5555))
-                        .text_sm()
-                        .font_family("Menlo")
-                        .child("Compiler error"),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(0xff5555))
+                                .text_sm()
+                                .font_family("Menlo")
+                                .child("Compiler error"),
+                        )
+                        .child(
+                            div()
+                                .px(gpui::px(6.0))
+                                .py(gpui::px(2.0))
+                                .bg(gpui::rgb(theme::BG_HOVER))
+                                .rounded(gpui::px(4.0))
+                                .text_xs()
+                                .font_family("Menlo")
+                                .text_color(gpui::rgb(theme::TEXT_SUBTLE))
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(gpui::rgb(theme::TEXT)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_this: &mut PreviewPane, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            err_text.clone(),
+                                        ));
+                                    }),
+                                )
+                                .child("copy"),
+                        ),
                 )
                 .child(
                     div()
+                        .overflow_hidden()
                         .text_color(gpui::rgb(0xffaaaa))
                         .text_xs()
                         .font_family("Menlo")

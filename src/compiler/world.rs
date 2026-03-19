@@ -21,9 +21,6 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
-/// The virtual path used for the single in-memory source file.
-/// All inter-document imports use their vault-relative paths.
-const MAIN_PATH: &str = "/main.typ";
 
 /// The in-memory World presented to the typst compiler.
 ///
@@ -55,7 +52,8 @@ impl OckrWorld {
     /// compilation.
     pub fn new() -> Self {
         let (fonts, book) = load_bundled_fonts();
-        let main_id = FileId::new(None, VirtualPath::new(MAIN_PATH));
+        // Start with a placeholder id; `set_source` assigns the real one.
+        let main_id = FileId::new(None, VirtualPath::new("/main.typ"));
         let source = Source::new(main_id, String::new());
 
         Self {
@@ -75,11 +73,29 @@ impl OckrWorld {
         self.file_cache.clear();
     }
 
-    /// Replace the source text. The `Source` is updated in-place so that
-    /// typst's incremental parser can diff against the previous parse tree.
-    pub fn replace_source(&self, text: String) {
+    /// Set the source text for the given vault-relative path.
+    ///
+    /// `vault_rel_path` is a path like `"notes/foo.typ"` relative to the
+    /// vault root. It is used to construct a virtual path (`/notes/foo.typ`)
+    /// so that relative imports inside the document resolve correctly — e.g.
+    /// `#import "../_template.typ"` from `/notes/foo.typ` resolves to
+    /// `/_template.typ` → `vault_root/_template.typ`.
+    ///
+    /// If the path hasn't changed since the last call, the source is updated
+    /// in-place so typst's incremental parser can diff the previous parse tree.
+    pub fn set_source(&mut self, vault_rel_path: &str, text: String) {
+        let vpath = format!("/{}", vault_rel_path.trim_start_matches('/'));
+        let new_id = FileId::new(None, VirtualPath::new(&vpath));
+
         let mut src = self.source.lock().unwrap();
-        src.replace(&text);
+        if new_id == self.main_id {
+            // Same file — incremental replace preserves the parse cache.
+            src.replace(&text);
+        } else {
+            // New file — create a fresh Source; incremental cache is cold.
+            self.main_id = new_id;
+            *src = Source::new(new_id, text);
+        }
     }
 }
 

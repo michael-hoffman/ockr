@@ -3,31 +3,55 @@
 //! Stories 05–06: horizontal split — sidebar | editor | preview.
 //! The editor and preview are connected to the background compiler thread.
 //!
-//! ## Compiler wiring
+//! ## Resizable panes
 //!
-//! 1. `spawn_compiler_thread` is called once with a callback that sends
-//!    `CompileResult` values into an unbounded `futures::channel::mpsc` channel.
-//! 2. A detached `cx.spawn` task continuously `await`s results from that
-//!    channel and delivers them to `Entity<PreviewPane>` via `cx.update`.
-//! 3. `EditorPane` holds the `CompilerHandle` and calls `handle.send(...)` on
-//!    every buffer change.
+//! Each pane divider is a 4 px drag handle.  Dragging it updates the pixel
+//! width of its adjacent pane; the remaining space is divided by flex between
+//! the other two panes.  Widths are clamped to sane minimums and maximums.
 //!
-//! UI code is stateless — no rendering decisions are stored in this struct
-//! beyond which panes are currently visible.
+//! `drag_state` tracks which handle is being dragged, the cursor's starting
+//! x position, and the pane width at drag-start.  `MouseMove` on the root div
+//! updates the width live; `MouseUp` clears the drag state.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use futures::StreamExt as _;
-use gpui::{App, Context, Entity, FocusHandle, Focusable, Render, Window, div, prelude::*};
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Render, Window, deferred, div, prelude::*, px,
+};
 
-use crate::actions::{OpenCommandPalette, ToggleSidebar};
+use crate::actions::{
+    BufferClose, BufferNext, BufferPrevious, ForceQuit, NewNote, OpenCommandPalette, OpenVault,
+    Quit, ReloadFile, SaveFile, SaveFileAndQuit, ToggleSidebar,
+};
 use crate::compiler::{spawn_compiler_thread, CompileResult};
+use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::editor_pane::EditorPane;
 use crate::ui::preview::PreviewPane;
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::theme;
 use crate::vault::VaultState;
+
+// ── Drag state ────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum DragTarget {
+    /// The handle between the sidebar and the editor.
+    Sidebar,
+    /// The handle between the editor and the preview.
+    Preview,
+}
+
+struct DragState {
+    target: DragTarget,
+    /// Window-x at mouse-down.
+    start_x: f32,
+    /// Pane width at mouse-down.
+    start_width: f32,
+}
+
+// ── View ──────────────────────────────────────────────────────────────────────
 
 pub struct MainWindow {
     pub focus_handle: FocusHandle,
@@ -35,6 +59,13 @@ pub struct MainWindow {
     editor: Entity<EditorPane>,
     preview: Entity<PreviewPane>,
     sidebar_visible: bool,
+    /// Width of the sidebar pane in pixels.
+    sidebar_width: f32,
+    /// Width of the preview pane in pixels.
+    preview_width: f32,
+    drag: Option<DragState>,
+    /// Command palette overlay — `Some` while the palette is open.
+    palette: Option<Entity<CommandPalette>>,
 }
 
 impl MainWindow {
@@ -44,22 +75,17 @@ impl MainWindow {
         let editor = cx.new(|cx| EditorPane::new(cx));
 
         // ── Compiler thread ──────────────────────────────────────────────────
-        // Channel for delivering CompileResult from the compiler thread to GPUI.
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CompileResult>();
 
         let compiler_handle = spawn_compiler_thread(move |result| {
-            // Called on the compiler thread — unbounded_send is non-blocking.
             let _ = tx.unbounded_send(result);
         });
 
-        // Wire the compiler handle into the editor pane.
         let preview_for_editor = preview.clone();
         editor.update(cx, |pane, _cx| {
             pane.set_compiler(compiler_handle, preview_for_editor);
         });
 
-        // Spawn a task to deliver compile results to the preview pane.
-        // Context::spawn takes (WeakEntity<Self>, &mut AsyncApp); we ignore the first arg.
         let preview_for_task = preview.clone();
         cx.spawn(async move |_this, cx| {
             while let Some(result) = rx.next().await {
@@ -102,6 +128,10 @@ impl MainWindow {
             editor,
             preview,
             sidebar_visible: true,
+            sidebar_width: 220.0,
+            preview_width: 420.0,
+            drag: None,
+            palette: None,
         }
     }
 
@@ -109,10 +139,111 @@ impl MainWindow {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
     }
+
+    fn open_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // If already open, close it (toggle).
+        if self.palette.is_some() {
+            self.palette = None;
+            cx.notify();
+            return;
+        }
+
+        let palette = cx.new(|cx| CommandPalette::new(cx));
+
+        // Focus the palette so it captures key events.
+        palette.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
+            match event {
+                PaletteEvent::Close => {
+                    this.palette = None;
+                    cx.notify();
+                }
+                PaletteEvent::Execute(id) => {
+                    this.palette = None;
+                    cx.notify();
+                    // Dispatch the corresponding GPUI action into the focus chain.
+                    match *id {
+                        // Helix :commands
+                        "write" | "save-file" => cx.dispatch_action(&SaveFile),
+                        "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
+                        "quit" => cx.dispatch_action(&Quit),
+                        "quit-force" => cx.dispatch_action(&ForceQuit),
+                        "reload" => cx.dispatch_action(&ReloadFile),
+                        "open" | "open-vault" => cx.dispatch_action(&OpenVault),
+                        "new" | "new-note" => cx.dispatch_action(&NewNote),
+                        "buffer-next" => cx.dispatch_action(&BufferNext),
+                        "buffer-previous" => cx.dispatch_action(&BufferPrevious),
+                        "buffer-close" => cx.dispatch_action(&BufferClose),
+                        // GUI commands
+                        "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
+                        "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
+                        _ => {} // other commands are stubs
+                    }
+                }
+            }
+        })
+        .detach();
+
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    fn on_handle_mouse_down(
+        &mut self,
+        target: DragTarget,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let start_width = match target {
+            DragTarget::Sidebar => self.sidebar_width,
+            DragTarget::Preview => self.preview_width,
+        };
+        self.drag = Some(DragState {
+            target,
+            start_x: f32::from(event.position.x),
+            start_width,
+        });
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ref drag) = self.drag else { return };
+        let dx = f32::from(event.position.x) - drag.start_x;
+        match drag.target {
+            DragTarget::Sidebar => {
+                self.sidebar_width = (drag.start_width + dx).clamp(120.0, 480.0);
+            }
+            DragTarget::Preview => {
+                // Dragging the preview handle right → preview shrinks.
+                self.preview_width = (drag.start_width - dx).clamp(200.0, 900.0);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.drag = None;
+    }
 }
 
-/// Load the file at `abs_path` into `editor`, using `vault` to resolve the
-/// vault root.  No-op if the vault is not open.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn open_file_in_editor(
     abs_path: &PathBuf,
     editor: &Entity<EditorPane>,
@@ -141,13 +272,11 @@ fn open_file_in_editor(
     };
 
     editor.update(cx, |pane, cx| {
-        // `open_file` needs a Window reference for focus management.
-        // We don't have one here (subscribe callback is App-only), so we
-        // defer focus to the next render via cx.notify.
-        // A proper focus transfer is wired in a future story via Window access.
         pane.open_file_no_focus(&file, vault_root, cx);
     });
 }
+
+// ── Focusable ─────────────────────────────────────────────────────────────────
 
 impl Focusable for MainWindow {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -155,39 +284,68 @@ impl Focusable for MainWindow {
     }
 }
 
+// ── Render ────────────────────────────────────────────────────────────────────
+
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drag handle: a 4px vertical strip with ew-resize cursor.
+        let handle = |target: DragTarget, cx: &mut Context<Self>| {
+            div()
+                .w(px(4.0))
+                .h_full()
+                .cursor_ew_resize()
+                .bg(gpui::rgb(theme::BORDER_SUBTLE))
+                .hover(|s| s.bg(gpui::rgb(theme::OCHRE_DIM)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event, window, cx| {
+                        this.on_handle_mouse_down(target, event, window, cx);
+                    }),
+                )
+        };
+
         let mut root = div()
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .flex_row()
             .bg(gpui::rgb(theme::BG_SURFACE))
-            .on_action(cx.listener(|_this, _: &OpenCommandPalette, _window, _cx| {
-                // Story 08: open command palette UI
-            }))
-            .on_action(cx.listener(Self::toggle_sidebar));
+            .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 
         if self.sidebar_visible {
-            root = root.child(self.sidebar.clone());
+            root = root
+                .child(
+                    div()
+                        .w(px(self.sidebar_width))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(self.sidebar.clone()),
+                )
+                .child(handle(DragTarget::Sidebar, cx));
         }
 
-        root = root
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .child(self.editor.clone()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(gpui::rgb(theme::BORDER_SUBTLE))
-                    .child(self.preview.clone()),
-            );
-
-        root
+        root.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_hidden()
+                .child(self.editor.clone()),
+        )
+        .child(handle(DragTarget::Preview, cx))
+        .child(
+            div()
+                .w(px(self.preview_width))
+                .h_full()
+                .overflow_hidden()
+                .child(self.preview.clone()),
+        )
+        // Command palette overlay — painted after all other content via deferred().
+        .when_some(self.palette.clone(), |root, palette| {
+            root.child(gpui::deferred(palette).with_priority(100))
+        })
     }
 }

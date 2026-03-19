@@ -92,6 +92,16 @@ fn main() {
             // Story 02+: vault-wide full-text search
         });
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &ForceQuit, cx| cx.quit());
+        cx.on_action(|_: &SaveFileAndQuit, _cx| {
+            // TODO: trigger save on active editor then quit
+        });
+        cx.on_action(|_: &ReloadFile, _cx| {
+            // TODO: reload active file from disk
+        });
+        cx.on_action(|_: &BufferNext, _cx| {});
+        cx.on_action(|_: &BufferPrevious, _cx| {});
+        cx.on_action(|_: &BufferClose, _cx| {});
 
         // Quit when the last window closes.
         cx.on_window_closed(|cx| {
@@ -153,20 +163,31 @@ fn set_dock_icon() {
 }
 
 fn register_builtin_commands(registry: &mut CommandRegistry) {
+    // Each entry: (id, display name, keybinding hint shown in the picker).
+    // Helix `:command` names are listed first so they appear when typing
+    // short-form prefixes (e.g. typing "w" surfaces "write").
     let cmds: &[(&'static str, &'static str, Option<&'static str>)] = &[
-        ("open-command-palette", "Open Command Palette", Some("Cmd-P")),
-        ("open-vault", "Open Vault", Some("Cmd-O")),
-        ("new-note", "New Note", Some("Cmd-N")),
-        ("save-file", "Save File", Some("Cmd-S")),
-        ("toggle-sidebar", "Toggle Sidebar", Some("Cmd-B")),
-        ("split-pane-vertical", "Split Pane Vertical", Some("Cmd-\\")),
-        (
-            "split-pane-horizontal",
-            "Split Pane Horizontal",
-            Some("Cmd-Shift-\\"),
-        ),
-        ("open-quick-switch", "Quick Switch", Some("Cmd-K")),
-        ("vault-search", "Vault Search", Some("Cmd-Shift-F")),
+        // ── Helix :commands ──────────────────────────────────────────────────
+        ("write",           "write  · save file",                   Some(":w")),
+        ("write-quit",      "write-quit  · save and quit",          Some(":wq")),
+        ("quit",            "quit  · close ockr",                   Some(":q")),
+        ("quit-force",      "quit!  · quit without saving",         Some(":q!")),
+        ("reload",          "reload  · discard changes, reload",    Some(":reload")),
+        ("open",            "open  · open vault / file",            Some(":o")),
+        ("new",             "new  · new note",                      Some(":new")),
+        ("buffer-next",     "buffer-next  · next open buffer",      Some(":bn")),
+        ("buffer-previous", "buffer-previous  · previous buffer",   Some(":bp")),
+        ("buffer-close",    "buffer-close  · close current buffer", Some(":bc")),
+        ("toggle-sidebar",  "toggle-sidebar",                       Some(":toggle-sidebar")),
+        // ── GUI commands (Cmd-* shortcuts) ───────────────────────────────────
+        ("open-command-palette", "Open Command Palette",            Some("Cmd-P / :")),
+        ("open-vault",           "Open Vault",                      Some("Cmd-O")),
+        ("new-note",             "New Note",                        Some("Cmd-N")),
+        ("save-file",            "Save File",                       Some("Cmd-S")),
+        ("open-quick-switch",    "Quick Switch",                    Some("Cmd-K")),
+        ("vault-search",         "Vault Search",                    Some("Cmd-Shift-F")),
+        ("split-pane-vertical",  "Split Pane Vertical",             Some("Cmd-\\")),
+        ("split-pane-horizontal","Split Pane Horizontal",           Some("Cmd-Shift-\\")),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));
