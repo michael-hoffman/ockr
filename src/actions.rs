@@ -26,7 +26,9 @@ actions!(
         // Navigation
         OpenQuickSwitch,
         OpenBacklinks,
-        VaultSearch,
+        OpenVaultSearch,
+        FollowLink,
+        OpenDailyNote,
         BufferNext,
         BufferPrevious,
         BufferClose,

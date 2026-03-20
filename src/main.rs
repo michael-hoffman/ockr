@@ -49,7 +49,9 @@ fn main() {
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
-            KeyBinding::new("cmd-shift-f", VaultSearch, None),
+            KeyBinding::new("cmd-shift-f", OpenVaultSearch, None),
+            KeyBinding::new("cmd-enter", FollowLink, None),
+            KeyBinding::new("cmd-t", OpenDailyNote, None),
             KeyBinding::new("cmd-backslash", SplitPaneVertical, None),
             KeyBinding::new("cmd-shift-backslash", SplitPaneHorizontal, None),
             KeyBinding::new("cmd-q", Quit, None),
@@ -95,7 +97,7 @@ fn main() {
         cx.on_action(|_: &OpenQuickSwitch, _cx| {
             // Story 11: quick note switcher
         });
-        cx.on_action(|_: &VaultSearch, _cx| {
+        cx.on_action(|_: &OpenVaultSearch, _cx| {
             // Story 02+: vault-wide full-text search
         });
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -193,6 +195,8 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("save-file",            "Save File",                       Some("Cmd-S")),
         ("open-quick-switch",    "Quick Switch",                    Some("Cmd-K")),
         ("vault-search",         "Vault Search",                    Some("Cmd-Shift-F")),
+        ("follow-link",          "Follow Link",                     Some("Cmd-Enter")),
+        ("open-daily-note",      "Open Daily Note",                 Some("Cmd-T")),
         ("split-pane-vertical",  "Split Pane Vertical",             Some("Cmd-\\")),
         ("split-pane-horizontal","Split Pane Horizontal",           Some("Cmd-Shift-\\")),
     ];

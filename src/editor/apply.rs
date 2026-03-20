@@ -326,12 +326,34 @@ pub fn apply<B: Buffer>(
                     let start = state.selection.start();
                     let end = state.selection.end();
                     if start.line == end.line {
+                        // Same-line: delete slice [start.col, end.col).
                         let deleted = buf.line(start.line)[start.col..end.col].to_string();
                         state.yank_register = deleted;
                         buf.delete_range(start.line, start.col, end.col);
                         state.move_cursor_to(start);
+                    } else {
+                        // Cross-line: yank then delete.
+                        // Collect yanked text: tail of start line + full middle lines + head of end line.
+                        let mut yanked = buf.line(start.line)[start.col..].to_string();
+                        yanked.push('\n');
+                        for l in start.line + 1..end.line {
+                            yanked.push_str(buf.line(l));
+                            yanked.push('\n');
+                        }
+                        yanked.push_str(&buf.line(end.line)[..end.col]);
+                        state.yank_register = yanked;
+                        // Delete: trim start line, delete middles, trim end line, then join.
+                        let start_line_len = buf.line(start.line).len();
+                        buf.delete_range(start.line, start.col, start_line_len);
+                        buf.delete_range(end.line, 0, end.col);
+                        // Delete all lines between start and end (now shifted).
+                        for _ in start.line + 1..end.line {
+                            buf.join_with_next(start.line);
+                        }
+                        // Join start line with the trimmed end line.
+                        buf.join_with_next(start.line);
+                        state.move_cursor_to(start);
                     }
-                    // Multi-line char selection: defer to a future story.
                 }
                 _ => {
                     // In Normal mode, fall back to DeleteLine.
@@ -468,6 +490,27 @@ pub fn apply<B: Buffer>(
             (state, None)
         }
 
+        MoveWORDForward => {
+            let pos = state.cursor();
+            let new_pos = word_forward_whitespace(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+
+        MoveWORDBackward => {
+            let pos = state.cursor();
+            let new_pos = word_backward_whitespace(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+
+        MoveWORDEnd => {
+            let pos = state.cursor();
+            let new_pos = word_end_forward_whitespace(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+
         MoveFirstNonWhitespace => {
             let line = state.cursor().line;
             let s = buf.line(line);
@@ -555,6 +598,93 @@ pub fn apply<B: Buffer>(
                 let cursor_pos = state.selection.cursor;
                 state.mode = Mode::Normal;
                 state.move_cursor_to(cursor_pos);
+            }
+            (state, None)
+        }
+
+        TrimSelection => {
+            match state.mode {
+                Mode::Normal => {
+                    // In Normal mode behave like `^`: jump to first non-whitespace.
+                    let line = state.cursor().line;
+                    let s = buf.line(line);
+                    let col: usize = s
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .map(|c| c.len_utf8())
+                        .sum();
+                    navigate(&mut state, Pos::new(line, col));
+                }
+                Mode::Visual(_) => {
+                    let mut start = state.selection.start();
+                    let mut end   = state.selection.end();
+
+                    // ── Advance start past leading whitespace ──────────────
+                    'fwd: loop {
+                        let s = buf.line(start.line);
+                        // Skip whitespace chars from start.col onwards.
+                        let mut col = start.col;
+                        for ch in s[col..].chars() {
+                            if !ch.is_whitespace() {
+                                break 'fwd;
+                            }
+                            col += ch.len_utf8();
+                        }
+                        // Entire remainder of this line is whitespace; move to next.
+                        if start.line >= end.line {
+                            // Selection is all whitespace — leave it alone.
+                            break 'fwd;
+                        }
+                        start = Pos::new(start.line + 1, 0);
+                    }
+                    // Clamp start to actual content.
+                    {
+                        let s = buf.line(start.line);
+                        let ws: usize = s[start.col..]
+                            .chars()
+                            .take_while(|c| c.is_whitespace())
+                            .map(|c| c.len_utf8())
+                            .sum();
+                        start.col += ws;
+                    }
+
+                    // ── Retreat end past trailing whitespace ───────────────
+                    'bwd: loop {
+                        let s = buf.line(end.line);
+                        // In Visual Line the "end col" is the full line length;
+                        // in Visual Char it is exclusive, so clamp to len.
+                        let bound = end.col.min(s.len());
+                        let chars_before: Vec<char> = s[..bound].chars().collect();
+                        let trim: usize = chars_before
+                            .iter()
+                            .rev()
+                            .take_while(|c| c.is_whitespace())
+                            .map(|c| c.len_utf8())
+                            .sum();
+                        if trim < bound {
+                            end.col = bound - trim;
+                            break 'bwd;
+                        }
+                        // Entire line is whitespace; retreat to previous line.
+                        if end.line <= start.line {
+                            break 'bwd;
+                        }
+                        end = Pos::new(end.line - 1, buf.line(end.line - 1).len());
+                    }
+
+                    // Rebuild selection: original anchor/cursor direction is
+                    // preserved — whichever endpoint was the anchor stays the anchor.
+                    let original_start_was_anchor =
+                        state.selection.anchor <= state.selection.cursor;
+                    state.selection = if original_start_was_anchor {
+                        Selection { anchor: start, cursor: end }
+                    } else {
+                        Selection { anchor: end, cursor: start }
+                    };
+                    // Switch to Visual Char so the trimmed bounds make sense.
+                    state.mode = Mode::Visual(VisualKind::Char);
+                }
+                Mode::Insert => {} // no-op in Insert mode
             }
             (state, None)
         }
@@ -821,6 +951,25 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
             return Pos::new(0, 0);
         }
     }
+}
+
+// ── WORD motions (whitespace-only boundaries; W / B / E) ──────────────────────
+
+/// Move forward one WORD: skip non-whitespace, then skip whitespace.
+/// Identical boundary rule to `word_forward` — both only split on whitespace —
+/// but provided as a distinct function so the intent is explicit in the dispatch.
+fn word_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    word_forward(pos, buf)
+}
+
+/// Move backward one WORD: find the start of the previous whitespace-delimited run.
+fn word_backward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    word_backward(pos, buf)
+}
+
+/// Move to the end of the current/next WORD (whitespace-delimited).
+fn word_end_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    word_end_forward(pos, buf)
 }
 
 #[cfg(test)]
@@ -1194,5 +1343,79 @@ mod tests {
         s.move_cursor_to(Pos::new(30, 0));
         let (s2, _) = apply(ScrollHalfUp, s, &mut b);
         assert_eq!(s2.cursor().line, 10);
+    }
+
+    // ── WORD motion tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn move_word_forward_whitespace_advances_over_punct() {
+        // "foo.bar baz" — W skips "foo.bar" as a single WORD, then "baz"
+        let mut b = buf("foo.bar baz");
+        let s = normal_state(); // col 0
+        let (s2, _) = apply(MoveWORDForward, s, &mut b);
+        // Next WORD starts at col 8 ("baz")
+        assert_eq!(s2.cursor(), Pos::new(0, 8));
+    }
+
+    #[test]
+    fn move_word_backward_whitespace_jumps_over_punct() {
+        let mut b = buf("foo.bar baz");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 9)); // inside "baz"
+        let (s2, _) = apply(MoveWORDBackward, s, &mut b);
+        // Previous WORD starts at col 8 ("baz")
+        assert_eq!(s2.cursor(), Pos::new(0, 8));
+    }
+
+    #[test]
+    fn move_word_end_whitespace_lands_on_last_char_of_word() {
+        let mut b = buf("foo.bar baz");
+        let s = normal_state(); // col 0
+        let (s2, _) = apply(MoveWORDEnd, s, &mut b);
+        // End of first WORD "foo.bar" is col 6
+        assert_eq!(s2.cursor(), Pos::new(0, 6));
+    }
+
+    // ── TrimSelection tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn trim_selection_normal_moves_to_first_nonws() {
+        let mut b = buf("   hello world");
+        let s = normal_state(); // col 0
+        let (s2, _) = apply(TrimSelection, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 3));
+        assert_eq!(s2.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn trim_selection_visual_line_strips_leading_and_trailing_ws() {
+        // Line 0: "  hello  " → content at 2..7 (col 2 to col 7, exclusive)
+        let mut b = buf("  hello  ");
+        let mut s = visual_char_state();
+        // Select the whole line manually via anchor/cursor
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 9), // past end of "  hello  "
+        };
+        let (s2, _) = apply(TrimSelection, s, &mut b);
+        // Should trim to col 2 (start of "hello") and col 7 (end of "hello")
+        let sel_start = s2.selection.start();
+        let sel_end   = s2.selection.end();
+        assert_eq!(sel_start, Pos::new(0, 2));
+        assert_eq!(sel_end,   Pos::new(0, 7));
+        assert_eq!(s2.mode, Mode::Visual(VisualKind::Char));
+    }
+
+    #[test]
+    fn trim_selection_visual_already_trimmed_is_noop() {
+        let mut b = buf("hello");
+        let mut s = visual_char_state();
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 5),
+        };
+        let (s2, _) = apply(TrimSelection, s, &mut b);
+        assert_eq!(s2.selection.start(), Pos::new(0, 0));
+        assert_eq!(s2.selection.end(),   Pos::new(0, 5));
     }
 }

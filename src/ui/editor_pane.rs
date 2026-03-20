@@ -41,11 +41,11 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, Render, Window, div, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px,
 };
 
-use crate::actions::{OpenCommandPalette, SaveFile};
+use crate::actions::{FollowLink, OpenCommandPalette, SaveFile};
 use crate::compiler::{preprocess::preprocess_wikilinks, CompileRequest, CompilerHandle};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -57,6 +57,16 @@ use crate::editor::{
 use crate::ui::preview::PreviewPane;
 use crate::ui::theme::ThemePalette;
 use crate::vault::{VaultFile, VaultState};
+
+// ── Events ────────────────────────────────────────────────────────────────────
+
+/// Events emitted by `EditorPane` to its subscribers (e.g. `MainWindow`).
+pub enum EditorPaneEvent {
+    /// Request that MainWindow open the given file.
+    OpenFile(PathBuf),
+}
+
+impl EventEmitter<EditorPaneEvent> for EditorPane {}
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
@@ -163,6 +173,50 @@ impl EditorPane {
             vault_root: self.vault_root.clone(),
             file_path: self.file_rel_path.clone(),
         });
+    }
+
+    /// Find the `[[wikilink]]` under the cursor and resolve it to an absolute path.
+    ///
+    /// Scans the current line for `[[...]]` spans; returns the target file path
+    /// if the cursor column falls inside any such span and the title resolves to
+    /// a known vault file.
+    fn resolve_wikilink_at_cursor(&self, cx: &App) -> Option<PathBuf> {
+        let vault = self.vault.as_ref()?.read(cx);
+        let pos = self.state.cursor();
+        let line = self.buffer.line(pos.line);
+        let col = pos.col;
+
+        let mut offset = 0usize;
+        while let Some(rel_open) = line[offset..].find("[[") {
+            let open = offset + rel_open;
+            let inner_start = open + 2;
+            if let Some(rel_close) = line[inner_start..].find("]]") {
+                let close = inner_start + rel_close;
+                // Is cursor inside [[...]]?
+                if col >= open && col < close + 2 {
+                    let inner = &line[inner_start..close];
+                    // Strip display text after `|`.
+                    let target = inner.split('|').next().unwrap_or(inner).trim();
+                    let key = normalise_title(target);
+                    for file in &vault.files {
+                        if normalise_title(&file.title) == key {
+                            return Some(file.abs_path.clone());
+                        }
+                    }
+                    return None;
+                }
+                offset = close + 2;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    fn follow_link(&mut self, _: &FollowLink, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.resolve_wikilink_at_cursor(cx) {
+            cx.emit(EditorPaneEvent::OpenFile(path));
+        }
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -559,6 +613,7 @@ impl Render for EditorPane {
                 this.save(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(Self::follow_link))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
             .child(
@@ -715,6 +770,16 @@ fn keystroke_to_command(event: &KeyDownEvent, state: &EditorState) -> EditorComm
     }
 }
 
+/// Normalise a wikilink title for case-insensitive, fuzzy matching.
+/// Mirrors the logic in `compiler::preprocess`.
+fn normalise_title(s: &str) -> String {
+    s.to_lowercase()
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Normal-mode key → command.  Called with `pending_g = false` already handled
 /// in the caller for multi-key sequences like `gv` / `gg`.
 fn key_normal(event: &KeyDownEvent) -> EditorCommand {
@@ -748,6 +813,9 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "w" => MoveWordForward,
         "b" => MoveWordBackward,
         "e" => MoveWordEnd,
+        "W" => MoveWORDForward,
+        "B" => MoveWORDBackward,
+        "E" => MoveWORDEnd,
         "0" => MoveStartOfLine,
         "$" => MoveEndOfLine,
         "^" => MoveFirstNonWhitespace,
@@ -755,6 +823,7 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "G" => MoveEndOfDocument,
         // Collapse Visual selection (no-op in Normal, but consistent binding)
         ";" => CollapseSelection,
+        "_" => TrimSelection,
         // Insert-mode entry
         "i" => EnterInsert,
         "a" => AppendAfterCursor,
@@ -809,6 +878,8 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
         "<" => DedentLines,
         // Collapse selection to cursor endpoint, return to Normal.
         ";" => CollapseSelection,
+        // Trim leading/trailing whitespace from the selection bounds.
+        "_" => TrimSelection,
         // All motions extend the selection (anchor fixed, cursor moves).
         "h" => MoveLeft,
         "l" => MoveRight,
@@ -817,6 +888,9 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
         "w" => MoveWordForward,
         "b" => MoveWordBackward,
         "e" => MoveWordEnd,
+        "W" => MoveWORDForward,
+        "B" => MoveWORDBackward,
+        "E" => MoveWORDEnd,
         "0" => MoveStartOfLine,
         "$" => MoveEndOfLine,
         "^" => MoveFirstNonWhitespace,

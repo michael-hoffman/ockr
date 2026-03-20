@@ -96,6 +96,12 @@ pub enum EditorCommand {
     MoveWordBackward,
     /// Move to the end of the current/next word (`e`).
     MoveWordEnd,
+    /// Move forward one WORD (whitespace-delimited; `W`).
+    MoveWORDForward,
+    /// Move backward one WORD (`B`).
+    MoveWORDBackward,
+    /// Move to the end of the current/next WORD (`E`).
+    MoveWORDEnd,
     /// Move to the first non-whitespace character on the current line (`^`).
     MoveFirstNonWhitespace,
     /// Scroll (move cursor) half a page down — ~20 lines (`Ctrl-d`).
@@ -109,6 +115,11 @@ pub enum EditorCommand {
     DeleteWordBefore,
     /// Collapse the current Visual selection to its cursor endpoint and return to Normal (`;`).
     CollapseSelection,
+    /// Trim leading/trailing whitespace from the selection bounds (`_`).
+    /// In Visual mode the selection is shrunk to exclude whitespace at both ends;
+    /// the mode switches to Visual Char if it was Visual Line.
+    /// In Normal mode the cursor moves to the first non-whitespace char (identical to `^`).
+    TrimSelection,
 
     // ── Mode transitions ───────────────────────────────────────────────────
     /// Enter Normal mode (Escape / Ctrl-[).

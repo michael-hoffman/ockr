@@ -7,7 +7,7 @@
 
 /// A `(line, column)` position in the buffer. Both are 0-indexed.
 /// `col` is a *byte* offset within the line's UTF-8 string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Pos {
     pub line: usize,
     pub col: usize,

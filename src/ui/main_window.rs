@@ -23,14 +23,15 @@ use gpui::{
 
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ForceQuit, NewNote, OpenBacklinks,
-    OpenCommandPalette, OpenQuickSwitch, OpenVault, Quit, ReloadFile, SaveFile, SaveFileAndQuit,
-    ToggleSidebar,
+    OpenCommandPalette, OpenDailyNote, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit,
+    ReloadFile, SaveFile, SaveFileAndQuit, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
-use crate::ui::editor_pane::EditorPane;
+use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
+use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
 use crate::ui::preview::PreviewPane;
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::theme::ThemePalette;
@@ -74,6 +75,8 @@ pub struct MainWindow {
     quick_switch: Option<Entity<QuickSwitch>>,
     /// Backlink panel overlay — `Some` while open.
     backlinks: Option<Entity<BacklinkPanel>>,
+    /// Vault search overlay — `Some` while open.
+    vault_search: Option<Entity<VaultSearch>>,
     /// Absolute paths of recently opened notes, most-recent first. Capped at 20.
     recent_paths: Vec<PathBuf>,
 }
@@ -131,6 +134,16 @@ impl MainWindow {
         })
         .detach();
 
+        // ── Editor → MainWindow wiring (e.g. follow-link opens a file) ──────
+        cx.subscribe(&editor, |this, _, event: &EditorPaneEvent, cx| {
+            match event {
+                EditorPaneEvent::OpenFile(path) => {
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             sidebar,
@@ -144,6 +157,7 @@ impl MainWindow {
             palette: None,
             quick_switch: None,
             backlinks: None,
+            vault_search: None,
             recent_paths: Vec::new(),
         }
     }
@@ -151,6 +165,56 @@ impl MainWindow {
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
+    }
+
+    /// Create (if needed) and open today's daily note under `.ockr/daily/YYYY-MM-DD.typ`.
+    fn open_daily_note(
+        &mut self,
+        _: &OpenDailyNote,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.vault.read(cx).root.clone() else { return };
+
+        // Compute today's date in local time.
+        let today = time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let date_str = format!(
+            "{:04}-{:02}-{:02}",
+            today.year(),
+            today.month() as u8,
+            today.day()
+        );
+
+        // Ensure the daily notes directory exists.
+        let daily_dir = root.join(".ockr").join("daily");
+        let _ = std::fs::create_dir_all(&daily_dir);
+
+        let note_path = daily_dir.join(format!("{date_str}.typ"));
+
+        // Create the note if it doesn't exist yet.
+        if !note_path.exists() {
+            let content = minimal_daily_template(&date_str);
+            let _ = std::fs::write(&note_path, content);
+        }
+
+        // Re-scan the vault so the new file shows up in the index.
+        self.vault.update(cx, |vs, _cx| {
+            *vs = crate::vault::VaultState::open(root.clone());
+        });
+
+        // Open it in the editor.
+        let rel = PathBuf::from(".ockr/daily").join(format!("{date_str}.typ"));
+        let vault_files = self.vault.read(cx).files.clone();
+        if let Some(file) = vault_files.iter().find(|f| f.rel_path == rel).cloned() {
+            self.editor.update(cx, |pane, cx| {
+                pane.open_file(&file, root, window, cx);
+            });
+            self.recent_paths.retain(|p| p != &note_path);
+            self.recent_paths.insert(0, note_path);
+            self.recent_paths.truncate(20);
+            cx.notify();
+        }
     }
 
     /// Open a file by absolute path and record it in the recency list.
@@ -263,6 +327,42 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn open_vault_search(
+        &mut self,
+        _: &OpenVaultSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle.
+        if self.vault_search.is_some() {
+            self.vault_search = None;
+            cx.notify();
+            return;
+        }
+
+        let files = self.vault.read(cx).files.clone();
+        let panel = cx.new(|cx| VaultSearch::new(files, cx));
+        panel.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&panel, |this, _, event: &VaultSearchEvent, cx| {
+            match event {
+                VaultSearchEvent::Close => {
+                    this.vault_search = None;
+                    cx.notify();
+                }
+                VaultSearchEvent::Open(path) => {
+                    this.vault_search = None;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        })
+        .detach();
+
+        self.vault_search = Some(panel);
+        cx.notify();
+    }
+
     fn open_palette(
         &mut self,
         _: &OpenCommandPalette,
@@ -306,6 +406,8 @@ impl MainWindow {
                         // GUI commands
                         "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
                         "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
+                        "vault-search" => cx.dispatch_action(&OpenVaultSearch),
+                        "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
                         _ => {} // other commands are stubs
                     }
                 }
@@ -366,6 +468,13 @@ impl MainWindow {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Generate the default content for a new daily note.
+fn minimal_daily_template(date: &str) -> String {
+    format!(
+        "= {date}\n\n// Daily note — {date}\n\n"
+    )
+}
 
 fn open_file_in_editor(
     abs_path: &PathBuf,
@@ -440,7 +549,9 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_backlinks))
+            .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::open_daily_note))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 
@@ -480,6 +591,9 @@ impl Render for MainWindow {
             root.child(gpui::deferred(qs).with_priority(100))
         })
         .when_some(self.backlinks.clone(), |root, panel| {
+            root.child(gpui::deferred(panel).with_priority(100))
+        })
+        .when_some(self.vault_search.clone(), |root, panel| {
             root.child(gpui::deferred(panel).with_priority(100))
         })
     }
