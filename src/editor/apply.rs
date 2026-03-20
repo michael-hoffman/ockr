@@ -461,6 +461,104 @@ pub fn apply<B: Buffer>(
             (state, None)
         }
 
+        MoveWordEnd => {
+            let pos = state.cursor();
+            let new_pos = word_end_forward(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+
+        MoveFirstNonWhitespace => {
+            let line = state.cursor().line;
+            let s = buf.line(line);
+            let col: usize = s
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(|c| c.len_utf8())
+                .sum();
+            navigate(&mut state, Pos::new(line, col));
+            (state, None)
+        }
+
+        ScrollHalfDown => {
+            let pos = state.cursor();
+            let total = buf.line_count();
+            let new_line = (pos.line + 20).min(total - 1);
+            let new_col = pos.col.min(buf.line(new_line).len());
+            navigate(&mut state, Pos::new(new_line, new_col));
+            (state, None)
+        }
+
+        ScrollHalfUp => {
+            let pos = state.cursor();
+            let new_line = pos.line.saturating_sub(20);
+            let new_col = pos.col.min(buf.line(new_line).len());
+            navigate(&mut state, Pos::new(new_line, new_col));
+            (state, None)
+        }
+
+        ReplaceChar(ch) => {
+            let pos = state.cursor();
+            let line_str = buf.line(pos.line);
+            if pos.col < line_str.len() {
+                let next = next_char_boundary(line_str, pos.col);
+                buf.delete_range(pos.line, pos.col, next);
+                buf.insert(pos.line, pos.col, &ch);
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
+        DeleteWordBefore => {
+            let pos = state.cursor();
+            let s = buf.line(pos.line).to_owned();
+            if pos.col == 0 && pos.line > 0 {
+                // At line start: join with previous line.
+                let prev_len = buf.line(pos.line - 1).len();
+                buf.join_with_next(pos.line - 1);
+                state.move_cursor_to(Pos::new(pos.line - 1, prev_len));
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                let prefix = &s[..pos.col];
+                // Skip trailing whitespace.
+                let ws: usize = prefix
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let mid = pos.col - ws;
+                // Skip word characters.
+                let word: usize = s[..mid]
+                    .chars()
+                    .rev()
+                    .take_while(|c| !c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let del_start = mid - word;
+                if del_start < pos.col {
+                    buf.delete_range(pos.line, del_start, pos.col);
+                    state.move_cursor_to(Pos::new(pos.line, del_start));
+                    state.is_dirty = true;
+                    (state, BufferChanged)
+                } else {
+                    (state, None)
+                }
+            }
+        }
+
+        CollapseSelection => {
+            if let Mode::Visual(_) = state.mode {
+                let cursor_pos = state.selection.cursor;
+                state.mode = Mode::Normal;
+                state.move_cursor_to(cursor_pos);
+            }
+            (state, None)
+        }
+
         // ── Visual-mode entry ──────────────────────────────────────────────
         EnterVisualChar => {
             let pos = state.cursor();
@@ -635,6 +733,60 @@ fn word_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
         } else {
             return Pos::new(line, s.len());
         }
+    }
+}
+
+/// Move to the end of the current word (or next word if at a word boundary).
+///
+/// Always advances at least one character so repeated presses make progress.
+/// Lands on the last byte of the last character in the word.
+fn word_end_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    let total = buf.line_count();
+
+    // Advance at least one character first.
+    let (mut line, mut col) = {
+        let s = buf.line(pos.line);
+        if pos.col < s.len() {
+            (pos.line, next_char_boundary(s, pos.col))
+        } else if pos.line + 1 < total {
+            (pos.line + 1, 0)
+        } else {
+            return pos;
+        }
+    };
+
+    loop {
+        let s = buf.line(line);
+
+        // Skip leading whitespace.
+        let ws: usize = s[col..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(|c| c.len_utf8())
+            .sum();
+        col += ws;
+
+        if col >= s.len() {
+            // Line exhausted — move to next.
+            if line + 1 < total {
+                line += 1;
+                col = 0;
+                continue;
+            }
+            return Pos::new(line, s.len().saturating_sub(1));
+        }
+
+        // Walk through non-whitespace chars; land on the last one.
+        let mut last = col;
+        let mut cur = col;
+        for c in s[col..].chars() {
+            if c.is_whitespace() {
+                break;
+            }
+            last = cur;
+            cur += c.len_utf8();
+        }
+        return Pos::new(line, last);
     }
 }
 
@@ -950,5 +1102,97 @@ mod tests {
         s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 5) };
         let (s2, _) = apply(ChangeSelection, s, &mut b);
         assert_eq!(s2.mode, Mode::Insert);
+    }
+
+    // ── Story: helix parity — new motion tests ────────────────────────────────
+
+    #[test]
+    fn move_word_end_advances_to_word_end() {
+        let mut b = buf("hello world foo");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 0));
+        let (s2, _) = apply(MoveWordEnd, s, &mut b);
+        // "hello" ends at col 4
+        assert_eq!(s2.cursor(), Pos::new(0, 4));
+    }
+
+    #[test]
+    fn move_word_end_skips_whitespace_to_next_word() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 4)); // at end of "hello"
+        let (s2, _) = apply(MoveWordEnd, s, &mut b);
+        // Should jump to end of "world" = col 10
+        assert_eq!(s2.cursor(), Pos::new(0, 10));
+    }
+
+    #[test]
+    fn move_first_non_whitespace_skips_leading_spaces() {
+        let mut b = buf("   hello");
+        let s = normal_state();
+        let (s2, _) = apply(MoveFirstNonWhitespace, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 3));
+    }
+
+    #[test]
+    fn move_first_non_whitespace_no_indent() {
+        let mut b = buf("hello");
+        let s = normal_state();
+        let (s2, _) = apply(MoveFirstNonWhitespace, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 0));
+    }
+
+    #[test]
+    fn replace_char_replaces_and_stays_normal() {
+        let mut b = buf("abc");
+        let s = normal_state();
+        let (s2, effect) = apply(ReplaceChar("X".into()), s, &mut b);
+        assert_eq!(b.line(0), "Xbc");
+        assert_eq!(s2.cursor(), Pos::new(0, 0));
+        assert_eq!(effect, SideEffect::BufferChanged);
+    }
+
+    #[test]
+    fn delete_word_before_removes_previous_word() {
+        let mut b = buf("hello world");
+        let mut s = EditorState::new();
+        s.mode = Mode::Insert;
+        s.move_cursor_to(Pos::new(0, 11)); // end of "world"
+        let (s2, effect) = apply(DeleteWordBefore, s, &mut b);
+        assert_eq!(b.line(0), "hello ");
+        assert_eq!(s2.cursor(), Pos::new(0, 6));
+        assert_eq!(effect, SideEffect::BufferChanged);
+    }
+
+    #[test]
+    fn collapse_selection_exits_visual_to_cursor() {
+        let mut b = buf("hello world");
+        let mut s = visual_char_state();
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 5),
+        };
+        let (s2, _) = apply(CollapseSelection, s, &mut b);
+        assert_eq!(s2.mode, Mode::Normal);
+        assert_eq!(s2.cursor(), Pos::new(0, 5));
+    }
+
+    #[test]
+    fn scroll_half_down_moves_cursor_20_lines() {
+        let text = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let mut b = InMemoryBuffer::from_text(&text);
+        let s = normal_state();
+        let (s2, _) = apply(ScrollHalfDown, s, &mut b);
+        assert_eq!(s2.cursor().line, 20);
+    }
+
+    #[test]
+    fn scroll_half_up_moves_cursor_20_lines() {
+        let text = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let mut b = InMemoryBuffer::from_text(&text);
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(30, 0));
+        let (s2, _) = apply(ScrollHalfUp, s, &mut b);
+        assert_eq!(s2.cursor().line, 10);
     }
 }

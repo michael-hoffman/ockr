@@ -94,6 +94,21 @@ pub enum EditorCommand {
     MoveWordForward,
     /// Move backward one word (to the start of the previous word).
     MoveWordBackward,
+    /// Move to the end of the current/next word (`e`).
+    MoveWordEnd,
+    /// Move to the first non-whitespace character on the current line (`^`).
+    MoveFirstNonWhitespace,
+    /// Scroll (move cursor) half a page down — ~20 lines (`Ctrl-d`).
+    ScrollHalfDown,
+    /// Scroll (move cursor) half a page up — ~20 lines (`Ctrl-u`).
+    ScrollHalfUp,
+
+    /// Replace the character under the cursor with the given char and stay in Normal (`r<c>`).
+    ReplaceChar(String),
+    /// Delete the word before the cursor in Insert mode (`Ctrl-w`).
+    DeleteWordBefore,
+    /// Collapse the current Visual selection to its cursor endpoint and return to Normal (`;`).
+    CollapseSelection,
 
     // ── Mode transitions ───────────────────────────────────────────────────
     /// Enter Normal mode (Escape / Ctrl-[).

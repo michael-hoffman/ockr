@@ -11,22 +11,30 @@
 //! Every keystroke → `EditorCommand` → `apply(cmd, state, buf)` → `(state, SideEffect)`.
 //! Undo is handled outside the pure state machine (snapshots stored here).
 //!
-//! ## Key map (Story 07 — Vi/Helix hybrid)
+//! ## Key map (Stories 07 + helix parity)
 //!
 //! Normal mode:
-//!   h/j/k/l     — movement          w/b          — word motion
-//!   0/$         — line start/end    g/G          — doc start/end
+//!   h/j/k/l     — movement          w/b/e        — word motion (start/back/end)
+//!   0/$         — line start/end    ^            — first non-whitespace
+//!   gg/G        — doc start/end
+//!   g h/l/s     — line start / line end / first non-ws (g-prefix)
 //!   x           — select line (Helix `x`)
 //!   d           — delete selection / delete line (dd analogue)
 //!   y           — yank line (yy)    p/P          — paste after/before
 //!   i/a/I/A     — enter insert      o/O          — open line below/above
 //!   c/C         — change line / to EOL
-//!   u           — undo
+//!   r<c>        — replace char at cursor
+//!   v/V         — enter Visual Char / Line       gv — reselect last visual
+//!   Ctrl-V      — enter Visual Block
+//!   u           — undo              Ctrl-r       — redo
+//!   Ctrl-d/u    — scroll half page down / up
+//!   ;           — collapse selection (no-op in Normal)
 //!   Escape      — enter Normal
 //!
 //! Insert mode:
 //!   printable   — insert char       Backspace    — delete before
 //!   Enter       — newline           Escape       — Normal
+//!   Ctrl-w      — delete word before cursor
 //!   arrows / Home / End / Delete    Cmd-S        — save
 //!   Cmd-V       — paste clipboard
 
@@ -59,6 +67,8 @@ pub struct EditorPane {
     /// Undo stack: each entry is (full buffer text, cursor position before mutation).
     /// Capped at 200 entries.
     undo_history: Vec<(String, Pos)>,
+    /// Redo stack: populated when undo is applied; cleared on any normal edit.
+    redo_history: Vec<(String, Pos)>,
     compiler: Option<CompilerHandle>,
     preview: Option<Entity<PreviewPane>>,
     /// Live vault reference for wikilink resolution during compilation.
@@ -70,6 +80,8 @@ pub struct EditorPane {
     /// Pending `g` key: true while waiting for the second key of a `g…` sequence
     /// (e.g. `gg` → go to start, `gv` → reselect last visual).
     pending_g: bool,
+    /// Pending `r` key: true while waiting for the replacement character.
+    pending_replace: bool,
 }
 
 impl EditorPane {
@@ -79,12 +91,14 @@ impl EditorPane {
             state: EditorState::new(),
             buffer: InMemoryBuffer::empty(),
             undo_history: Vec::new(),
+            redo_history: Vec::new(),
             compiler: None,
             preview: None,
             vault: None,
             vault_root: None,
             file_rel_path: None,
             pending_g: false,
+            pending_replace: false,
         }
     }
 
@@ -180,7 +194,18 @@ impl EditorPane {
     }
 
     /// Push a snapshot onto the undo stack before a mutating operation.
+    /// Also clears the redo stack so that new edits don't conflict with redo history.
     fn push_undo(&mut self) {
+        self.push_undo_impl();
+        self.redo_history.clear();
+    }
+
+    /// Push onto undo without clearing redo — used internally during redo.
+    fn push_undo_keeping_redo(&mut self) {
+        self.push_undo_impl();
+    }
+
+    fn push_undo_impl(&mut self) {
         let snapshot = (self.buffer.text(), self.state.cursor());
         // Deduplicate: don't push if identical to the most recent snapshot.
         if self.undo_history.last().map(|(t, _)| t == &snapshot.0).unwrap_or(false) {
@@ -256,6 +281,26 @@ impl EditorPane {
             && self.state.mode != Mode::Insert
         {
             if let Some((text, pos)) = self.undo_history.pop() {
+                // Save current state to redo stack before restoring.
+                let redo_snap = (self.buffer.text(), self.state.cursor());
+                self.redo_history.push(redo_snap);
+                self.buffer = InMemoryBuffer::from_text(&text);
+                self.state.mode = Mode::Normal;
+                self.state.move_cursor_to(pos);
+                self.state.is_dirty = true;
+                self.trigger_compile(cx);
+                cx.notify();
+            }
+            return;
+        }
+
+        // ── Redo (Ctrl-r in Normal/Visual) ───────────────────────────────
+        if k.modifiers.control && k.key == "r" && !k.modifiers.platform
+            && self.state.mode != Mode::Insert
+        {
+            if let Some((text, pos)) = self.redo_history.pop() {
+                // Save current state to undo stack (without clearing redo).
+                self.push_undo_keeping_redo();
                 self.buffer = InMemoryBuffer::from_text(&text);
                 self.state.mode = Mode::Normal;
                 self.state.move_cursor_to(pos);
@@ -267,6 +312,37 @@ impl EditorPane {
         }
 
         // ── Multi-key sequences ──────────────────────────────────────────
+        // `r` in Normal mode: wait for the replacement character.
+        if self.state.mode == Mode::Normal && k.key == "r"
+            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
+        {
+            self.pending_replace = true;
+            self.pending_g = false;
+            return;
+        }
+        if self.pending_replace {
+            self.pending_replace = false;
+            if self.state.mode == Mode::Normal {
+                if let Some(ch) = &k.key_char {
+                    if !k.modifiers.control && !k.modifiers.platform {
+                        self.push_undo();
+                        let prev = std::mem::take(&mut self.state);
+                        let (new_state, effect) = apply(
+                            EditorCommand::ReplaceChar(ch.clone()),
+                            prev,
+                            &mut self.buffer,
+                        );
+                        self.state = new_state;
+                        if effect == SideEffect::BufferChanged {
+                            self.trigger_compile(cx);
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+            return;
+        }
+
         // `g` in Normal mode starts a two-key sequence: `gg` = start of doc,
         // `gv` = reselect last visual.  We track the pending state here.
         if self.state.mode == Mode::Normal && k.key == "g"
@@ -287,14 +363,26 @@ impl EditorPane {
         }
         if self.pending_g {
             self.pending_g = false;
-            if self.state.mode == Mode::Normal && k.key == "v"
-                && !k.modifiers.platform && !k.modifiers.control
-            {
-                let prev = std::mem::take(&mut self.state);
-                let (new_state, _) = apply(EditorCommand::ReselectLastVisual, prev, &mut self.buffer);
-                self.state = new_state;
-                cx.notify();
-                return;
+            if !k.modifiers.platform && !k.modifiers.control {
+                let cmd = match k.key.as_str() {
+                    "v" if self.state.mode == Mode::Normal => {
+                        Some(EditorCommand::ReselectLastVisual)
+                    }
+                    // gh → go to line start, gl → go to line end, gs → first non-whitespace
+                    "h" => Some(EditorCommand::MoveStartOfLine),
+                    "l" => Some(EditorCommand::MoveEndOfLine),
+                    "s" => Some(EditorCommand::MoveFirstNonWhitespace),
+                    // ge → go to end of current/prev word (use MoveWordEnd from current pos)
+                    "e" => Some(EditorCommand::MoveWordEnd),
+                    _ => None,
+                };
+                if let Some(cmd) = cmd {
+                    let prev = std::mem::take(&mut self.state);
+                    let (new_state, _) = apply(cmd, prev, &mut self.buffer);
+                    self.state = new_state;
+                    cx.notify();
+                    return;
+                }
             }
             // Unknown `g…` sequence — fall through to normal handling.
         }
@@ -544,6 +632,8 @@ fn render_line(
         };
         let mut row = div()
             .min_h(line_height)
+            .whitespace_nowrap()
+            .overflow_x_hidden()
             .text_color(text_color)
             .text_sm()
             .font_family("Menlo")
@@ -600,6 +690,8 @@ fn render_line(
         .min_h(line_height)
         .flex()
         .flex_row()
+        .whitespace_nowrap()
+        .overflow_x_hidden()
         .text_sm()
         .font_family("Menlo")
         .child(div().text_color(gpui::rgb(t.text_muted)).child(before))
@@ -631,10 +723,12 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
 
     // Ctrl combos handled before the main guard so Ctrl-V can enter Visual Block.
     if k.modifiers.control && !k.modifiers.platform {
-        if k.key == "v" {
-            return EnterVisualBlock;
-        }
-        return Noop;
+        return match k.key.as_str() {
+            "v" => EnterVisualBlock,
+            "d" => ScrollHalfDown,
+            "u" => ScrollHalfUp,
+            _ => Noop,
+        };
     }
     // Guard against remaining Cmd combos (handled in handle_key_down).
     if k.modifiers.platform {
@@ -653,10 +747,14 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "j" => MoveDown,
         "w" => MoveWordForward,
         "b" => MoveWordBackward,
+        "e" => MoveWordEnd,
         "0" => MoveStartOfLine,
         "$" => MoveEndOfLine,
+        "^" => MoveFirstNonWhitespace,
         // `g` alone is handled as pending by the caller; single-g falls through to Noop.
         "G" => MoveEndOfDocument,
+        // Collapse Visual selection (no-op in Normal, but consistent binding)
+        ";" => CollapseSelection,
         // Insert-mode entry
         "i" => EnterInsert,
         "a" => AppendAfterCursor,
@@ -691,10 +789,12 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
     if k.modifiers.platform {
         return Noop;
     }
-    // Ctrl combos — Ctrl-V cycles back to Visual Block.
+    // Ctrl combos — Ctrl-V cycles back to Visual Block; Ctrl-d/u scroll.
     if k.modifiers.control {
         return match k.key.as_str() {
             "v" => EnterVisualBlock,
+            "d" => ScrollHalfDown,
+            "u" => ScrollHalfUp,
             _ => Noop,
         };
     }
@@ -707,6 +807,8 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
         // Indent / dedent and stay in visual
         ">" => IndentLines,
         "<" => DedentLines,
+        // Collapse selection to cursor endpoint, return to Normal.
+        ";" => CollapseSelection,
         // All motions extend the selection (anchor fixed, cursor moves).
         "h" => MoveLeft,
         "l" => MoveRight,
@@ -714,8 +816,10 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
         "k" => MoveUp,
         "w" => MoveWordForward,
         "b" => MoveWordBackward,
+        "e" => MoveWordEnd,
         "0" => MoveStartOfLine,
         "$" => MoveEndOfLine,
+        "^" => MoveFirstNonWhitespace,
         "G" => MoveEndOfDocument,
         // Switch between visual modes without leaving visual
         "v" => EnterVisualChar,
@@ -731,6 +835,13 @@ fn key_insert(event: &KeyDownEvent) -> EditorCommand {
     if k.modifiers.platform {
         return Noop;
     }
+    // Ctrl combos in Insert mode.
+    if k.modifiers.control {
+        return match k.key.as_str() {
+            "w" => DeleteWordBefore,    // Ctrl-w: delete word before cursor
+            _ => Noop,
+        };
+    }
     match k.key.as_str() {
         "escape" => EnterNormal,
         "backspace" => DeleteCharBefore,
@@ -744,9 +855,7 @@ fn key_insert(event: &KeyDownEvent) -> EditorCommand {
         "end" => MoveEndOfLine,
         _ => {
             if let Some(c) = &k.key_char {
-                if !k.modifiers.control {
-                    return Insert(c.clone());
-                }
+                return Insert(c.clone());
             }
             Noop
         }
@@ -773,6 +882,8 @@ fn is_buffer_mutating(cmd: &EditorCommand) -> bool {
             | ChangeLine
             | ChangeToLineEnd
             | DeleteSelection
+            | ReplaceChar(_)
+            | DeleteWordBefore
     )
 }
 

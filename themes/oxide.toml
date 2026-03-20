@@ -18,7 +18,7 @@ border_subtle = "#2A2A2A"   # secondary dividers
 
 # ── Accent (ochre) ────────────────────────────────────────────────────────────
 ochre        = "#CC7722"   # full ochre — buttons, active indicators
-ochre_dim    = "#201306"   # ochre/10 — selected tab bg, etc.
+ochre_dim    = "#4A2810"   # ochre/35 — selection highlight
 ochre_border = "#3D2008"   # ochre/20 — border-level accent
 
 # ── Text ──────────────────────────────────────────────────────────────────────
