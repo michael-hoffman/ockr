@@ -4,7 +4,11 @@
 //! `.ockr/` directory inside the vault for its own metadata (index, backlinks,
 //! lockfile, settings). Everything else is plain `.typ` files.
 
+pub mod backlinks;
+
 use std::path::{Path, PathBuf};
+
+pub use backlinks::BacklinkIndex;
 
 /// A single note file within the vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +30,8 @@ pub struct VaultState {
     pub root: Option<PathBuf>,
     /// All `.typ` files in the vault, sorted by title.
     pub files: Vec<VaultFile>,
+    /// In-memory backlink graph. Updated on open and on each file save.
+    pub backlinks: BacklinkIndex,
 }
 
 impl VaultState {
@@ -33,6 +39,7 @@ impl VaultState {
         Self {
             root: None,
             files: Vec::new(),
+            backlinks: BacklinkIndex::new(),
         }
     }
 
@@ -46,10 +53,19 @@ impl VaultState {
         }
 
         let files = scan_for_typ_files(&root);
+        let backlinks = BacklinkIndex::build(&files);
         Self {
             root: Some(root),
             files,
+            backlinks,
         }
+    }
+
+    /// Re-index a single file after it has been saved.
+    /// `content` is the new raw source (before wikilink preprocessing).
+    pub fn reindex_file(&mut self, file: &VaultFile, content: &str) {
+        let files = self.files.clone();
+        self.backlinks.update_file(file, content, &files);
     }
 }
 

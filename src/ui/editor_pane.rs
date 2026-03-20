@@ -38,7 +38,7 @@ use gpui::{
 };
 
 use crate::actions::{OpenCommandPalette, SaveFile};
-use crate::compiler::{CompileRequest, CompilerHandle};
+use crate::compiler::{preprocess::preprocess_wikilinks, CompileRequest, CompilerHandle};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -47,8 +47,8 @@ use crate::editor::{
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
 use crate::ui::preview::PreviewPane;
-use crate::ui::theme;
-use crate::vault::VaultFile;
+use crate::ui::theme::ThemePalette;
+use crate::vault::{VaultFile, VaultState};
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
@@ -61,10 +61,15 @@ pub struct EditorPane {
     undo_history: Vec<(String, Pos)>,
     compiler: Option<CompilerHandle>,
     preview: Option<Entity<PreviewPane>>,
+    /// Live vault reference for wikilink resolution during compilation.
+    vault: Option<Entity<VaultState>>,
     vault_root: Option<PathBuf>,
     /// Vault-relative path of the open file (e.g. `"notes/foo.typ"`).
     /// Sent with every CompileRequest so the world resolves imports correctly.
     file_rel_path: Option<String>,
+    /// Pending `g` key: true while waiting for the second key of a `g…` sequence
+    /// (e.g. `gg` → go to start, `gv` → reselect last visual).
+    pending_g: bool,
 }
 
 impl EditorPane {
@@ -76,9 +81,20 @@ impl EditorPane {
             undo_history: Vec::new(),
             compiler: None,
             preview: None,
+            vault: None,
             vault_root: None,
             file_rel_path: None,
+            pending_g: false,
         }
+    }
+
+    pub fn set_vault(&mut self, vault: Entity<VaultState>) {
+        self.vault = Some(vault);
+    }
+
+    /// Vault-relative path of the currently open file, if any.
+    pub fn current_rel_path(&self) -> Option<&str> {
+        self.file_rel_path.as_deref()
     }
 
     pub fn set_compiler(&mut self, handle: CompilerHandle, preview: Entity<PreviewPane>) {
@@ -115,24 +131,51 @@ impl EditorPane {
             .map(|p| p.to_string_lossy().into_owned());
         self.vault_root = Some(vault_root);
         self.undo_history.clear();
-        self.trigger_compile();
+        self.trigger_compile(cx);
         cx.notify();
     }
 
-    fn trigger_compile(&self) {
-        if let Some(compiler) = &self.compiler {
-            compiler.send(CompileRequest {
-                source: self.buffer.text(),
-                vault_root: self.vault_root.clone(),
-                file_path: self.file_rel_path.clone(),
-            });
-        }
+    fn trigger_compile(&self, cx: &App) {
+        let Some(compiler) = &self.compiler else { return };
+        // Resolve wikilinks against the current vault file list before compiling.
+        let files = self
+            .vault
+            .as_ref()
+            .map(|v| v.read(cx).files.clone())
+            .unwrap_or_default();
+        let source = preprocess_wikilinks(&self.buffer.text(), &files);
+        compiler.send(CompileRequest {
+            source,
+            vault_root: self.vault_root.clone(),
+            file_path: self.file_rel_path.clone(),
+        });
     }
 
-    fn save(&mut self) {
-        if let Some(path) = &self.state.path {
-            let _ = std::fs::write(path, self.buffer.text());
-            self.state.is_dirty = false;
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.state.path.clone() else { return };
+        let content = self.buffer.text();
+        let _ = std::fs::write(&path, &content);
+        self.state.is_dirty = false;
+
+        // Incrementally update the backlink index for this file.
+        if let Some(vault) = &self.vault {
+            if let Some(rel) = &self.file_rel_path {
+                let rel_path = std::path::PathBuf::from(rel);
+                let title = rel_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let file = crate::vault::VaultFile {
+                    rel_path: rel_path.clone(),
+                    abs_path: path,
+                    title,
+                };
+                let content_clone = content.clone();
+                vault.update(cx, |vs, _cx| {
+                    vs.reindex_file(&file, &content_clone);
+                });
+            }
         }
     }
 
@@ -152,7 +195,7 @@ impl EditorPane {
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let k = &event.keystroke;
@@ -160,7 +203,7 @@ impl EditorPane {
         // ── Global shortcuts handled before the state machine ─────────────
         // Cmd-S: save (also bound as GPUI action but catching here for robustness).
         if k.modifiers.platform && k.key == "s" {
-            self.save();
+            self.save(cx);
             cx.notify();
             return;
         }
@@ -173,7 +216,7 @@ impl EditorPane {
                     let prev = std::mem::take(&mut self.state);
                     let (new_state, _) = apply(EditorCommand::PasteFromClipboard(text), prev, &mut self.buffer);
                     self.state = new_state;
-                    self.trigger_compile();
+                    self.trigger_compile(cx);
                     cx.notify();
                 }
             }
@@ -197,7 +240,7 @@ impl EditorPane {
                 let prev = std::mem::take(&mut self.state);
                 let (new_state, _) = apply(EditorCommand::DeleteLine, prev, &mut self.buffer);
                 self.state = new_state;
-                self.trigger_compile();
+                self.trigger_compile(cx);
             }
             cx.notify();
             return;
@@ -217,10 +260,43 @@ impl EditorPane {
                 self.state.mode = Mode::Normal;
                 self.state.move_cursor_to(pos);
                 self.state.is_dirty = true;
-                self.trigger_compile();
+                self.trigger_compile(cx);
                 cx.notify();
             }
             return;
+        }
+
+        // ── Multi-key sequences ──────────────────────────────────────────
+        // `g` in Normal mode starts a two-key sequence: `gg` = start of doc,
+        // `gv` = reselect last visual.  We track the pending state here.
+        if self.state.mode == Mode::Normal && k.key == "g"
+            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
+        {
+            if self.pending_g {
+                // Second `g` → go to start of document.
+                self.pending_g = false;
+                let cmd = EditorCommand::MoveStartOfDocument;
+                let prev = std::mem::take(&mut self.state);
+                let (new_state, _) = apply(cmd, prev, &mut self.buffer);
+                self.state = new_state;
+                cx.notify();
+            } else {
+                self.pending_g = true;
+            }
+            return;
+        }
+        if self.pending_g {
+            self.pending_g = false;
+            if self.state.mode == Mode::Normal && k.key == "v"
+                && !k.modifiers.platform && !k.modifiers.control
+            {
+                let prev = std::mem::take(&mut self.state);
+                let (new_state, _) = apply(EditorCommand::ReselectLastVisual, prev, &mut self.buffer);
+                self.state = new_state;
+                cx.notify();
+                return;
+            }
+            // Unknown `g…` sequence — fall through to normal handling.
         }
 
         let cmd = keystroke_to_command(event, &self.state);
@@ -228,13 +304,10 @@ impl EditorPane {
             return;
         }
 
-        // OpenPalette is a UI command — dispatch it to the window action chain.
-        // Must be deferred: we're inside a window update (the key-down handler),
-        // so the window slot is already taken. dispatch_action would silently
-        // fail trying to re-enter the same window. Deferring lets the window
-        // update cycle finish before the action is dispatched.
+        // OpenPalette is a UI command — bubble it up through the window focus chain
+        // so MainWindow's on_action handler receives it.
         if cmd == EditorCommand::OpenPalette {
-            cx.defer(|cx| cx.dispatch_action(&OpenCommandPalette));
+            window.dispatch_action(Box::new(OpenCommandPalette), cx);
             return;
         }
 
@@ -249,11 +322,11 @@ impl EditorPane {
 
         match effect {
             SideEffect::BufferChanged => {
-                self.trigger_compile();
+                self.trigger_compile(cx);
                 cx.notify();
             }
             SideEffect::SaveFile => {
-                self.save();
+                self.save(cx);
                 cx.notify();
             }
             SideEffect::None => {
@@ -306,6 +379,7 @@ impl Focusable for EditorPane {
 
 impl Render for EditorPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<ThemePalette>().clone();
         let line_count = self.buffer.line_count();
         let cursor = self.state.cursor();
         let mode = self.state.mode;
@@ -318,7 +392,7 @@ impl Render for EditorPane {
             let text = self.buffer.line(i).to_string();
             let in_selection = is_line_in_visual_selection(i, mode, &selection);
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
-            line_elements.push(render_line(i, text, cursor, mode, in_selection, is_front_matter));
+            line_elements.push(render_line(i, text, cursor, mode, in_selection, is_front_matter, &t));
         }
 
         let mode_label = match mode {
@@ -327,9 +401,9 @@ impl Render for EditorPane {
             Mode::Visual(_) => "VISUAL",
         };
         let mode_color = match mode {
-            Mode::Insert => gpui::rgb(theme::MODE_INSERT),
-            Mode::Normal => gpui::rgb(theme::MODE_NORMAL),
-            Mode::Visual(_) => gpui::rgb(theme::MODE_VISUAL),
+            Mode::Insert => gpui::rgb(t.mode_insert),
+            Mode::Normal => gpui::rgb(t.mode_normal),
+            Mode::Visual(_) => gpui::rgb(t.mode_visual),
         };
 
         // o| logo mark — dark variant matching the app icon.
@@ -344,14 +418,14 @@ impl Render for EditorPane {
                     .font_family("Menlo")
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_xs()
-                    .text_color(gpui::rgb(theme::TEXT))
+                    .text_color(gpui::rgb(t.text))
                     .child("o"),
             )
             .child(
                 div()
                     .w(gpui::px(2.0))
                     .h(gpui::px(11.0))
-                    .bg(gpui::rgb(theme::OCHRE)),
+                    .bg(gpui::rgb(t.ochre)),
             );
 
         let status_bar = div()
@@ -361,9 +435,9 @@ impl Render for EditorPane {
             .gap_3()
             .px_3()
             .py_1()
-            .bg(gpui::rgb(theme::BG_BASE))
+            .bg(gpui::rgb(t.bg_base))
             .border_t_1()
-            .border_color(gpui::rgb(theme::BORDER_SUBTLE))
+            .border_color(gpui::rgb(t.border_subtle))
             .text_xs()
             .child(logo)
             .child(
@@ -374,13 +448,13 @@ impl Render for EditorPane {
             )
             .child(
                 div()
-                    .text_color(gpui::rgb(theme::TEXT_FAINT))
+                    .text_color(gpui::rgb(t.text_faint))
                     .font_family("Menlo")
                     .child(format!("{}:{}", cursor.line + 1, cursor.col + 1)),
             )
             .child(if self.state.is_dirty {
                 div()
-                    .text_color(gpui::rgb(theme::OCHRE))
+                    .text_color(gpui::rgb(t.ochre))
                     .child("●")
                     .into_any_element()
             } else {
@@ -392,9 +466,9 @@ impl Render for EditorPane {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui::rgb(theme::BG_PANEL))
+            .bg(gpui::rgb(t.bg_panel))
             .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
-                this.save();
+                this.save(cx);
                 cx.notify();
             }))
             .on_key_down(cx.listener(Self::handle_key_down))
@@ -450,11 +524,12 @@ fn render_line(
     mode: Mode,
     in_selection: bool,
     is_front_matter: bool,
+    t: &ThemePalette,
 ) -> impl gpui::IntoElement {
     let line_height = px(20.0);
 
     // Selection highlight: entire-line background for Visual(Line).
-    let sel_bg = gpui::rgb(theme::OCHRE_DIM);
+    let sel_bg = gpui::rgb(t.ochre_dim);
     let line_bg = if in_selection && line_idx != cursor.line {
         Some(sel_bg)
     } else {
@@ -463,9 +538,9 @@ fn render_line(
 
     if line_idx != cursor.line {
         let text_color = if is_front_matter {
-            gpui::rgb(theme::TEXT_FAINT)
+            gpui::rgb(t.text_faint)
         } else {
-            gpui::rgb(theme::TEXT_MUTED)
+            gpui::rgb(t.text_muted)
         };
         let mut row = div()
             .min_h(line_height)
@@ -502,21 +577,21 @@ fn render_line(
     };
 
     let cursor_color = match mode {
-        Mode::Insert => gpui::rgb(theme::MODE_INSERT),
-        Mode::Normal => gpui::rgb(theme::MODE_NORMAL),
-        Mode::Visual(_) => gpui::rgb(theme::MODE_VISUAL),
+        Mode::Insert => gpui::rgb(t.mode_insert),
+        Mode::Normal => gpui::rgb(t.mode_normal),
+        Mode::Visual(_) => gpui::rgb(t.mode_visual),
     };
 
     // Insert mode → bar cursor (left border); Normal/Visual → block (filled bg).
     let cursor_cell = if mode == Mode::Insert {
         div()
-            .text_color(gpui::rgb(theme::TEXT_MUTED))
+            .text_color(gpui::rgb(t.text_muted))
             .border_l_2()
             .border_color(cursor_color)
             .child(cursor_char)
     } else {
         div()
-            .text_color(gpui::rgb(theme::CURSOR_FG))
+            .text_color(gpui::rgb(t.cursor_fg))
             .bg(cursor_color)
             .child(cursor_char)
     };
@@ -527,12 +602,12 @@ fn render_line(
         .flex_row()
         .text_sm()
         .font_family("Menlo")
-        .child(div().text_color(gpui::rgb(theme::TEXT_MUTED)).child(before))
+        .child(div().text_color(gpui::rgb(t.text_muted)).child(before))
         .child(cursor_cell)
-        .child(div().text_color(gpui::rgb(theme::TEXT_MUTED)).child(after));
+        .child(div().text_color(gpui::rgb(t.text_muted)).child(after));
 
     if in_selection {
-        row = row.bg(gpui::rgb(theme::OCHRE_DIM));
+        row = row.bg(gpui::rgb(t.ochre_dim));
     }
 
     row.into_any_element()
@@ -548,11 +623,21 @@ fn keystroke_to_command(event: &KeyDownEvent, state: &EditorState) -> EditorComm
     }
 }
 
+/// Normal-mode key → command.  Called with `pending_g = false` already handled
+/// in the caller for multi-key sequences like `gv` / `gg`.
 fn key_normal(event: &KeyDownEvent) -> EditorCommand {
     use EditorCommand::*;
     let k = &event.keystroke;
-    // Guard against Cmd/Ctrl combos (those are handled in handle_key_down).
-    if k.modifiers.platform || k.modifiers.control {
+
+    // Ctrl combos handled before the main guard so Ctrl-V can enter Visual Block.
+    if k.modifiers.control && !k.modifiers.platform {
+        if k.key == "v" {
+            return EnterVisualBlock;
+        }
+        return Noop;
+    }
+    // Guard against remaining Cmd combos (handled in handle_key_down).
+    if k.modifiers.platform {
         return Noop;
     }
     // `:` opens the command palette (Helix-mode convention, like Zed).
@@ -570,7 +655,7 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "b" => MoveWordBackward,
         "0" => MoveStartOfLine,
         "$" => MoveEndOfLine,
-        "g" if !k.modifiers.shift => MoveStartOfDocument,
+        // `g` alone is handled as pending by the caller; single-g falls through to Noop.
         "G" => MoveEndOfDocument,
         // Insert-mode entry
         "i" => EnterInsert,
@@ -590,6 +675,12 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "P" => PasteBefore,
         // Helix-style: `x` selects the line, then `d` (mapped to DeleteSelection in visual) deletes it.
         "x" => SelectCurrentLine,
+        // Visual-mode entry
+        "v" => EnterVisualChar,
+        "V" => EnterVisualLine,
+        // Indent / dedent (single-line, same key as visual-mode versions)
+        ">" => IndentLines,
+        "<" => DedentLines,
         _ => Noop,
     }
 }
@@ -597,19 +688,38 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
 fn key_visual(event: &KeyDownEvent) -> EditorCommand {
     use EditorCommand::*;
     let k = &event.keystroke;
-    if k.modifiers.platform || k.modifiers.control {
+    if k.modifiers.platform {
         return Noop;
+    }
+    // Ctrl combos — Ctrl-V cycles back to Visual Block.
+    if k.modifiers.control {
+        return match k.key.as_str() {
+            "v" => EnterVisualBlock,
+            _ => Noop,
+        };
     }
     match k.key.as_str() {
         "escape" => EnterNormal,
+        // Operators on selection
         "d" | "x" => DeleteSelection,
         "y" => YankSelection,
-        "c" => ChangeLine,
-        // Motions extend the selection (simplified: just move cursor).
+        "c" => ChangeSelection,
+        // Indent / dedent and stay in visual
+        ">" => IndentLines,
+        "<" => DedentLines,
+        // All motions extend the selection (anchor fixed, cursor moves).
         "h" => MoveLeft,
         "l" => MoveRight,
         "j" => MoveDown,
         "k" => MoveUp,
+        "w" => MoveWordForward,
+        "b" => MoveWordBackward,
+        "0" => MoveStartOfLine,
+        "$" => MoveEndOfLine,
+        "G" => MoveEndOfDocument,
+        // Switch between visual modes without leaving visual
+        "v" => EnterVisualChar,
+        "V" => EnterVisualLine,
         _ => Noop,
     }
 }

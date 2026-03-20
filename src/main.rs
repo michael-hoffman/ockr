@@ -12,12 +12,18 @@ use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, PathPromptOptions, SharedString,
     TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
+use ui::theme::ThemePalette;
 use vault::VaultState;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
         set_dock_icon();
+
+        // Load the Oxide theme (dark, ochre accent).
+        // Ochre (light) is available via ThemePalette::ochre() when wanted.
+        cx.set_global(ThemePalette::oxide());
+
         // Initialize the command registry as a GPUI global.
         let mut registry = CommandRegistry::new();
         register_builtin_commands(&mut registry);
@@ -42,6 +48,7 @@ fn main() {
             KeyBinding::new("cmd-s", SaveFile, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
+            KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
             KeyBinding::new("cmd-shift-f", VaultSearch, None),
             KeyBinding::new("cmd-backslash", SplitPaneVertical, None),
             KeyBinding::new("cmd-shift-backslash", SplitPaneHorizontal, None),

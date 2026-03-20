@@ -1,0 +1,36 @@
+# ockr · Oxide theme (dark)
+#
+# Palette: near-black volcanic darks with ochre (#CC7722) accent.
+# Inspired by oxidised iron — warm but heavy.
+
+name = "Oxide"
+variant = "dark"
+
+# ── Backgrounds ───────────────────────────────────────────────────────────────
+bg_base    = "#0A0A0A"   # deepest background — body / root
+bg_panel   = "#151515"   # editor and preview panel fill
+bg_surface = "#1A1A1A"   # sidebar and window chrome
+bg_hover   = "#222222"   # subtle hover overlay
+
+# ── Borders ───────────────────────────────────────────────────────────────────
+border        = "#161616"   # primary border — barely-there on bg_base
+border_subtle = "#2A2A2A"   # secondary dividers
+
+# ── Accent (ochre) ────────────────────────────────────────────────────────────
+ochre        = "#CC7722"   # full ochre — buttons, active indicators
+ochre_dim    = "#201306"   # ochre/10 — selected tab bg, etc.
+ochre_border = "#3D2008"   # ochre/20 — border-level accent
+
+# ── Text ──────────────────────────────────────────────────────────────────────
+text        = "#F4F4F5"   # primary text — zinc-100
+text_muted  = "#A1A1AA"   # secondary text — zinc-400
+text_subtle = "#71717A"   # tertiary / placeholder — zinc-500
+text_faint  = "#52525B"   # barely-visible — zinc-600
+
+# ── Mode indicator colours ────────────────────────────────────────────────────
+mode_insert = "#528BFF"   # bright blue
+mode_normal = "#CC7722"   # ochre (matches accent)
+mode_visual = "#A855F7"   # purple
+
+# ── Cursor ────────────────────────────────────────────────────────────────────
+cursor_fg = "#0A0A0A"   # text colour on top of a block cursor fill

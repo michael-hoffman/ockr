@@ -1,0 +1,36 @@
+# ockr · Ochre theme (light)
+#
+# Palette: warm cream and parchment tones with deep-ochre accent.
+# Comfortable in daylight; high contrast without harsh white.
+
+name = "Ochre"
+variant = "light"
+
+# ── Backgrounds ───────────────────────────────────────────────────────────────
+bg_base    = "#FDFAF5"   # warm cream — root surface
+bg_panel   = "#F5F0E8"   # editor and preview panel
+bg_surface = "#EDE7D9"   # sidebar and window chrome
+bg_hover   = "#E0D8C8"   # hover overlay
+
+# ── Borders ───────────────────────────────────────────────────────────────────
+border        = "#D8D0C0"   # primary border
+border_subtle = "#C8BFA8"   # secondary dividers
+
+# ── Accent (deep ochre) ───────────────────────────────────────────────────────
+ochre        = "#A05C10"   # deep ochre — buttons, active indicators
+ochre_dim    = "#F0E8D8"   # ochre/10 tint — selected bg
+ochre_border = "#D4A870"   # ochre/40 — border-level accent
+
+# ── Text ──────────────────────────────────────────────────────────────────────
+text        = "#1C1A17"   # primary text — near-black warm
+text_muted  = "#4A4540"   # secondary text
+text_subtle = "#7A7268"   # tertiary / placeholder
+text_faint  = "#A09890"   # barely-visible
+
+# ── Mode indicator colours ────────────────────────────────────────────────────
+mode_insert = "#1D5EBF"   # deep blue
+mode_normal = "#A05C10"   # deep ochre (matches accent)
+mode_visual = "#7C3AED"   # deep purple
+
+# ── Cursor ────────────────────────────────────────────────────────────────────
+cursor_fg = "#FDFAF5"   # text on top of block cursor — match bg_base

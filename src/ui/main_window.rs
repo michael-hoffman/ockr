@@ -22,15 +22,18 @@ use gpui::{
 };
 
 use crate::actions::{
-    BufferClose, BufferNext, BufferPrevious, ForceQuit, NewNote, OpenCommandPalette, OpenVault,
-    Quit, ReloadFile, SaveFile, SaveFileAndQuit, ToggleSidebar,
+    BufferClose, BufferNext, BufferPrevious, ForceQuit, NewNote, OpenBacklinks,
+    OpenCommandPalette, OpenQuickSwitch, OpenVault, Quit, ReloadFile, SaveFile, SaveFileAndQuit,
+    ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult};
+use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
+use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
 use crate::ui::editor_pane::EditorPane;
 use crate::ui::preview::PreviewPane;
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
-use crate::ui::theme;
+use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
 
 // ── Drag state ────────────────────────────────────────────────────────────────
@@ -58,6 +61,7 @@ pub struct MainWindow {
     sidebar: Entity<Sidebar>,
     editor: Entity<EditorPane>,
     preview: Entity<PreviewPane>,
+    vault: Entity<VaultState>,
     sidebar_visible: bool,
     /// Width of the sidebar pane in pixels.
     sidebar_width: f32,
@@ -66,6 +70,12 @@ pub struct MainWindow {
     drag: Option<DragState>,
     /// Command palette overlay — `Some` while the palette is open.
     palette: Option<Entity<CommandPalette>>,
+    /// Quick switch overlay — `Some` while open.
+    quick_switch: Option<Entity<QuickSwitch>>,
+    /// Backlink panel overlay — `Some` while open.
+    backlinks: Option<Entity<BacklinkPanel>>,
+    /// Absolute paths of recently opened notes, most-recent first. Capped at 20.
+    recent_paths: Vec<PathBuf>,
 }
 
 impl MainWindow {
@@ -73,6 +83,7 @@ impl MainWindow {
         let sidebar = cx.new(|cx| Sidebar::new(vault.clone(), cx));
         let preview = cx.new(|_| PreviewPane::new());
         let editor = cx.new(|cx| EditorPane::new(cx));
+        editor.update(cx, |pane, _cx| pane.set_vault(vault.clone()));
 
         // ── Compiler thread ──────────────────────────────────────────────────
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CompileResult>();
@@ -111,12 +122,10 @@ impl MainWindow {
         .detach();
 
         // ── Sidebar → editor wiring ──────────────────────────────────────────
-        let editor_for_sub = editor.clone();
-        let vault_for_sub = vault.clone();
-        cx.subscribe(&sidebar, move |_, _, event: &SidebarEvent, cx| {
+        cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| {
             match event {
                 SidebarEvent::OpenFile(abs_path) => {
-                    open_file_in_editor(abs_path, &editor_for_sub, &vault_for_sub, cx);
+                    this.open_path(abs_path.clone(), cx);
                 }
             }
         })
@@ -127,16 +136,130 @@ impl MainWindow {
             sidebar,
             editor,
             preview,
+            vault: vault.clone(),
             sidebar_visible: true,
             sidebar_width: 220.0,
             preview_width: 420.0,
             drag: None,
             palette: None,
+            quick_switch: None,
+            backlinks: None,
+            recent_paths: Vec::new(),
         }
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    /// Open a file by absolute path and record it in the recency list.
+    fn open_path(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
+        open_file_in_editor(&abs_path, &self.editor, &self.vault, cx);
+        // Recency: move to front, cap at 20.
+        self.recent_paths.retain(|p| p != &abs_path);
+        self.recent_paths.insert(0, abs_path);
+        self.recent_paths.truncate(20);
+    }
+
+    fn open_quick_switch(
+        &mut self,
+        _: &OpenQuickSwitch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle.
+        if self.quick_switch.is_some() {
+            self.quick_switch = None;
+            cx.notify();
+            return;
+        }
+
+        // Build file list: recently-opened files first, then alphabetical remainder.
+        let all_files = self.vault.read(cx).files.clone();
+        let mut ordered: Vec<_> = self
+            .recent_paths
+            .iter()
+            .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
+            .collect();
+        for f in &all_files {
+            if !self.recent_paths.contains(&f.abs_path) {
+                ordered.push(f.clone());
+            }
+        }
+
+        let qs = cx.new(|cx| QuickSwitch::new(ordered, cx));
+        qs.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| {
+            match event {
+                QuickSwitchEvent::Close => {
+                    this.quick_switch = None;
+                    cx.notify();
+                }
+                QuickSwitchEvent::Open(path) => {
+                    this.quick_switch = None;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        })
+        .detach();
+
+        self.quick_switch = Some(qs);
+        cx.notify();
+    }
+
+    fn open_backlinks(
+        &mut self,
+        _: &OpenBacklinks,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle.
+        if self.backlinks.is_some() {
+            self.backlinks = None;
+            cx.notify();
+            return;
+        }
+
+        // Get the rel-path of the currently open note.
+        let (current_title, incoming) = {
+            let pane = self.editor.read(cx);
+            let rel_path = pane.current_rel_path().unwrap_or("").to_string();
+            let title = std::path::Path::new(&rel_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&rel_path)
+                .to_string();
+            let vault = self.vault.read(cx);
+            let links = if rel_path.is_empty() {
+                vec![]
+            } else {
+                vault.backlinks.incoming_links(std::path::Path::new(&rel_path))
+            };
+            (title, links)
+        };
+
+        let panel = cx.new(|cx| BacklinkPanel::new(current_title, incoming, cx));
+        panel.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&panel, |this, _, event: &BacklinkPanelEvent, cx| {
+            match event {
+                BacklinkPanelEvent::Close => {
+                    this.backlinks = None;
+                    cx.notify();
+                }
+                BacklinkPanelEvent::Open(path) => {
+                    this.backlinks = None;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        })
+        .detach();
+
+        self.backlinks = Some(panel);
         cx.notify();
     }
 
@@ -288,14 +411,18 @@ impl Focusable for MainWindow {
 
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<ThemePalette>().clone();
+
         // Drag handle: a 4px vertical strip with ew-resize cursor.
+        let border_subtle = t.border_subtle;
+        let ochre_dim = t.ochre_dim;
         let handle = |target: DragTarget, cx: &mut Context<Self>| {
             div()
                 .w(px(4.0))
                 .h_full()
                 .cursor_ew_resize()
-                .bg(gpui::rgb(theme::BORDER_SUBTLE))
-                .hover(|s| s.bg(gpui::rgb(theme::OCHRE_DIM)))
+                .bg(gpui::rgb(border_subtle))
+                .hover(move |s| s.bg(gpui::rgb(ochre_dim)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event, window, cx| {
@@ -309,8 +436,10 @@ impl Render for MainWindow {
             .size_full()
             .flex()
             .flex_row()
-            .bg(gpui::rgb(theme::BG_SURFACE))
+            .bg(gpui::rgb(t.bg_surface))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::open_quick_switch))
+            .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
@@ -343,9 +472,15 @@ impl Render for MainWindow {
                 .overflow_hidden()
                 .child(self.preview.clone()),
         )
-        // Command palette overlay — painted after all other content via deferred().
+        // Overlays — painted after all other content via deferred().
         .when_some(self.palette.clone(), |root, palette| {
             root.child(gpui::deferred(palette).with_priority(100))
+        })
+        .when_some(self.quick_switch.clone(), |root, qs| {
+            root.child(gpui::deferred(qs).with_priority(100))
+        })
+        .when_some(self.backlinks.clone(), |root, panel| {
+            root.child(gpui::deferred(panel).with_priority(100))
         })
     }
 }

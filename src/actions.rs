@@ -25,6 +25,7 @@ actions!(
         SplitPaneHorizontal,
         // Navigation
         OpenQuickSwitch,
+        OpenBacklinks,
         VaultSearch,
         BufferNext,
         BufferPrevious,

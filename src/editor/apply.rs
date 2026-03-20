@@ -372,6 +372,8 @@ pub fn apply<B: Buffer>(
         }
 
         // ── Cursor movement ────────────────────────────────────────────────
+        // All motions use `navigate` which extends the selection anchor in
+        // Visual mode and collapses it to a point in Normal/Insert.
         MoveLeft => {
             let pos = state.cursor();
             let new_pos = if pos.col > 0 {
@@ -382,7 +384,7 @@ pub fn apply<B: Buffer>(
             } else {
                 pos
             };
-            state.move_cursor_to(new_pos);
+            navigate(&mut state, new_pos);
             (state, None)
         }
 
@@ -396,7 +398,7 @@ pub fn apply<B: Buffer>(
             } else {
                 pos
             };
-            state.move_cursor_to(new_pos);
+            navigate(&mut state, new_pos);
             (state, None)
         }
 
@@ -405,7 +407,7 @@ pub fn apply<B: Buffer>(
             if pos.line > 0 {
                 let new_line = pos.line - 1;
                 let new_col = pos.col.min(buf.line(new_line).len());
-                state.move_cursor_to(Pos::new(new_line, new_col));
+                navigate(&mut state, Pos::new(new_line, new_col));
             }
             (state, None)
         }
@@ -415,52 +417,131 @@ pub fn apply<B: Buffer>(
             if pos.line + 1 < buf.line_count() {
                 let new_line = pos.line + 1;
                 let new_col = pos.col.min(buf.line(new_line).len());
-                state.move_cursor_to(Pos::new(new_line, new_col));
+                navigate(&mut state, Pos::new(new_line, new_col));
             }
             (state, None)
         }
 
         MoveStartOfLine => {
             let line = state.cursor().line;
-            state.move_cursor_to(Pos::new(line, 0));
+            navigate(&mut state, Pos::new(line, 0));
             (state, None)
         }
 
         MoveEndOfLine => {
             let pos = state.cursor();
             let end = buf.line(pos.line).len();
-            state.move_cursor_to(Pos::new(pos.line, end));
+            navigate(&mut state, Pos::new(pos.line, end));
             (state, None)
         }
 
         MoveStartOfDocument => {
-            state.move_cursor_to(Pos::new(0, 0));
+            navigate(&mut state, Pos::new(0, 0));
             (state, None)
         }
 
         MoveEndOfDocument => {
             let last = buf.line_count() - 1;
             let end = buf.line(last).len();
-            state.move_cursor_to(Pos::new(last, end));
+            navigate(&mut state, Pos::new(last, end));
             (state, None)
         }
 
         MoveWordForward => {
             let pos = state.cursor();
             let new_pos = word_forward(pos, buf);
-            state.move_cursor_to(new_pos);
+            navigate(&mut state, new_pos);
             (state, None)
         }
 
         MoveWordBackward => {
             let pos = state.cursor();
             let new_pos = word_backward(pos, buf);
-            state.move_cursor_to(new_pos);
+            navigate(&mut state, new_pos);
             (state, None)
+        }
+
+        // ── Visual-mode entry ──────────────────────────────────────────────
+        EnterVisualChar => {
+            let pos = state.cursor();
+            // Anchor at current position; cursor on the same char (single-char selection).
+            state.selection = Selection {
+                anchor: pos,
+                cursor: pos,
+            };
+            state.mode = Mode::Visual(VisualKind::Char);
+            (state, None)
+        }
+
+        EnterVisualLine => {
+            let line = state.cursor().line;
+            let line_len = buf.line(line).len();
+            state.selection = Selection {
+                anchor: Pos::new(line, 0),
+                cursor: Pos::new(line, line_len),
+            };
+            state.mode = Mode::Visual(VisualKind::Line);
+            (state, None)
+        }
+
+        EnterVisualBlock => {
+            let pos = state.cursor();
+            state.selection = Selection {
+                anchor: pos,
+                cursor: pos,
+            };
+            state.mode = Mode::Visual(VisualKind::Block);
+            (state, None)
+        }
+
+        ReselectLastVisual => {
+            if let Some((sel, kind)) = state.last_visual_selection.clone() {
+                state.selection = sel;
+                state.mode = Mode::Visual(kind);
+            }
+            (state, None)
+        }
+
+        // ── Change visual selection ────────────────────────────────────────
+        ChangeSelection => {
+            // Delete the selection content then enter Insert mode.
+            let (mut new_state, effect) = apply(EditorCommand::DeleteSelection, state, buf);
+            new_state.mode = Mode::Insert;
+            (new_state, effect)
+        }
+
+        // ── Indent / dedent ────────────────────────────────────────────────
+        IndentLines => {
+            let (start_line, end_line) = visual_line_range(&state);
+            for l in start_line..=end_line {
+                buf.insert(l, 0, "  ");
+            }
+            state.is_dirty = true;
+            (state, BufferChanged)
+        }
+
+        DedentLines => {
+            let (start_line, end_line) = visual_line_range(&state);
+            for l in start_line..=end_line {
+                let line = buf.line(l).to_owned();
+                let spaces = line.chars().take_while(|&c| c == ' ').count().min(2);
+                if spaces > 0 {
+                    buf.delete_range(l, 0, spaces);
+                }
+            }
+            state.is_dirty = true;
+            (state, BufferChanged)
         }
 
         // ── Mode transitions ───────────────────────────────────────────────
         EnterNormal => {
+            // Save visual selection for `gv` before leaving Visual mode.
+            if let Mode::Visual(kind) = state.mode {
+                state.last_visual_selection = Some((state.selection, kind));
+                // Return cursor to the start of the selection.
+                let start = state.selection.start();
+                state.move_cursor_to(start);
+            }
             state.mode = Mode::Normal;
             // In Normal mode the cursor must not sit past the last character.
             let pos = state.cursor();
@@ -478,7 +559,33 @@ pub fn apply<B: Buffer>(
     }
 }
 
+// ── Visual selection helpers ──────────────────────────────────────────────────
+
+/// Returns (start_line, end_line) of the current selection, or the cursor line
+/// if not in Visual mode.
+fn visual_line_range(state: &EditorState) -> (usize, usize) {
+    match state.mode {
+        Mode::Visual(_) => (state.selection.start().line, state.selection.end().line),
+        _ => {
+            let l = state.cursor().line;
+            (l, l)
+        }
+    }
+}
+
 // ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Move the cursor to `pos`.
+/// In Visual mode the anchor stays fixed (the selection extends).
+/// In Normal / Insert mode the selection collapses to a point.
+#[inline]
+fn navigate(state: &mut EditorState, pos: Pos) {
+    if matches!(state.mode, Mode::Visual(_)) {
+        state.selection.cursor = pos;
+    } else {
+        state.move_cursor_to(pos);
+    }
+}
 
 /// Byte offset of the previous UTF-8 character boundary before `col`.
 fn prev_char_boundary(s: &str, col: usize) -> usize {
@@ -735,5 +842,113 @@ mod tests {
         assert_eq!(s2.cursor().col, 0);
         let (s3, _) = apply(MoveEndOfLine, s2, &mut b);
         assert_eq!(s3.cursor().col, 11);
+    }
+
+    // ── Story 13: Visual mode ─────────────────────────────────────────────────
+
+    fn visual_char_state() -> EditorState {
+        let mut s = EditorState::new();
+        s.mode = Mode::Visual(VisualKind::Char);
+        s
+    }
+
+    #[test]
+    fn enter_visual_char_anchors_at_cursor() {
+        let mut b = buf("hello");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 2));
+        let (s2, _) = apply(EnterVisualChar, s, &mut b);
+        assert_eq!(s2.mode, Mode::Visual(VisualKind::Char));
+        assert_eq!(s2.selection.anchor, Pos::new(0, 2));
+        assert_eq!(s2.selection.cursor, Pos::new(0, 2));
+    }
+
+    #[test]
+    fn enter_visual_line_selects_whole_line() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 3));
+        let (s2, _) = apply(EnterVisualLine, s, &mut b);
+        assert_eq!(s2.mode, Mode::Visual(VisualKind::Line));
+        assert_eq!(s2.selection.anchor.col, 0);
+        assert_eq!(s2.selection.cursor.col, 11);
+    }
+
+    #[test]
+    fn motion_extends_selection_in_visual_mode() {
+        let mut b = buf("hello");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 0) };
+        let (s2, _) = apply(MoveRight, s, &mut b);
+        // Anchor stays, cursor moves.
+        assert_eq!(s2.selection.anchor, Pos::new(0, 0));
+        assert_eq!(s2.selection.cursor, Pos::new(0, 1));
+        assert_eq!(s2.mode, Mode::Visual(VisualKind::Char));
+    }
+
+    #[test]
+    fn motion_collapses_selection_in_normal_mode() {
+        let mut b = buf("hello");
+        let mut s = normal_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 0) };
+        let (s2, _) = apply(MoveRight, s, &mut b);
+        assert_eq!(s2.selection.anchor, Pos::new(0, 1));
+        assert_eq!(s2.selection.cursor, Pos::new(0, 1));
+    }
+
+    #[test]
+    fn escape_from_visual_saves_last_selection() {
+        let mut b = buf("hello");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(0, 3) };
+        let (s2, _) = apply(EnterNormal, s, &mut b);
+        assert_eq!(s2.mode, Mode::Normal);
+        assert!(s2.last_visual_selection.is_some());
+        let (saved_sel, kind) = s2.last_visual_selection.as_ref().unwrap();
+        assert_eq!(kind, &VisualKind::Char);
+        assert_eq!(saved_sel.anchor, Pos::new(0, 1));
+    }
+
+    #[test]
+    fn reselect_last_visual() {
+        let mut b = buf("hello");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(0, 4) };
+        let (s2, _) = apply(EnterNormal, s, &mut b); // saves last visual
+        let (s3, _) = apply(ReselectLastVisual, s2, &mut b);
+        assert_eq!(s3.mode, Mode::Visual(VisualKind::Char));
+        assert_eq!(s3.selection.anchor, Pos::new(0, 1));
+        assert_eq!(s3.selection.cursor, Pos::new(0, 4));
+    }
+
+    #[test]
+    fn indent_lines_adds_two_spaces() {
+        let mut b = buf("aaa\nbbb\nccc");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(1, 2) };
+        let (_, effect) = apply(IndentLines, s, &mut b);
+        assert_eq!(b.line(0), "  aaa");
+        assert_eq!(b.line(1), "  bbb");
+        assert_eq!(b.line(2), "ccc"); // untouched
+        assert_eq!(effect, SideEffect::BufferChanged);
+    }
+
+    #[test]
+    fn dedent_lines_removes_two_spaces() {
+        let mut b = buf("  aaa\n  bbb");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(1, 0) };
+        let (_, _) = apply(DedentLines, s, &mut b);
+        assert_eq!(b.line(0), "aaa");
+        assert_eq!(b.line(1), "bbb");
+    }
+
+    #[test]
+    fn change_selection_enters_insert() {
+        let mut b = buf("hello world");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 5) };
+        let (s2, _) = apply(ChangeSelection, s, &mut b);
+        assert_eq!(s2.mode, Mode::Insert);
     }
 }

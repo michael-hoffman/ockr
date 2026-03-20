@@ -62,10 +62,24 @@ pub enum EditorCommand {
     /// Select the current line and enter Visual(Line) mode (`x`).
     /// Helix semantics: `x` selects; operators (`d`, `y`, `c`) act on the selection.
     SelectCurrentLine,
+    /// Enter Visual Char mode at the current cursor (`v`).
+    EnterVisualChar,
+    /// Enter Visual Line mode, selecting the whole current line (`V`).
+    EnterVisualLine,
+    /// Enter Visual Block mode at the current cursor (`Ctrl-V`).
+    EnterVisualBlock,
+    /// Re-enter the last visual selection (`gv`).
+    ReselectLastVisual,
     /// Delete the active Visual selection into the yank register (`d` in Visual).
     DeleteSelection,
     /// Yank the active Visual selection into the register (`y` in Visual).
     YankSelection,
+    /// Delete the visual selection and enter Insert mode (`c` in Visual).
+    ChangeSelection,
+    /// Indent the selected (or current) lines by one level (`>`).
+    IndentLines,
+    /// Dedent the selected (or current) lines by one level (`<`).
+    DedentLines,
 
     // ── Cursor movement ────────────────────────────────────────────────────
     MoveLeft,

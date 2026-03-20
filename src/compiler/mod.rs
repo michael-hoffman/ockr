@@ -17,6 +17,7 @@
 //! - Thread panics inside `typst::compile` are caught with `std::panic::catch_unwind`
 //!   and surfaced as `CompileResult::Panicked` without crashing the host process.
 
+pub mod preprocess;
 pub mod world;
 
 use std::path::PathBuf;

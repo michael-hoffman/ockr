@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use gpui::{App, Context, Entity, FocusHandle, Focusable, Render, Window, div, prelude::*};
 
-use crate::ui::theme;
+use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -46,6 +46,7 @@ impl Focusable for Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<ThemePalette>().clone();
         let vault = self.vault.read(cx);
 
         let vault_name = vault
@@ -61,7 +62,7 @@ impl Render for Sidebar {
             .py_2()
             .text_sm()
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(gpui::rgb(theme::TEXT_SUBTLE))
+            .text_color(gpui::rgb(t.text_subtle))
             .child(vault_name);
 
         let body = if vault.files.is_empty() {
@@ -69,7 +70,7 @@ impl Render for Sidebar {
                 .px_3()
                 .py_2()
                 .text_sm()
-                .text_color(gpui::rgb(theme::TEXT_FAINT))
+                .text_color(gpui::rgb(t.text_faint))
                 .child(if vault.root.is_some() {
                     "No .typ files found"
                 } else {
@@ -80,14 +81,16 @@ impl Render for Sidebar {
             let mut rows = div().flex().flex_col();
             for (i, file) in vault.files.iter().enumerate() {
                 let abs_path = file.abs_path.clone();
+                let bg_hover = t.bg_hover;
+                let text_muted = t.text_muted;
                 rows = rows.child(
                     div()
                         .id(gpui::ElementId::Integer(i as u64))
                         .px_3()
                         .py_1()
                         .text_sm()
-                        .text_color(gpui::rgb(theme::TEXT_MUTED))
-                        .hover(|s| s.bg(gpui::rgb(theme::BG_HOVER)))
+                        .text_color(gpui::rgb(text_muted))
+                        .hover(move |s| s.bg(gpui::rgb(bg_hover)))
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(SidebarEvent::OpenFile(abs_path.clone()));
@@ -104,9 +107,9 @@ impl Render for Sidebar {
             .flex_col()
             .h_full()
             .w(gpui::px(220.0))
-            .bg(gpui::rgb(theme::BG_SURFACE))
+            .bg(gpui::rgb(t.bg_surface))
             .border_r_1()
-            .border_color(gpui::rgb(theme::BORDER_SUBTLE))
+            .border_color(gpui::rgb(t.border_subtle))
             .child(header)
             .child(body)
     }

@@ -88,6 +88,7 @@ pub enum VisualKind {
 /// Story 03: position, selection, mode, dirty flag.
 /// Story 07: yank register added here; undo history lives in `EditorPane`
 ///           (it requires buffer snapshots which are not part of pure state).
+/// Story 13: last_visual_selection for `gv` reselect.
 #[derive(Debug, Clone)]
 pub struct EditorState {
     pub selection: Selection,
@@ -99,6 +100,9 @@ pub struct EditorState {
     /// Unnamed yank register ("clipboard" internal to ockr).
     /// Set by `yy`/`dd`/`x`; read by `p`/`P`.
     pub yank_register: String,
+    /// The last visual selection, stored when leaving Visual mode.
+    /// Restored by `gv`.
+    pub last_visual_selection: Option<(Selection, VisualKind)>,
 }
 
 impl EditorState {
@@ -109,6 +113,7 @@ impl EditorState {
             is_dirty: false,
             path: None,
             yank_register: String::new(),
+            last_visual_selection: None,
         }
     }
 

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use gpui::{ClipboardItem, Context, MouseButton, ObjectFit, Render, RenderImage, Window, div, img, prelude::*};
 
-use crate::ui::theme;
+use crate::ui::theme::ThemePalette;
 use image::Frame;
 use typst::layout::PagedDocument;
 
@@ -69,10 +69,14 @@ impl PreviewPane {
 
 impl Render for PreviewPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = gpui::rgb(theme::BG_PANEL);
+        let t = cx.global::<ThemePalette>().clone();
+        let bg = gpui::rgb(t.bg_panel);
 
         if let Some(ref err) = self.error {
             let err_text = err.clone();
+            let bg_hover = t.bg_hover;
+            let text_subtle = t.text_subtle;
+            let text = t.text;
             return div()
                 .size_full()
                 .overflow_hidden()
@@ -99,13 +103,13 @@ impl Render for PreviewPane {
                             div()
                                 .px(gpui::px(6.0))
                                 .py(gpui::px(2.0))
-                                .bg(gpui::rgb(theme::BG_HOVER))
+                                .bg(gpui::rgb(bg_hover))
                                 .rounded(gpui::px(4.0))
                                 .text_xs()
                                 .font_family("Menlo")
-                                .text_color(gpui::rgb(theme::TEXT_SUBTLE))
+                                .text_color(gpui::rgb(text_subtle))
                                 .cursor_pointer()
-                                .hover(|s| s.text_color(gpui::rgb(theme::TEXT)))
+                                .hover(move |s| s.text_color(gpui::rgb(text)))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |_this: &mut PreviewPane, _, _, cx| {
@@ -149,7 +153,7 @@ impl Render for PreviewPane {
             .flex()
             .items_center()
             .justify_center()
-            .text_color(gpui::rgb(theme::TEXT_FAINT))
+            .text_color(gpui::rgb(t.text_faint))
             .text_sm()
             .child("No preview — open a .typ file")
             .into_any_element()
