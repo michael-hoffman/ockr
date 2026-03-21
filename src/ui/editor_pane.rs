@@ -46,7 +46,7 @@ use gpui::{
 };
 
 use crate::actions::{FollowLink, OpenCommandPalette, SaveFile};
-use crate::compiler::{preprocess::preprocess_wikilinks, CompileRequest, CompilerHandle};
+use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -58,6 +58,13 @@ use crate::ui::preview::PreviewPane;
 use crate::ui::theme::ThemePalette;
 use crate::vault::{VaultFile, VaultState};
 
+/// Number of lines rendered in one viewport.
+///
+/// Only lines in `[viewport_top, viewport_top + VIEWPORT_LINES)` are emitted
+/// as GPUI elements; the rest are skipped.  80 lines @ 20 px = 1600 px,
+/// comfortably covering any realistic window height.
+const VIEWPORT_LINES: usize = 80;
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 /// Events emitted by `EditorPane` to its subscribers (e.g. `MainWindow`).
@@ -67,6 +74,28 @@ pub enum EditorPaneEvent {
 }
 
 impl EventEmitter<EditorPaneEvent> for EditorPane {}
+
+// ── Multi-key sequence state ───────────────────────────────────────────────────
+
+/// Tracks the current multi-key Normal-mode sequence, if any.
+///
+/// Each variant means "we received the first key of this sequence and are
+/// waiting for the second key to complete it."  Only one sequence can be
+/// pending at a time; starting a new sequence always cancels any prior one.
+///
+/// Extending for text objects (Story 20) means adding variants here rather
+/// than bolting on more boolean flags.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum PendingKey {
+    /// No multi-key sequence in progress.
+    #[default]
+    None,
+    /// `g` was pressed; awaiting the second key:
+    /// `g` → start of doc, `v` → reselect visual, `h/l/s/e` → g-prefix motions.
+    G,
+    /// `r` was pressed; awaiting the replacement character (`r<c>`).
+    Replace,
+}
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
@@ -87,11 +116,21 @@ pub struct EditorPane {
     /// Vault-relative path of the open file (e.g. `"notes/foo.typ"`).
     /// Sent with every CompileRequest so the world resolves imports correctly.
     file_rel_path: Option<String>,
-    /// Pending `g` key: true while waiting for the second key of a `g…` sequence
-    /// (e.g. `gg` → go to start, `gv` → reselect last visual).
-    pending_g: bool,
-    /// Pending `r` key: true while waiting for the replacement character.
-    pending_replace: bool,
+    /// Pending multi-key sequence state (e.g. `g…`, `r<c>`).
+    pending: PendingKey,
+    /// Monotonically-increasing compile sequence number.
+    ///
+    /// Incremented on every `trigger_compile` call.  The async debounce task
+    /// captures the value at spawn time and checks it before sending; if a
+    /// newer keystroke fired in the meantime the task silently drops its
+    /// request.  This gives a trailing 50 ms debounce for free.
+    compile_sequence: u64,
+    /// Index of the first line visible in the editor viewport.
+    ///
+    /// Updated whenever the cursor moves.  Render only emits elements for
+    /// `viewport_top .. viewport_top + VIEWPORT_LINES`, keeping the element
+    /// tree small for large files.
+    viewport_top: usize,
 }
 
 impl EditorPane {
@@ -107,8 +146,9 @@ impl EditorPane {
             vault: None,
             vault_root: None,
             file_rel_path: None,
-            pending_g: false,
-            pending_replace: false,
+            pending: PendingKey::None,
+            compile_sequence: 0,
+            viewport_top: 0,
         }
     }
 
@@ -159,20 +199,68 @@ impl EditorPane {
         cx.notify();
     }
 
-    fn trigger_compile(&self, cx: &App) {
-        let Some(compiler) = &self.compiler else { return };
-        // Resolve wikilinks against the current vault file list before compiling.
-        let files = self
-            .vault
-            .as_ref()
+    /// Schedule a compile after a 50 ms debounce.
+    ///
+    /// Each call increments `compile_sequence`.  The spawned task captures
+    /// the current sequence number and drops the request if a newer call
+    /// arrived before the timer fires — giving a trailing debounce with no
+    /// extra dependencies.  Fast typists therefore produce at most ~20
+    /// compile requests per second instead of one per keystroke.
+    ///
+    /// Also marks the preview pane as stale immediately so the UI shows
+    /// visual feedback that a compile is pending.
+    fn trigger_compile(&mut self, cx: &mut Context<Self>) {
+        let Some(compiler) = self.compiler.clone() else { return };
+
+        // Bump sequence — the old task will see a mismatch and drop.
+        let seq = self.compile_sequence.wrapping_add(1);
+        self.compile_sequence = seq;
+
+        // Build the compile request from current buffer state.
+        let files = self.vault.as_ref()
             .map(|v| v.read(cx).files.clone())
             .unwrap_or_default();
-        let source = preprocess_wikilinks(&self.buffer.text(), &files);
-        compiler.send(CompileRequest {
-            source,
+        let request = CompileRequest {
+            source: preprocess_wikilinks(&self.buffer.text(), &files),
             vault_root: self.vault_root.clone(),
             file_path: self.file_rel_path.clone(),
-        });
+        };
+
+        cx.spawn(async move |this, cx| {
+            // 50 ms trailing debounce.
+            cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+            // Check if this request is still current.
+            let still_current = cx.update(|cx| {
+                this.update(cx, |pane, _| pane.compile_sequence == seq)
+                    .unwrap_or(false)
+            }).unwrap_or(false);
+            if still_current {
+                compiler.send(request);
+            }
+        }).detach();
+    }
+
+    /// Keep the cursor visible within the viewport.
+    ///
+    /// Called after every state-machine step that might have moved the cursor.
+    /// Does not call `cx.notify()` — the caller already will.
+    fn update_viewport(&mut self) {
+        let cursor_line = self.state.cursor().line;
+        if cursor_line < self.viewport_top {
+            self.viewport_top = cursor_line;
+        } else if cursor_line >= self.viewport_top + VIEWPORT_LINES {
+            self.viewport_top = cursor_line + 1 - VIEWPORT_LINES;
+        }
+    }
+
+    /// Move the cursor to `line` (0-based) and scroll the viewport there.
+    ///
+    /// Used by features like vault search that know a target line number.
+    pub fn jump_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let clamped = line.min(self.buffer.line_count().saturating_sub(1));
+        self.state.move_cursor_to(Pos::new(clamped, 0));
+        self.update_viewport();
+        cx.notify();
     }
 
     /// Find the `[[wikilink]]` under the cursor and resolve it to an absolute path.
@@ -197,9 +285,9 @@ impl EditorPane {
                     let inner = &line[inner_start..close];
                     // Strip display text after `|`.
                     let target = inner.split('|').next().unwrap_or(inner).trim();
-                    let key = normalise_title(target);
+                    let key = normalise(target);
                     for file in &vault.files {
-                        if normalise_title(&file.title) == key {
+                        if normalise(&file.title) == key {
                             return Some(file.abs_path.clone());
                         }
                     }
@@ -295,6 +383,7 @@ impl EditorPane {
                     let prev = std::mem::take(&mut self.state);
                     let (new_state, _) = apply(EditorCommand::PasteFromClipboard(text), prev, &mut self.buffer);
                     self.state = new_state;
+                    self.update_viewport();
                     self.trigger_compile(cx);
                     cx.notify();
                 }
@@ -342,6 +431,7 @@ impl EditorPane {
                 self.state.mode = Mode::Normal;
                 self.state.move_cursor_to(pos);
                 self.state.is_dirty = true;
+                self.update_viewport();
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -359,6 +449,7 @@ impl EditorPane {
                 self.state.mode = Mode::Normal;
                 self.state.move_cursor_to(pos);
                 self.state.is_dirty = true;
+                self.update_viewport();
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -366,16 +457,19 @@ impl EditorPane {
         }
 
         // ── Multi-key sequences ──────────────────────────────────────────
-        // `r` in Normal mode: wait for the replacement character.
+        // ── Multi-key sequences ──────────────────────────────────────────────
+        //
+        // `r` in Normal mode: set pending to Replace, wait for the char.
         if self.state.mode == Mode::Normal && k.key == "r"
             && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
         {
-            self.pending_replace = true;
-            self.pending_g = false;
+            self.pending = PendingKey::Replace;
             return;
         }
-        if self.pending_replace {
-            self.pending_replace = false;
+
+        // Complete a pending `r<c>` replace.
+        if self.pending == PendingKey::Replace {
+            self.pending = PendingKey::None;
             if self.state.mode == Mode::Normal {
                 if let Some(ch) = &k.key_char {
                     if !k.modifiers.control && !k.modifiers.platform {
@@ -397,36 +491,30 @@ impl EditorPane {
             return;
         }
 
-        // `g` in Normal mode starts a two-key sequence: `gg` = start of doc,
-        // `gv` = reselect last visual.  We track the pending state here.
+        // `g` in Normal mode: set pending to G, then complete on second key.
         if self.state.mode == Mode::Normal && k.key == "g"
             && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
         {
-            if self.pending_g {
+            if self.pending == PendingKey::G {
                 // Second `g` → go to start of document.
-                self.pending_g = false;
-                let cmd = EditorCommand::MoveStartOfDocument;
+                self.pending = PendingKey::None;
                 let prev = std::mem::take(&mut self.state);
-                let (new_state, _) = apply(cmd, prev, &mut self.buffer);
+                let (new_state, _) = apply(EditorCommand::MoveStartOfDocument, prev, &mut self.buffer);
                 self.state = new_state;
                 cx.notify();
             } else {
-                self.pending_g = true;
+                self.pending = PendingKey::G;
             }
             return;
         }
-        if self.pending_g {
-            self.pending_g = false;
+        if self.pending == PendingKey::G {
+            self.pending = PendingKey::None;
             if !k.modifiers.platform && !k.modifiers.control {
                 let cmd = match k.key.as_str() {
-                    "v" if self.state.mode == Mode::Normal => {
-                        Some(EditorCommand::ReselectLastVisual)
-                    }
-                    // gh → go to line start, gl → go to line end, gs → first non-whitespace
+                    "v" if self.state.mode == Mode::Normal => Some(EditorCommand::ReselectLastVisual),
                     "h" => Some(EditorCommand::MoveStartOfLine),
                     "l" => Some(EditorCommand::MoveEndOfLine),
                     "s" => Some(EditorCommand::MoveFirstNonWhitespace),
-                    // ge → go to end of current/prev word (use MoveWordEnd from current pos)
                     "e" => Some(EditorCommand::MoveWordEnd),
                     _ => None,
                 };
@@ -461,6 +549,7 @@ impl EditorPane {
         let prev_state = std::mem::take(&mut self.state);
         let (new_state, effect) = apply(cmd, prev_state, &mut self.buffer);
         self.state = new_state;
+        self.update_viewport();
 
         match effect {
             SideEffect::BufferChanged => {
@@ -494,12 +583,15 @@ impl EditorPane {
         let char_width = 8.4_f32;
 
         let raw_y = f32::from(event.position.y) - padding;
-        let line = if raw_y < 0.0 {
-            0
+        let visual_line = if raw_y < 0.0 {
+            0usize
         } else {
             (raw_y / line_height) as usize
         };
-        let line = line.min(self.buffer.line_count().saturating_sub(1));
+        // Translate the clicked visual row (relative to top of viewport) into
+        // an absolute buffer line, then clamp to the document.
+        let line = (self.viewport_top + visual_line)
+            .min(self.buffer.line_count().saturating_sub(1));
 
         let raw_x = (f32::from(event.position.x) - padding).max(0.0);
         let col_approx = (raw_x / char_width) as usize;
@@ -509,6 +601,7 @@ impl EditorPane {
 
         self.state.move_cursor_to(Pos::new(line, col));
         self.state.mode = Mode::Normal;
+        self.update_viewport();
         cx.notify();
     }
 }
@@ -529,8 +622,14 @@ impl Render for EditorPane {
 
         let front_matter_end = front_matter_end(&self.buffer, line_count);
 
-        let mut line_elements = Vec::with_capacity(line_count);
-        for i in 0..line_count {
+        // Virtual rendering: only emit the lines visible in the current viewport.
+        // This bounds element creation to O(VIEWPORT_LINES) regardless of document
+        // length, keeping layout work constant as the file grows.
+        let first = self.viewport_top;
+        let last = (first + VIEWPORT_LINES).min(line_count);
+
+        let mut line_elements = Vec::with_capacity(last - first);
+        for i in first..last {
             let text = self.buffer.line(i).to_string();
             let in_selection = is_line_in_visual_selection(i, mode, &selection);
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
@@ -768,16 +867,6 @@ fn keystroke_to_command(event: &KeyDownEvent, state: &EditorState) -> EditorComm
         Mode::Visual(_) => key_visual(event),
         Mode::Insert => key_insert(event),
     }
-}
-
-/// Normalise a wikilink title for case-insensitive, fuzzy matching.
-/// Mirrors the logic in `compiler::preprocess`.
-fn normalise_title(s: &str) -> String {
-    s.to_lowercase()
-        .replace(['-', '_'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Normal-mode key → command.  Called with `pending_g = false` already handled

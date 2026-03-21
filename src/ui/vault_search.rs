@@ -20,7 +20,8 @@ use crate::vault::VaultFile;
 #[derive(Debug, Clone)]
 pub enum VaultSearchEvent {
     Close,
-    Open(PathBuf),
+    /// Open a file and jump the cursor to the given 0-based line number.
+    Open(PathBuf, usize),
 }
 
 impl EventEmitter<VaultSearchEvent> for VaultSearch {}
@@ -104,7 +105,8 @@ impl VaultSearch {
 
         if k.key == "enter" {
             if let Some(m) = self.results.get(self.selected) {
-                cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone()));
+                // line_no is 1-based; jump_to_line expects 0-based.
+                cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone(), m.line_no.saturating_sub(1)));
             } else {
                 cx.emit(VaultSearchEvent::Close);
             }
@@ -149,7 +151,7 @@ impl VaultSearch {
         cx: &mut Context<Self>,
     ) {
         if let Some(m) = self.results.get(idx) {
-            cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone()));
+            cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone(), m.line_no.saturating_sub(1)));
         }
     }
 }

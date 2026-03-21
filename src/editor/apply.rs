@@ -324,36 +324,23 @@ pub fn apply<B: Buffer>(
                 }
                 Mode::Visual(VisualKind::Char) => {
                     let start = state.selection.start();
-                    let end = state.selection.end();
+                    let end   = state.selection.end();
+                    // Yank via shared helper (handles both same-line and multi-line).
+                    state.yank_register = yank_visual_char(start, end, buf);
                     if start.line == end.line {
                         // Same-line: delete slice [start.col, end.col).
-                        let deleted = buf.line(start.line)[start.col..end.col].to_string();
-                        state.yank_register = deleted;
                         buf.delete_range(start.line, start.col, end.col);
-                        state.move_cursor_to(start);
                     } else {
-                        // Cross-line: yank then delete.
-                        // Collect yanked text: tail of start line + full middle lines + head of end line.
-                        let mut yanked = buf.line(start.line)[start.col..].to_string();
-                        yanked.push('\n');
-                        for l in start.line + 1..end.line {
-                            yanked.push_str(buf.line(l));
-                            yanked.push('\n');
-                        }
-                        yanked.push_str(&buf.line(end.line)[..end.col]);
-                        state.yank_register = yanked;
-                        // Delete: trim start line, delete middles, trim end line, then join.
+                        // Cross-line: trim start tail, trim end head, join middle lines.
                         let start_line_len = buf.line(start.line).len();
                         buf.delete_range(start.line, start.col, start_line_len);
                         buf.delete_range(end.line, 0, end.col);
-                        // Delete all lines between start and end (now shifted).
                         for _ in start.line + 1..end.line {
                             buf.join_with_next(start.line);
                         }
-                        // Join start line with the trimmed end line.
                         buf.join_with_next(start.line);
-                        state.move_cursor_to(start);
                     }
+                    state.move_cursor_to(start);
                 }
                 _ => {
                     // In Normal mode, fall back to DeleteLine.
@@ -379,10 +366,8 @@ pub fn apply<B: Buffer>(
                 }
                 Mode::Visual(VisualKind::Char) => {
                     let start = state.selection.start();
-                    let end = state.selection.end();
-                    if start.line == end.line {
-                        state.yank_register = buf.line(start.line)[start.col..end.col].to_string();
-                    }
+                    let end   = state.selection.end();
+                    state.yank_register = yank_visual_char(start, end, buf);
                 }
                 _ => {
                     return apply(EditorCommand::YankLine, state, buf);
@@ -950,6 +935,27 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
         } else {
             return Pos::new(0, 0);
         }
+    }
+}
+
+// ── Selection helpers ─────────────────────────────────────────────────────────
+
+/// Collect the text covered by a Visual Char selection into a `String`.
+///
+/// Handles both single-line and multi-line selections.  The returned string
+/// does **not** end with `\n` unless the selection crosses a line boundary.
+fn yank_visual_char<B: Buffer>(start: crate::editor::state::Pos, end: crate::editor::state::Pos, buf: &B) -> String {
+    if start.line == end.line {
+        buf.line(start.line)[start.col..end.col].to_string()
+    } else {
+        let mut out = buf.line(start.line)[start.col..].to_string();
+        out.push('\n');
+        for l in start.line + 1..end.line {
+            out.push_str(buf.line(l));
+            out.push('\n');
+        }
+        out.push_str(&buf.line(end.line)[..end.col]);
+        out
     }
 }
 

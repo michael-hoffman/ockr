@@ -64,8 +64,13 @@ pub fn preprocess_wikilinks(source: &str, files: &[VaultFile]) -> String {
     result
 }
 
+/// Normalise a wikilink title for case-insensitive, whitespace-tolerant matching.
+///
 /// Lowercase, replace hyphens/underscores with spaces, collapse whitespace.
-fn normalise(s: &str) -> String {
+/// Used by both the wikilink preprocessor and the editor's link-follower so
+/// that `[[Bayes Theorem]]`, `[[bayes-theorem]]`, and `[[bayes_theorem]]` all
+/// resolve to the same file.
+pub fn normalise(s: &str) -> String {
     s.to_lowercase()
         .replace(['-', '_'], " ")
         .split_whitespace()

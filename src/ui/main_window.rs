@@ -167,6 +167,15 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Returns the currently-focused editor pane.
+    ///
+    /// Today this is always the single `self.editor`.  When Story 17 (split
+    /// panes) lands, this becomes the one method to change — callers stay the
+    /// same, because they all go through `active_editor()`.
+    fn active_editor(&self) -> &Entity<EditorPane> {
+        &self.editor
+    }
+
     /// Create (if needed) and open today's daily note under `.ockr/daily/YYYY-MM-DD.typ`.
     fn open_daily_note(
         &mut self,
@@ -207,7 +216,7 @@ impl MainWindow {
         let rel = PathBuf::from(".ockr/daily").join(format!("{date_str}.typ"));
         let vault_files = self.vault.read(cx).files.clone();
         if let Some(file) = vault_files.iter().find(|f| f.rel_path == rel).cloned() {
-            self.editor.update(cx, |pane, cx| {
+            self.active_editor().clone().update(cx, |pane, cx| {
                 pane.open_file(&file, root, window, cx);
             });
             self.recent_paths.retain(|p| p != &note_path);
@@ -219,7 +228,7 @@ impl MainWindow {
 
     /// Open a file by absolute path and record it in the recency list.
     fn open_path(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
-        open_file_in_editor(&abs_path, &self.editor, &self.vault, cx);
+        open_file_in_editor(&abs_path, self.active_editor(), &self.vault, cx);
         // Recency: move to front, cap at 20.
         self.recent_paths.retain(|p| p != &abs_path);
         self.recent_paths.insert(0, abs_path);
@@ -289,7 +298,7 @@ impl MainWindow {
 
         // Get the rel-path of the currently open note.
         let (current_title, incoming) = {
-            let pane = self.editor.read(cx);
+            let pane = self.active_editor().read(cx);
             let rel_path = pane.current_rel_path().unwrap_or("").to_string();
             let title = std::path::Path::new(&rel_path)
                 .file_stem()
@@ -350,10 +359,15 @@ impl MainWindow {
                     this.vault_search = None;
                     cx.notify();
                 }
-                VaultSearchEvent::Open(path) => {
+                VaultSearchEvent::Open(path, line_no) => {
                     this.vault_search = None;
                     cx.notify();
                     this.open_path(path.clone(), cx);
+                    // Jump the cursor to the matched line.
+                    let line = *line_no;
+                    this.active_editor().clone().update(cx, |pane, cx| {
+                        pane.jump_to_line(line, cx);
+                    });
                 }
             }
         })
