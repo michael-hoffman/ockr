@@ -9,7 +9,7 @@
 
 use crate::editor::{
     buffer::Buffer,
-    command::EditorCommand,
+    command::{EditorCommand, TextObjectKind},
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
 
@@ -746,6 +746,36 @@ pub fn apply<B: Buffer>(
             (state, BufferChanged)
         }
 
+        // ── Text object selection ──────────────────────────────────────────
+        SelectObject { inner, kind } => {
+            let pos = state.cursor();
+            let maybe = match kind {
+                TextObjectKind::Word      => obj_word(buf.line(pos.line), pos.col, inner, false)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+                TextObjectKind::WORD      => obj_word(buf.line(pos.line), pos.col, inner, true)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+                TextObjectKind::Paragraph => obj_paragraph(buf, pos, inner),
+                TextObjectKind::Paren     => obj_surround(buf, pos, '(', ')', inner),
+                TextObjectKind::Brace     => obj_surround(buf, pos, '{', '}', inner),
+                TextObjectKind::Bracket | TextObjectKind::TypstContent
+                                          => obj_surround(buf, pos, '[', ']', inner),
+                TextObjectKind::Angle     => obj_surround(buf, pos, '<', '>', inner),
+                TextObjectKind::DoubleQuote => obj_quote(buf.line(pos.line), pos.col, '"', inner)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+                TextObjectKind::SingleQuote => obj_quote(buf.line(pos.line), pos.col, '\'', inner)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+                TextObjectKind::Backtick    => obj_quote(buf.line(pos.line), pos.col, '`', inner)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+                TextObjectKind::InlineMath  => obj_quote(buf.line(pos.line), pos.col, '$', inner)
+                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+            };
+            if let Some((start, end)) = maybe {
+                state.selection = Selection { anchor: start, cursor: end };
+                state.mode = Mode::Visual(VisualKind::Char);
+            }
+            (state, None)
+        }
+
         // ── Mode transitions ───────────────────────────────────────────────
         EnterNormal => {
             // Save visual selection for `gv` before leaving Visual mode.
@@ -976,6 +1006,231 @@ fn word_backward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 /// Move to the end of the current/next WORD (whitespace-delimited).
 fn word_end_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     word_end_forward(pos, buf)
+}
+
+// ── Text object finders ───────────────────────────────────────────────────────
+//
+// All single-line helpers return `Option<(start_col, end_col)>` where
+// `end_col` is the **exclusive** byte past the last selected character —
+// matching the convention used by `delete_range` and `yank_visual_char`.
+
+/// Returns `true` if `c` is a "word" character (alphanumeric or `_`).
+#[inline]
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Select inner/around **word** or **WORD** on a single line.
+///
+/// `whitespace_word`: if `true` treat any non-whitespace run as the "WORD".
+///
+/// Strategy:
+/// - If cursor is on a word char: expand to full word.
+/// - If cursor is on whitespace: select the whitespace run.
+/// - `around` for a word adds trailing whitespace (or leading if at line end).
+fn obj_word(line: &str, col: usize, inner: bool, whitespace_word: bool) -> Option<(usize, usize)> {
+    if line.is_empty() {
+        return None;
+    }
+    let col = col.min(line.len().saturating_sub(1));
+    let is_target: fn(char) -> bool = if whitespace_word {
+        |c: char| !c.is_whitespace()
+    } else {
+        is_word_char
+    };
+
+    // What kind of run is the cursor on?
+    let cur_char = line[col..].chars().next().unwrap_or(' ');
+    let on_target = is_target(cur_char);
+
+    if on_target {
+        // Scan left for start of run.
+        let mut start = col;
+        for (i, c) in line[..col].char_indices().rev() {
+            if is_target(c) { start = i; } else { break; }
+        }
+        // Scan right for end of run (exclusive).
+        let mut end = col;
+        for (i, c) in line[col..].char_indices() {
+            if is_target(c) { end = col + i + c.len_utf8(); } else { break; }
+        }
+        if inner {
+            Some((start, end))
+        } else {
+            // Add trailing whitespace; fall back to leading.
+            let trail: usize = line[end..].chars()
+                .take_while(|c| c.is_whitespace())
+                .map(|c| c.len_utf8())
+                .sum();
+            if trail > 0 {
+                Some((start, end + trail))
+            } else {
+                let lead: usize = line[..start].chars().rev()
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+                Some((start - lead, end))
+            }
+        }
+    } else {
+        // Cursor on whitespace — select the whitespace run.
+        let mut start = col;
+        for (i, c) in line[..col].char_indices().rev() {
+            if c.is_whitespace() { start = i; } else { break; }
+        }
+        let mut end = col;
+        for (i, c) in line[col..].char_indices() {
+            if c.is_whitespace() { end = col + i + c.len_utf8(); } else { break; }
+        }
+        Some((start, end))
+    }
+}
+
+/// Find enclosing matched bracket pair across lines.
+///
+/// Scans backward from `pos` for `open` and forward for `close`, tracking
+/// nesting depth so inner pairs are skipped.
+/// Returns `(start, end)` in exclusive-end convention.
+fn obj_surround<B: Buffer>(
+    buf: &B,
+    pos: Pos,
+    open: char,
+    close: char,
+    inner: bool,
+) -> Option<(Pos, Pos)> {
+    // ── Scan backward for the outer open ─────────────────────────────────────
+    let (open_line, open_col) = {
+        let mut depth: i32 = 0;
+        let mut found = None;
+        'bwd: for ln in (0..=pos.line).rev() {
+            let s = buf.line(ln);
+            let scan_end = if ln == pos.line { pos.col } else { s.len() };
+            // Collect char positions so we can iterate in reverse.
+            let chars: Vec<(usize, char)> = s[..scan_end].char_indices().collect();
+            for &(ci, ch) in chars.iter().rev() {
+                if ch == close {
+                    depth += 1;
+                } else if ch == open {
+                    if depth == 0 {
+                        found = Some((ln, ci));
+                        break 'bwd;
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        found?
+    };
+
+    // ── Scan forward for the matching close ──────────────────────────────────
+    let (close_line, close_col) = {
+        let mut depth: i32 = 0;
+        let mut found = None;
+        'fwd: for ln in pos.line..buf.line_count() {
+            let s = buf.line(ln);
+            let scan_start = if ln == pos.line { pos.col } else { 0 };
+            for (rel, ch) in s[scan_start..].char_indices() {
+                let ci = scan_start + rel;
+                if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    if depth == 0 {
+                        found = Some((ln, ci));
+                        break 'fwd;
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        found?
+    };
+
+    if inner {
+        // Content after `open` up to (but not including) `close`.
+        let after_open = open_col + open.len_utf8();
+        let (start_line, start_col) = if after_open <= buf.line(open_line).len() {
+            (open_line, after_open)
+        } else {
+            (open_line + 1, 0)
+        };
+        Some((Pos::new(start_line, start_col), Pos::new(close_line, close_col)))
+    } else {
+        // Include both delimiters.
+        let after_close = close_col + close.len_utf8();
+        Some((Pos::new(open_line, open_col), Pos::new(close_line, after_close)))
+    }
+}
+
+/// Find an enclosing symmetric quote pair (`"`, `'`, `` ` ``, `$`) on one line.
+///
+/// Scans the line for all occurrences of `quote`, forms consecutive pairs,
+/// and returns the pair whose range contains `col`.
+fn obj_quote(line: &str, col: usize, quote: char, inner: bool) -> Option<(usize, usize)> {
+    // Collect all positions of unescaped `quote` on this line.
+    let positions: Vec<usize> = {
+        let mut v = Vec::new();
+        let mut prev_backslash = false;
+        for (i, c) in line.char_indices() {
+            if c == quote && !prev_backslash {
+                v.push(i);
+            }
+            prev_backslash = c == '\\' && !prev_backslash;
+        }
+        v
+    };
+
+    // Pair them up: [0,1], [2,3], …
+    for pair in positions.chunks(2) {
+        if let [s, e] = *pair {
+            // col must be inside or on the delimiters.
+            if col >= s && col <= e {
+                return if inner {
+                    Some((s + quote.len_utf8(), e))
+                } else {
+                    Some((s, e + quote.len_utf8()))
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Find enclosing paragraph (blank-line-delimited).
+fn obj_paragraph<B: Buffer>(buf: &B, pos: Pos, inner: bool) -> Option<(Pos, Pos)> {
+    let total = buf.line_count();
+    let is_blank = |l: usize| buf.line(l).trim().is_empty();
+
+    // Walk up to find the first non-blank line of this paragraph.
+    let mut start_line = pos.line;
+    // If cursor is already on a blank line, there is no paragraph.
+    if is_blank(start_line) {
+        return None;
+    }
+    while start_line > 0 && !is_blank(start_line - 1) {
+        start_line -= 1;
+    }
+
+    // Walk down to find the last non-blank line.
+    let mut end_line = pos.line;
+    while end_line + 1 < total && !is_blank(end_line + 1) {
+        end_line += 1;
+    }
+
+    let end_col = buf.line(end_line).len();
+
+    if inner {
+        Some((Pos::new(start_line, 0), Pos::new(end_line, end_col)))
+    } else {
+        // `around`: include one following blank line (or preceding if none after).
+        if end_line + 1 < total && is_blank(end_line + 1) {
+            let blank_end = buf.line(end_line + 1).len();
+            Some((Pos::new(start_line, 0), Pos::new(end_line + 1, blank_end)))
+        } else if start_line > 0 && is_blank(start_line - 1) {
+            Some((Pos::new(start_line - 1, 0), Pos::new(end_line, end_col)))
+        } else {
+            Some((Pos::new(start_line, 0), Pos::new(end_line, end_col)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1423,5 +1678,97 @@ mod tests {
         let (s2, _) = apply(TrimSelection, s, &mut b);
         assert_eq!(s2.selection.start(), Pos::new(0, 0));
         assert_eq!(s2.selection.end(),   Pos::new(0, 5));
+    }
+
+    // ── Text object tests ──────────────────────────────────────────────────────
+
+    fn select_obj(text: &str, col: usize, inner: bool, kind: TextObjectKind)
+        -> Option<(usize, usize)>
+    {
+        let mut b = buf(text);
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, col));
+        let (s2, _) = apply(SelectObject { inner, kind }, s, &mut b);
+        if let Mode::Visual(VisualKind::Char) = s2.mode {
+            Some((s2.selection.start().col, s2.selection.end().col))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn obj_inner_word_from_middle() {
+        // "hello world" — cursor on 'l' at col 2
+        assert_eq!(select_obj("hello world", 2, true, TextObjectKind::Word), Some((0, 5)));
+    }
+
+    #[test]
+    fn obj_around_word_adds_trailing_space() {
+        // "hello world" — cursor on 'h' (col 0), around = word + space
+        assert_eq!(select_obj("hello world", 0, false, TextObjectKind::Word), Some((0, 6)));
+    }
+
+    #[test]
+    fn obj_inner_word_whitespace_cursor() {
+        // "foo  bar" — cursor on first space (col 3), inner = whitespace run
+        assert_eq!(select_obj("foo  bar", 3, true, TextObjectKind::Word), Some((3, 5)));
+    }
+
+    #[test]
+    fn obj_inner_paren() {
+        // "(hello)" — cursor on 'e' (col 2), inner = "hello" (cols 1-5 exclusive)
+        assert_eq!(select_obj("(hello)", 2, true, TextObjectKind::Paren), Some((1, 6)));
+    }
+
+    #[test]
+    fn obj_around_paren() {
+        // "(hello)" — around = whole string "(hello)" 0-7 exclusive
+        assert_eq!(select_obj("(hello)", 2, false, TextObjectKind::Paren), Some((0, 7)));
+    }
+
+    #[test]
+    fn obj_inner_double_quote() {
+        // `say "hi" now` — cursor inside quotes (col 5)
+        assert_eq!(select_obj("say \"hi\" now", 5, true, TextObjectKind::DoubleQuote), Some((5, 7)));
+    }
+
+    #[test]
+    fn obj_around_double_quote() {
+        assert_eq!(select_obj("say \"hi\" now", 5, false, TextObjectKind::DoubleQuote), Some((4, 8)));
+    }
+
+    #[test]
+    fn obj_inner_inline_math() {
+        // "$x + 1$" — cursor inside (col 2), inner = "x + 1" (cols 1-6 exclusive)
+        assert_eq!(select_obj("$x + 1$", 2, true, TextObjectKind::InlineMath), Some((1, 6)));
+    }
+
+    #[test]
+    fn obj_around_inline_math() {
+        assert_eq!(select_obj("$x + 1$", 2, false, TextObjectKind::InlineMath), Some((0, 7)));
+    }
+
+    #[test]
+    fn obj_inner_brace_nested() {
+        // "{a{b}c}" — cursor on 'a' (col 1), inner = "a{b}c" cols 1-6
+        assert_eq!(select_obj("{a{b}c}", 1, true, TextObjectKind::Brace), Some((1, 6)));
+    }
+
+    #[test]
+    fn obj_select_object_enters_visual_char() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 2));
+        let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::Word }, s, &mut b);
+        assert!(matches!(s2.mode, Mode::Visual(VisualKind::Char)));
+    }
+
+    #[test]
+    fn obj_no_match_stays_normal() {
+        // No quotes on the line — mode should stay Normal.
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::DoubleQuote }, s, &mut b);
+        assert_eq!(s2.mode, Mode::Normal);
     }
 }

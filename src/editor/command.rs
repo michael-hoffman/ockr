@@ -121,6 +121,13 @@ pub enum EditorCommand {
     /// In Normal mode the cursor moves to the first non-whitespace char (identical to `^`).
     TrimSelection,
 
+    // ── Text object selection (Helix `mi` / `ma`) ─────────────────────────
+    /// Select a text object, entering Visual Char mode.
+    ///
+    /// Helix grammar: user selects with `mi<char>` / `ma<char>`, then acts
+    /// (`d`, `y`, `c`).  `inner = true` ↔ `i` (no delimiters/trailing space).
+    SelectObject { inner: bool, kind: TextObjectKind },
+
     // ── Mode transitions ───────────────────────────────────────────────────
     /// Enter Normal mode (Escape / Ctrl-[).
     EnterNormal,
@@ -132,4 +139,35 @@ pub enum EditorCommand {
     // ── No-op ──────────────────────────────────────────────────────────────
     /// Discard the key with no effect (unknown binding in Normal mode, etc.).
     Noop,
+}
+
+// ── Text object kinds ─────────────────────────────────────────────────────────
+
+/// Which flavour of text object `SelectObject` targets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextObjectKind {
+    /// Word (`w`): alphanumeric / `_` run.
+    Word,
+    /// WORD (`W`): any non-whitespace run.
+    WORD,
+    /// Paragraph (`p`): blank-line-delimited block.
+    Paragraph,
+    /// Parentheses `(` / `)`.
+    Paren,
+    /// Braces `{` / `}`.
+    Brace,
+    /// Brackets `[` / `]`.
+    Bracket,
+    /// Angle brackets `<` / `>`.
+    Angle,
+    /// Double-quoted string `"`.
+    DoubleQuote,
+    /// Single-quoted string `'`.
+    SingleQuote,
+    /// Backtick string `` ` ``.
+    Backtick,
+    /// Typst inline-math zone `$…$`.
+    InlineMath,
+    /// Typst content block `[…]` (alias for Bracket but distinct intent).
+    TypstContent,
 }

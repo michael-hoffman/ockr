@@ -51,7 +51,7 @@ use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
     buffer::InMemoryBuffer,
-    command::EditorCommand,
+    command::{EditorCommand, TextObjectKind},
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
 use crate::ui::preview::PreviewPane;
@@ -126,6 +126,12 @@ enum PendingKey {
     G,
     /// `r` was pressed; awaiting the replacement character (`r<c>`).
     Replace,
+    /// `m` was pressed; awaiting `i` (inner) or `a` (around).
+    M,
+    /// `mi` pressed; awaiting the text-object character.
+    MatchInner,
+    /// `ma` pressed; awaiting the text-object character.
+    MatchAround,
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
@@ -581,6 +587,59 @@ impl EditorPane {
                 }
             }
             // Unknown `g…` sequence — fall through to normal handling.
+        }
+
+        // ── `m` text-object sequences (Helix: mi<obj> / ma<obj>) ────────────
+        // Available in both Normal and Visual modes.
+        let in_modal = matches!(self.state.mode, Mode::Normal | Mode::Visual(_));
+        if in_modal && k.key == "m" && !k.modifiers.platform && !k.modifiers.control {
+            self.pending = PendingKey::M;
+            cx.stop_propagation();
+            return;
+        }
+        if self.pending == PendingKey::M {
+            self.pending = PendingKey::None;
+            match k.key.as_str() {
+                "i" => { self.pending = PendingKey::MatchInner; cx.stop_propagation(); return; }
+                "a" => { self.pending = PendingKey::MatchAround; cx.stop_propagation(); return; }
+                _ => {} // fall through — cancel sequence
+            }
+        }
+        if matches!(self.pending, PendingKey::MatchInner | PendingKey::MatchAround) {
+            let inner = self.pending == PendingKey::MatchInner;
+            self.pending = PendingKey::None;
+            // Map keystroke to a text object kind.
+            let kind = if !k.modifiers.platform && !k.modifiers.control {
+                match k.key_char.as_deref().unwrap_or(&k.key) {
+                    "w"  => Some(TextObjectKind::Word),
+                    "W"  => Some(TextObjectKind::WORD),
+                    "p"  => Some(TextObjectKind::Paragraph),
+                    "("  | ")" => Some(TextObjectKind::Paren),
+                    "{"  | "}" => Some(TextObjectKind::Brace),
+                    "["  | "]" => Some(TextObjectKind::Bracket),
+                    "<"  | ">" => Some(TextObjectKind::Angle),
+                    "\"" => Some(TextObjectKind::DoubleQuote),
+                    "'"  => Some(TextObjectKind::SingleQuote),
+                    "`"  => Some(TextObjectKind::Backtick),
+                    "$"  => Some(TextObjectKind::InlineMath),
+                    "t"  => Some(TextObjectKind::TypstContent),
+                    _    => None,
+                }
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                cx.stop_propagation();
+                let prev = std::mem::take(&mut self.state);
+                let (new_state, _) = apply(
+                    EditorCommand::SelectObject { inner, kind },
+                    prev,
+                    &mut self.buffer,
+                );
+                self.state = new_state;
+                cx.notify();
+            }
+            return;
         }
 
         let cmd = keystroke_to_command(event, &self.state);
