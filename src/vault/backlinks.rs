@@ -20,7 +20,7 @@ use crate::vault::VaultFile;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// An in-memory graph of wikilink edges across the vault.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BacklinkIndex {
     /// Maps the **source** file's abs-path to the set of normalised target keys
     /// it links to.  Used to remove stale entries on re-index.

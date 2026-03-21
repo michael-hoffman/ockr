@@ -40,5 +40,7 @@ actions!(
         BufferClose,
         // Preview
         TogglePreviewMode,
+        // Graph view
+        OpenGraphView,
     ]
 );

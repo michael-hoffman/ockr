@@ -45,7 +45,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px,
 };
 
-use crate::actions::{FollowLink, OpenCommandPalette, SaveFile};
+use crate::actions::{FollowLink, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -100,6 +100,8 @@ const HTML_PREAMBLE: &str = concat!(
 pub enum EditorPaneEvent {
     /// Request that MainWindow open the given file.
     OpenFile(PathBuf),
+    /// Request that MainWindow open the command palette.
+    OpenPalette,
 }
 
 impl EventEmitter<EditorPaneEvent> for EditorPane {}
@@ -419,6 +421,14 @@ impl EditorPane {
             return;
         }
 
+        // Cmd-P / Cmd-Shift-P: open command palette.
+        // Emit an event so MainWindow can open the palette; this is more
+        // reliable than action bubbling across view boundaries.
+        if k.modifiers.platform && k.key == "p" {
+            cx.emit(EditorPaneEvent::OpenPalette);
+            return;
+        }
+
         // Cmd-V: paste from OS clipboard.
         if k.modifiers.platform && k.key == "v" {
             if let Some(item) = cx.read_from_clipboard() {
@@ -578,10 +588,11 @@ impl EditorPane {
             return;
         }
 
-        // OpenPalette is a UI command — bubble it up through the window focus chain
-        // so MainWindow's on_action handler receives it.
+        // OpenPalette is a UI command — emit an event so MainWindow opens it.
+        // Using cx.emit is more reliable than window.dispatch_action across
+        // view boundaries.
         if cmd == EditorCommand::OpenPalette {
-            window.dispatch_action(Box::new(OpenCommandPalette), cx);
+            cx.emit(EditorPaneEvent::OpenPalette);
             return;
         }
 

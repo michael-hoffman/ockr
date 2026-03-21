@@ -68,6 +68,7 @@ fn main() {
             KeyBinding::new("ctrl-j", FocusPaneDown, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-alt-h", TogglePreviewMode, None),
+            KeyBinding::new("cmd-shift-g", OpenGraphView, None),
         ]);
 
         // App-level action handlers.
@@ -218,6 +219,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("focus-pane-up",        "Focus Pane Up",                   Some("Ctrl-K")),
         ("focus-pane-down",      "Focus Pane Down",                 Some("Ctrl-J")),
         ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
+        ("open-graph-view",      "Graph View",                       Some("Cmd-Shift-G")),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));

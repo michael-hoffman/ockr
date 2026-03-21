@@ -35,11 +35,13 @@ use gpui::{
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, NewNote, OpenBacklinks, OpenCommandPalette,
-    OpenDailyNote, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
-    SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
+    OpenDailyNote, OpenGraphView, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile,
+    SaveFile, SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode,
+    ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
+use crate::ui::graph_view::{GraphView, GraphViewEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::html_preview::HtmlWebView;
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
@@ -115,10 +117,13 @@ pub struct MainWindow {
     preview_width: f32,
     drag: Option<DragState>,
     palette: Option<Entity<CommandPalette>>,
+    /// True when the palette was just created and needs focus on next render.
+    palette_focus_pending: bool,
     quick_switch: Option<Entity<QuickSwitch>>,
     template_picker: Option<Entity<TemplatePicker>>,
     backlinks: Option<Entity<BacklinkPanel>>,
     vault_search: Option<Entity<VaultSearch>>,
+    graph_view: Option<Entity<GraphView>>,
     recent_paths: Vec<PathBuf>,
 }
 
@@ -214,22 +219,51 @@ impl MainWindow {
             preview_width: 420.0,
             drag: None,
             palette: None,
+            palette_focus_pending: false,
             quick_switch: None,
             template_picker: None,
             backlinks: None,
             vault_search: None,
+            graph_view: None,
             recent_paths: Vec::new(),
         }
     }
 
     // ── Pane management ───────────────────────────────────────────────────────
 
-    /// Subscribe to `EditorPaneEvent::OpenFile` from a pane.
+    /// Subscribe to events from an editor pane.
     fn subscribe_pane(cx: &mut Context<Self>, editor: &Entity<EditorPane>) {
         cx.subscribe(editor, |this, _, event: &EditorPaneEvent, cx| {
             match event {
                 EditorPaneEvent::OpenFile(path) => {
                     this.open_path(path.clone(), cx);
+                }
+                EditorPaneEvent::OpenPalette => {
+                    // Create palette without focusing yet; render() will
+                    // focus it on the next pass (needs &mut Window).
+                    if this.palette.is_some() {
+                        // Already open — toggle off.
+                        this.palette = None;
+                        cx.notify();
+                        return;
+                    }
+                    let palette = cx.new(|cx| CommandPalette::new(cx));
+                    cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
+                        match event {
+                            PaletteEvent::Close => {
+                                this.palette = None;
+                                cx.notify();
+                            }
+                            PaletteEvent::Execute(id) => {
+                                this.palette = None;
+                                cx.notify();
+                                this.handle_palette_execute(id, cx);
+                            }
+                        }
+                    }).detach();
+                    this.palette = Some(palette);
+                    this.palette_focus_pending = true;
+                    cx.notify();
                 }
             }
         }).detach();
@@ -595,6 +629,45 @@ impl MainWindow {
         }
     }
 
+    // ── Story 19: Graph View ──────────────────────────────────────────────────
+
+    fn open_graph_view(
+        &mut self,
+        _: &OpenGraphView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.graph_view.is_some() {
+            self.graph_view = None;
+            cx.notify();
+            return;
+        }
+
+        let (files, backlinks) = {
+            let vault = self.vault.read(cx);
+            (vault.files.clone(), vault.backlinks.clone())
+        };
+        let view = cx.new(|cx| GraphView::new(files, &backlinks, cx));
+        view.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&view, |this, _, event: &GraphViewEvent, cx| {
+            match event {
+                GraphViewEvent::Close => {
+                    this.graph_view = None;
+                    cx.notify();
+                }
+                GraphViewEvent::Open(path) => {
+                    this.graph_view = None;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        }).detach();
+
+        self.graph_view = Some(view);
+        cx.notify();
+    }
+
     fn open_quick_switch(
         &mut self,
         _: &OpenQuickSwitch,
@@ -724,6 +797,31 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Shared: execute a palette command ID dispatched by the user.
+    fn handle_palette_execute(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        match id {
+            "write" | "save-file" => cx.dispatch_action(&SaveFile),
+            "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
+            "quit" => cx.dispatch_action(&Quit),
+            "quit-force" => cx.dispatch_action(&ForceQuit),
+            "reload" => cx.dispatch_action(&ReloadFile),
+            "open" | "open-vault" => cx.dispatch_action(&OpenVault),
+            "new" | "new-note" => cx.dispatch_action(&NewNote),
+            "buffer-next" => cx.dispatch_action(&BufferNext),
+            "buffer-previous" => cx.dispatch_action(&BufferPrevious),
+            "buffer-close" => cx.dispatch_action(&BufferClose),
+            "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
+            "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
+            "vault-search" => cx.dispatch_action(&OpenVaultSearch),
+            "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
+            "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
+            "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
+            "close-pane" => cx.dispatch_action(&ClosePane),
+            "open-graph-view" => cx.dispatch_action(&OpenGraphView),
+            _ => {}
+        }
+    }
+
     fn open_palette(
         &mut self,
         _: &OpenCommandPalette,
@@ -748,26 +846,7 @@ impl MainWindow {
                 PaletteEvent::Execute(id) => {
                     this.palette = None;
                     cx.notify();
-                    match *id {
-                        "write" | "save-file" => cx.dispatch_action(&SaveFile),
-                        "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
-                        "quit" => cx.dispatch_action(&Quit),
-                        "quit-force" => cx.dispatch_action(&ForceQuit),
-                        "reload" => cx.dispatch_action(&ReloadFile),
-                        "open" | "open-vault" => cx.dispatch_action(&OpenVault),
-                        "new" | "new-note" => cx.dispatch_action(&NewNote),
-                        "buffer-next" => cx.dispatch_action(&BufferNext),
-                        "buffer-previous" => cx.dispatch_action(&BufferPrevious),
-                        "buffer-close" => cx.dispatch_action(&BufferClose),
-                        "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
-                        "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
-                        "vault-search" => cx.dispatch_action(&OpenVaultSearch),
-                        "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
-                        "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
-                        "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
-                        "close-pane" => cx.dispatch_action(&ClosePane),
-                        _ => {}
-                    }
+                    this.handle_palette_execute(id, cx);
                 }
             }
         }).detach();
@@ -898,6 +977,15 @@ impl Render for MainWindow {
         let t = cx.global::<ThemePalette>().clone();
         let preview_mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
 
+        // Focus the palette if it was just created via the editor-pane event path
+        // (subscriptions don't receive &mut Window, so we defer the focus to render).
+        if self.palette_focus_pending {
+            if let Some(ref p) = self.palette {
+                p.read(cx).focus_handle.clone().focus(window);
+            }
+            self.palette_focus_pending = false;
+        }
+
         // ── Window dimensions ─────────────────────────────────────────────────
         // Use GPUI's viewport_size — always current, never stale, no AppKit query needed.
         let vp = window.viewport_size();
@@ -947,6 +1035,7 @@ impl Render for MainWindow {
             .flex_row()
             .bg(gpui::rgb(t.bg_surface))
             .on_action(cx.listener(Self::new_note))
+            .on_action(cx.listener(Self::open_graph_view))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_backlinks))
@@ -1051,6 +1140,9 @@ impl Render for MainWindow {
             })
             .when_some(self.vault_search.clone(), |root, panel| {
                 root.child(gpui::deferred(panel).with_priority(100))
+            })
+            .when_some(self.graph_view.clone(), |root, gv| {
+                root.child(gpui::deferred(gv).with_priority(200))
             })
     }
 }
