@@ -544,6 +544,11 @@ impl EditorPane {
             return;
         }
 
+        // We are handling this key — tell GPUI so it returns YES to macOS.
+        // Without this, macOS falls through to [inputContext handleEvent:] which
+        // triggers a second insertion via the IME pipeline and doubles every character.
+        cx.stop_propagation();
+
         // Snapshot before any mutating command.
         if is_buffer_mutating(&cmd) {
             self.push_undo();

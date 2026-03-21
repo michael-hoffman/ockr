@@ -23,6 +23,12 @@ actions!(
         ToggleSidebar,
         SplitPaneVertical,
         SplitPaneHorizontal,
+        ClosePane,
+        // Pane focus navigation (Ctrl-H/J/K/L)
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
         // Navigation
         OpenQuickSwitch,
         OpenBacklinks,

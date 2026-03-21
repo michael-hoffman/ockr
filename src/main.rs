@@ -61,6 +61,11 @@ fn main() {
             KeyBinding::new("cmd-t", OpenDailyNote, None),
             KeyBinding::new("cmd-backslash", SplitPaneVertical, None),
             KeyBinding::new("cmd-shift-backslash", SplitPaneHorizontal, None),
+            KeyBinding::new("cmd-w", ClosePane, None),
+            KeyBinding::new("ctrl-h", FocusPaneLeft, None),
+            KeyBinding::new("ctrl-l", FocusPaneRight, None),
+            KeyBinding::new("ctrl-k", FocusPaneUp, None),
+            KeyBinding::new("ctrl-j", FocusPaneDown, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-alt-h", TogglePreviewMode, None),
         ]);
@@ -207,6 +212,11 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("open-daily-note",      "Open Daily Note",                 Some("Cmd-T")),
         ("split-pane-vertical",  "Split Pane Vertical",             Some("Cmd-\\")),
         ("split-pane-horizontal","Split Pane Horizontal",           Some("Cmd-Shift-\\")),
+        ("close-pane",           "Close Pane",                      Some("Cmd-W")),
+        ("focus-pane-left",      "Focus Pane Left",                 Some("Ctrl-H")),
+        ("focus-pane-right",     "Focus Pane Right",                Some("Ctrl-L")),
+        ("focus-pane-up",        "Focus Pane Up",                   Some("Ctrl-K")),
+        ("focus-pane-down",      "Focus Pane Down",                 Some("Ctrl-J")),
         ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
     ];
     for &(id, name, hint) in cmds {
