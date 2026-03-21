@@ -65,6 +65,35 @@ use crate::vault::{VaultFile, VaultState};
 /// comfortably covering any realistic window height.
 const VIEWPORT_LINES: usize = 80;
 
+/// Typst preamble prepended for HTML-mode compilation only.
+///
+/// Two fixes are bundled here:
+///
+/// 1. **Inline-math paragraph split** — Typst's HTML export treats `$x$`
+///    as a block element, breaking it out of the surrounding paragraph.
+///    The show rule wraps non-block equations in `box` so they stay inline.
+///
+/// 2. **SVG math color** — `html.frame` renders math via the typst SVG
+///    pipeline, which uses the document's `text.fill` for glyph outlines.
+///    The default is black, which is invisible on ockr's dark background.
+///    `#set text(fill: luma(95%))` makes glyph paths near-white.
+///    This set rule only affects SVG frames (text.fill is not yet applied to
+///    HTML elements in typst-html), so normal paragraph text is unaffected.
+const HTML_PREAMBLE: &str = concat!(
+    // Make math glyphs near-white so they show on the dark background.
+    // (text.fill is ignored for HTML elements; only SVG frames honour it.)
+    "#set text(fill: luma(95%))\n",
+    // Fix inline-math paragraph splitting.
+    "#show math.equation: it => context {\n",
+    "  if target() == \"html\" {\n",
+    "    show: if it.block { it => it } else { box }\n",
+    "    html.frame(it)\n",
+    "  } else {\n",
+    "    it\n",
+    "  }\n",
+    "}\n",
+);
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 /// Events emitted by `EditorPane` to its subscribers (e.g. `MainWindow`).
@@ -222,8 +251,20 @@ impl EditorPane {
             .unwrap_or_default();
         // Read the active preview mode from the GPUI global (set by MainWindow toggle).
         let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+
+        // Preprocess source: resolve wikilinks, then optionally prepend the
+        // HTML preamble that fixes inline-math paragraph splitting (a known
+        // Typst HTML-export limitation — `$x$` is treated as a block element
+        // unless wrapped with `box` via a show rule).
+        let preprocessed = preprocess_wikilinks(&self.buffer.text(), &files);
+        let source = if mode == PreviewMode::Html {
+            format!("{HTML_PREAMBLE}{preprocessed}")
+        } else {
+            preprocessed
+        };
+
         let request = CompileRequest {
-            source: preprocess_wikilinks(&self.buffer.text(), &files),
+            source,
             vault_root: self.vault_root.clone(),
             file_path: self.file_rel_path.clone(),
             mode,
