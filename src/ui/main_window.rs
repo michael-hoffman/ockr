@@ -18,17 +18,18 @@ use std::path::PathBuf;
 use futures::StreamExt as _;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Render, Window, deferred, div, prelude::*, px,
+    MouseUpEvent, Render, Window, div, prelude::*, px,
 };
 
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ForceQuit, NewNote, OpenBacklinks,
     OpenCommandPalette, OpenDailyNote, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit,
-    ReloadFile, SaveFile, SaveFileAndQuit, ToggleSidebar,
+    ReloadFile, SaveFile, SaveFileAndQuit, ToggleSidebar, TogglePreviewMode,
 };
-use crate::compiler::{spawn_compiler_thread, CompileResult};
+use crate::compiler::{spawn_compiler_thread, CompileResult, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
+use crate::ui::html_preview::HtmlWebView;
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
 use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
 use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
@@ -61,7 +62,12 @@ pub struct MainWindow {
     pub focus_handle: FocusHandle,
     sidebar: Entity<Sidebar>,
     editor: Entity<EditorPane>,
+    /// PDF rasterised preview — shown when mode is `PreviewMode::Paged`.
     preview: Entity<PreviewPane>,
+    /// Live WKWebView HTML preview — shown when mode is `PreviewMode::Html`.
+    /// Lazily created on the first render in HTML mode; positioned via
+    /// `update_frame()` on every render so it tracks window resizes.
+    html_webview: Option<HtmlWebView>,
     vault: Entity<VaultState>,
     sidebar_visible: bool,
     /// Width of the sidebar pane in pixels.
@@ -101,23 +107,46 @@ impl MainWindow {
         });
 
         let preview_for_task = preview.clone();
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             while let Some(result) = rx.next().await {
                 let preview = preview_for_task.clone();
                 cx.update(|cx| {
-                    preview.update(cx, |pane, cx| match result {
-                        CompileResult::Ok(doc) => pane.set_document(doc, cx),
-                        CompileResult::Err(diags) => {
+                    match result {
+                        CompileResult::OkHtml(ref html) => {
+                            let html = html.clone();
+                            this.update(cx, |win, _cx| {
+                                if let Some(ref wv) = win.html_webview {
+                                    wv.load_html(&html);
+                                }
+                            }).ok();
+                        }
+                        CompileResult::Ok(ref doc) => {
+                            let doc = doc.clone();
+                            preview.update(cx, |pane, cx| pane.set_document(doc, cx));
+                        }
+                        CompileResult::Err(ref diags) => {
                             let msg = diags
                                 .first()
                                 .map(|d| d.message.clone())
                                 .unwrap_or_else(|| "Unknown error".to_string());
-                            pane.set_error(msg, cx);
+                            // Show error in whichever preview is active.
+                            this.update(cx, |win, _cx| {
+                                if let Some(ref wv) = win.html_webview {
+                                    wv.load_error(&msg);
+                                }
+                            }).ok();
+                            preview.update(cx, |pane, cx| pane.set_error(msg, cx));
                         }
-                        CompileResult::Panicked(msg) => {
-                            pane.set_error(format!("Compiler panicked: {msg}"), cx);
+                        CompileResult::Panicked(ref msg) => {
+                            let msg = format!("Compiler panicked: {msg}");
+                            this.update(cx, |win, _cx| {
+                                if let Some(ref wv) = win.html_webview {
+                                    wv.load_error(&msg);
+                                }
+                            }).ok();
+                            preview.update(cx, |pane, cx| pane.set_error(msg, cx));
                         }
-                    });
+                    }
                 })
                 .ok();
             }
@@ -149,6 +178,7 @@ impl MainWindow {
             sidebar,
             editor,
             preview,
+            html_webview: None, // lazily created on first render in HTML mode
             vault: vault.clone(),
             sidebar_visible: true,
             sidebar_width: 220.0,
@@ -164,6 +194,45 @@ impl MainWindow {
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    /// Toggle between HTML (default) and Paged/PDF preview modes.
+    ///
+    /// Flips the `PreviewMode` global and immediately re-triggers compilation
+    /// so the preview updates without requiring a new keystroke.
+    fn toggle_preview_mode(
+        &mut self,
+        _: &TogglePreviewMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+        let next = match current {
+            PreviewMode::Html => PreviewMode::Paged,
+            PreviewMode::Paged => PreviewMode::Html,
+        };
+        cx.set_global(next);
+
+        // Hide/show the WKWebView immediately so the switch feels instant.
+        match next {
+            PreviewMode::Html => {
+                if let Some(ref wv) = self.html_webview {
+                    wv.set_hidden(false);
+                }
+            }
+            PreviewMode::Paged => {
+                if let Some(ref wv) = self.html_webview {
+                    wv.set_hidden(true);
+                }
+            }
+        }
+
+        // Re-compile with the new mode so the preview updates.
+        self.active_editor().clone().update(cx, |pane, cx| {
+            pane.trigger_compile(cx);
+        });
+
         cx.notify();
     }
 
@@ -533,8 +602,59 @@ impl Focusable for MainWindow {
 // ── Render ────────────────────────────────────────────────────────────────────
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<ThemePalette>().clone();
+        let preview_mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+
+        // ── WKWebView lifecycle ───────────────────────────────────────────────
+        //
+        // In HTML mode: lazily create the WKWebView (which also preloads the
+        // Oxide CSS skeleton), position it over the preview area, and reveal it.
+        // In Paged mode: hide it (but keep it alive so the next toggle is fast).
+        //
+        // Frame computation (AppKit coordinates — y=0 at bottom-left):
+        //   • content_w / content_h — full window content area
+        //   • preview_x             — left edge of the preview column
+        // GPUI's `window.bounds()` returns the content area in layout pixels.
+        // Get content dimensions directly from the AppKit window so we don't
+        // depend on GPUI's Pixels internal representation.
+        let (content_w, content_h) = {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                use objc2_foundation::MainThreadMarker;
+                use objc2_app_kit::NSApplication;
+                let mtm = MainThreadMarker::new_unchecked();
+                let app = NSApplication::sharedApplication(mtm);
+                app.mainWindow()
+                    .map(|w| {
+                        let r = w.contentLayoutRect();
+                        (r.size.width, r.size.height)
+                    })
+                    .unwrap_or((1280.0, 800.0))
+            }
+            #[cfg(not(target_os = "macos"))]
+            { (1280.0_f64, 800.0_f64) }
+        };
+        let _ = window; // silence unused warning
+        let preview_x = content_w - self.preview_width as f64;
+
+        match preview_mode {
+            PreviewMode::Html => {
+                if self.html_webview.is_none() {
+                    // First render in HTML mode — create and pre-warm.
+                    self.html_webview = HtmlWebView::new();
+                }
+                if let Some(ref wv) = self.html_webview {
+                    wv.update_frame(preview_x, 0.0, self.preview_width as f64, content_h);
+                    wv.set_hidden(false);
+                }
+            }
+            PreviewMode::Paged => {
+                if let Some(ref wv) = self.html_webview {
+                    wv.set_hidden(true);
+                }
+            }
+        }
 
         // Drag handle: a 4px vertical strip with ew-resize cursor.
         let border_subtle = t.border_subtle;
@@ -565,6 +685,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_preview_mode))
             .on_action(cx.listener(Self::open_daily_note))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
@@ -581,6 +702,23 @@ impl Render for MainWindow {
                 .child(handle(DragTarget::Sidebar, cx));
         }
 
+        // Preview column: GPUI renders the PDF pane in both modes, but in HTML
+        // mode the WKWebView (an NSView sibling) sits on top of it, so users
+        // only see the web view.  The GPUI element keeps the flex layout intact.
+        let preview_col = match preview_mode {
+            PreviewMode::Paged => div()
+                .w(px(self.preview_width))
+                .h_full()
+                .overflow_hidden()
+                .child(self.preview.clone())
+                .into_any_element(),
+            PreviewMode::Html => div()
+                .w(px(self.preview_width))
+                .h_full()
+                .bg(gpui::rgb(t.bg_panel)) // visible briefly before first WKWebView paint
+                .into_any_element(),
+        };
+
         root.child(
             div()
                 .flex_1()
@@ -590,13 +728,7 @@ impl Render for MainWindow {
                 .child(self.editor.clone()),
         )
         .child(handle(DragTarget::Preview, cx))
-        .child(
-            div()
-                .w(px(self.preview_width))
-                .h_full()
-                .overflow_hidden()
-                .child(self.preview.clone()),
-        )
+        .child(preview_col)
         // Overlays — painted after all other content via deferred().
         .when_some(self.palette.clone(), |root, palette| {
             root.child(gpui::deferred(palette).with_priority(100))

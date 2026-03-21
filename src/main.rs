@@ -8,12 +8,15 @@ mod vault;
 
 use actions::*;
 use command::{CommandEntry, CommandRegistry};
+use compiler::PreviewMode;
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, PathPromptOptions, SharedString,
     TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 use ui::theme::ThemePalette;
 use vault::VaultState;
+
+impl gpui::Global for PreviewMode {}
 
 fn main() {
     Application::new().run(|cx: &mut App| {
@@ -23,6 +26,10 @@ fn main() {
         // Load the Oxide theme (dark, ochre accent).
         // Ochre (light) is available via ThemePalette::ochre() when wanted.
         cx.set_global(ThemePalette::oxide());
+
+        // Default to HTML preview (faster; no page layout step).
+        // Cmd-Opt-H toggles to paged/PDF mode.
+        cx.set_global(PreviewMode::Html);
 
         // Initialize the command registry as a GPUI global.
         let mut registry = CommandRegistry::new();
@@ -55,6 +62,7 @@ fn main() {
             KeyBinding::new("cmd-backslash", SplitPaneVertical, None),
             KeyBinding::new("cmd-shift-backslash", SplitPaneHorizontal, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-alt-h", TogglePreviewMode, None),
         ]);
 
         // App-level action handlers.
@@ -199,6 +207,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("open-daily-note",      "Open Daily Note",                 Some("Cmd-T")),
         ("split-pane-vertical",  "Split Pane Vertical",             Some("Cmd-\\")),
         ("split-pane-horizontal","Split Pane Horizontal",           Some("Cmd-Shift-\\")),
+        ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));

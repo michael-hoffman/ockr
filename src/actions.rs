@@ -32,5 +32,7 @@ actions!(
         BufferNext,
         BufferPrevious,
         BufferClose,
+        // Preview
+        TogglePreviewMode,
     ]
 );

@@ -19,7 +19,7 @@ use typst::foundations::{Bytes, Datetime};
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst::{Library, LibraryExt, World};
+use typst::{Feature, Features, Library, LibraryExt, World};
 
 
 /// The in-memory World presented to the typst compiler.
@@ -56,8 +56,15 @@ impl OckrWorld {
         let main_id = FileId::new(None, VirtualPath::new("/main.typ"));
         let source = Source::new(main_id, String::new());
 
+        // Enable the experimental HTML export feature so
+        // `typst::compile::<HtmlDocument>()` succeeds without the warning
+        // that blocks compilation.
+        let library = Library::builder()
+            .with_features(Features::from_iter([Feature::Html]))
+            .build();
+
         Self {
-            library: LazyHash::new(Library::default()),
+            library: LazyHash::new(library),
             book: LazyHash::new(book),
             fonts,
             main_id,

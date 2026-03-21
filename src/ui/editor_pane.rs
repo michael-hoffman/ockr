@@ -46,7 +46,7 @@ use gpui::{
 };
 
 use crate::actions::{FollowLink, OpenCommandPalette, SaveFile};
-use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle};
+use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -209,7 +209,7 @@ impl EditorPane {
     ///
     /// Also marks the preview pane as stale immediately so the UI shows
     /// visual feedback that a compile is pending.
-    fn trigger_compile(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn trigger_compile(&mut self, cx: &mut Context<Self>) {
         let Some(compiler) = self.compiler.clone() else { return };
 
         // Bump sequence — the old task will see a mismatch and drop.
@@ -220,10 +220,13 @@ impl EditorPane {
         let files = self.vault.as_ref()
             .map(|v| v.read(cx).files.clone())
             .unwrap_or_default();
+        // Read the active preview mode from the GPUI global (set by MainWindow toggle).
+        let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
         let request = CompileRequest {
             source: preprocess_wikilinks(&self.buffer.text(), &files),
             vault_root: self.vault_root.clone(),
             file_path: self.file_rel_path.clone(),
+            mode,
         };
 
         cx.spawn(async move |this, cx| {

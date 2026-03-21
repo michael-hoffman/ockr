@@ -30,6 +30,19 @@ use self::world::OckrWorld;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// Which output format the compiler should produce.
+///
+/// Stored as a GPUI global so any component can read it without threading it
+/// through every call site.  Toggled by `TogglePreviewMode`.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum PreviewMode {
+    /// Typst HTML export — faster (no page layout), displayed in WKWebView.
+    #[default]
+    Html,
+    /// Typst paged/PDF export — rasterised to a bitmap and shown in PreviewPane.
+    Paged,
+}
+
 /// A compilation request sent from the UI thread to the compiler thread.
 pub struct CompileRequest {
     /// Pre-processed source text (wikilinks already resolved).
@@ -40,6 +53,8 @@ pub struct CompileRequest {
     /// Used to set the correct virtual path on the main `FileId` so that
     /// relative imports like `#import "../_template.typ"` resolve correctly.
     pub file_path: Option<String>,
+    /// Output format requested.
+    pub mode: PreviewMode,
 }
 
 /// A diagnostic produced by the typst compiler.
@@ -59,8 +74,10 @@ pub enum DiagnosticSeverity {
 /// The result of one compilation.
 #[derive(Clone)]
 pub enum CompileResult {
-    /// Successful compilation — callers can render `doc`.
+    /// Successful paged compilation — callers can rasterise `doc` for the PDF preview.
     Ok(Arc<PagedDocument>),
+    /// Successful HTML compilation — `String` is a complete `<!DOCTYPE html>` document.
+    OkHtml(String),
     /// Compilation failed with one or more diagnostics.
     Err(Vec<Diagnostic>),
     /// The compiler thread panicked. The `String` contains the panic message.
@@ -143,10 +160,11 @@ fn compiler_loop(
         }
         let path = req.file_path.as_deref().unwrap_or("main.typ");
         world.set_source(path, req.source);
+        let mode = req.mode;
 
         // Compile, catching any panics so the thread stays alive.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compile(&world)
+            compile(&world, mode)
         }));
 
         let outcome = match result {
@@ -166,11 +184,57 @@ fn compiler_loop(
     }
 }
 
-fn compile(world: &OckrWorld) -> CompileResult {
+fn compile(world: &OckrWorld, mode: PreviewMode) -> CompileResult {
+    match mode {
+        PreviewMode::Html => compile_html(world),
+        PreviewMode::Paged => compile_paged(world),
+    }
+}
+
+fn compile_paged(world: &OckrWorld) -> CompileResult {
     let warned = typst::compile::<PagedDocument>(world);
 
     match warned.output {
         Ok(doc) => CompileResult::Ok(Arc::new(doc)),
+        Err(errors) => {
+            let diags = errors
+                .iter()
+                .map(|d| Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: d.message.to_string(),
+                    span_file: None,
+                })
+                .chain(warned.warnings.iter().map(|w| Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    message: w.message.to_string(),
+                    span_file: None,
+                }))
+                .collect();
+            CompileResult::Err(diags)
+        }
+    }
+}
+
+fn compile_html(world: &OckrWorld) -> CompileResult {
+    let warned = typst::compile::<typst_html::HtmlDocument>(world);
+
+    match warned.output {
+        Ok(doc) => {
+            match typst_html::html(&doc) {
+                Ok(html_string) => return CompileResult::OkHtml(html_string),
+                Err(extra_diags) => {
+                    let diags: Vec<Diagnostic> = extra_diags
+                        .iter()
+                        .map(|d| Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: d.message.to_string(),
+                            span_file: None,
+                        })
+                        .collect();
+                    return CompileResult::Err(diags);
+                }
+            }
+        }
         Err(errors) => {
             let diags = errors
                 .iter()
