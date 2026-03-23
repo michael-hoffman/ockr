@@ -587,6 +587,124 @@ pub fn apply<B: Buffer>(
             (state, None)
         }
 
+        FlipSelection => {
+            if let Mode::Visual(_) = state.mode {
+                std::mem::swap(&mut state.selection.anchor, &mut state.selection.cursor);
+            }
+            (state, None)
+        }
+
+        ExtendLineBelow => {
+            match state.mode {
+                Mode::Normal => {
+                    // First press: select the current line (same as `V`).
+                    return apply(SelectCurrentLine, state, buf);
+                }
+                Mode::Visual(VisualKind::Line) => {
+                    // Extend the cursor endpoint one line downward.
+                    let max_line = buf.line_count().saturating_sub(1);
+                    if state.selection.cursor.line < max_line {
+                        let new_line = state.selection.cursor.line + 1;
+                        let line_len = buf.line(new_line).len();
+                        state.selection.cursor = Pos::new(new_line, line_len);
+                    }
+                }
+                Mode::Visual(_) => {
+                    // Promote char/block selection to line, then extend.
+                    let line = state.cursor().line;
+                    let line_len = buf.line(line).len();
+                    state.selection.anchor = Pos::new(line, 0);
+                    state.selection.cursor = Pos::new(line, line_len);
+                    state.mode = Mode::Visual(VisualKind::Line);
+                }
+                _ => {}
+            }
+            (state, None)
+        }
+
+        ReplaceWithYanked => {
+            if state.yank_register.is_empty() {
+                return (state, None);
+            }
+            // Save yank register before DeleteSelection overwrites it, so we
+            // can paste the original yanked text rather than what was deleted.
+            let saved_yank = state.yank_register.clone();
+            let (mut after_delete, _) = apply(DeleteSelection, state, buf);
+            after_delete.yank_register = saved_yank;
+            let (final_state, effect) = apply(PasteBefore, after_delete, buf);
+            (final_state, effect)
+        }
+
+        AutoIndent => {
+            let (start_line, end_line) = visual_line_range(&state);
+            let mut changed = false;
+            for l in start_line..=end_line {
+                // Find the indentation of the nearest non-empty line above.
+                let target_indent: String = (0..l)
+                    .rev()
+                    .find(|&prev| !buf.line(prev).trim().is_empty())
+                    .map(|prev| {
+                        buf.line(prev)
+                            .chars()
+                            .take_while(|c| c.is_whitespace())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Measure and remove current leading whitespace.
+                let current_ws: usize = buf.line(l)
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.len_utf8())
+                    .sum();
+
+                // Skip if already correct.
+                if current_ws == target_indent.len()
+                    && buf.line(l).starts_with(target_indent.as_str())
+                {
+                    continue;
+                }
+                if current_ws > 0 {
+                    buf.delete_range(l, 0, current_ws);
+                }
+                if !target_indent.is_empty() {
+                    buf.insert(l, 0, &target_indent);
+                }
+                changed = true;
+            }
+            state.mode = Mode::Normal;
+            if changed {
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
+        DeleteToLineStart => {
+            let pos = state.cursor();
+            if pos.col > 0 {
+                buf.delete_range(pos.line, 0, pos.col);
+                state.move_cursor_to(Pos::new(pos.line, 0));
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
+        DeleteRestOfLine => {
+            let pos = state.cursor();
+            let line_len = buf.line(pos.line).len();
+            if pos.col < line_len {
+                buf.delete_range(pos.line, pos.col, line_len);
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
         TrimSelection => {
             match state.mode {
                 Mode::Normal => {

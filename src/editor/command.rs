@@ -115,6 +115,22 @@ pub enum EditorCommand {
     DeleteWordBefore,
     /// Collapse the current Visual selection to its cursor endpoint and return to Normal (`;`).
     CollapseSelection,
+    /// Swap anchor and cursor of the current Visual selection (`Alt-;`).
+    /// In Normal mode this is a no-op.
+    FlipSelection,
+    /// Replace the active selection (or current line in Normal) with the yank register (`R`).
+    /// The yank register is not modified, so `R` can be repeated to paste the same text.
+    ReplaceWithYanked,
+    /// Extend the selection to cover the current line; if already in Visual Line,
+    /// extend the cursor one line down (`X`).
+    ExtendLineBelow,
+    /// Re-indent selected lines (or current line) to match the previous non-empty
+    /// line's indentation level (`=`).
+    AutoIndent,
+    /// Delete from the start of the line to the cursor (`Ctrl-u` in Insert mode).
+    DeleteToLineStart,
+    /// Delete from the cursor to the end of the line without yanking (`Ctrl-k` in Insert mode).
+    DeleteRestOfLine,
     /// Trim leading/trailing whitespace from the selection bounds (`_`).
     /// In Visual mode the selection is shrunk to exclude whitespace at both ends;
     /// the mode switches to Visual Char if it was Visual Line.

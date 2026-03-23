@@ -50,7 +50,10 @@ pub fn preprocess_wikilinks(source: &str, files: &[VaultFile]) -> String {
 
         let key = normalise(&target);
         let replacement = if let Some(path) = index.get(&key) {
-            format!("#link(\"{path}\")[{display}]")
+            // Use the ockr:// scheme so the HTML preview's JS can intercept
+            // link clicks and open the target note without a page navigation.
+            // The paged / PDF renderer encodes this as a PDF URI annotation.
+            format!("#link(\"ockr://{path}\")[{display}]")
         } else {
             // Broken link: render in coral-red so the user can see it,
             // but do not produce a compile error.
@@ -97,14 +100,14 @@ mod tests {
     fn resolves_exact_title() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
         let out = preprocess_wikilinks("See [[Bayes Theorem]] for details.", &files);
-        assert_eq!(out, "See #link(\"zettels/bayes-theorem.typ\")[Bayes Theorem] for details.");
+        assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes Theorem] for details.");
     }
 
     #[test]
     fn custom_display_text() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
         let out = preprocess_wikilinks("See [[Bayes Theorem|Bayes]] for details.", &files);
-        assert_eq!(out, "See #link(\"zettels/bayes-theorem.typ\")[Bayes] for details.");
+        assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes] for details.");
     }
 
     #[test]
@@ -128,8 +131,8 @@ mod tests {
             file("beta", "beta.typ"),
         ];
         let out = preprocess_wikilinks("[[Alpha]] and [[Beta]].", &files);
-        assert!(out.contains("#link(\"alpha.typ\")[Alpha]"));
-        assert!(out.contains("#link(\"beta.typ\")[Beta]"));
+        assert!(out.contains("#link(\"ockr://alpha.typ\")[Alpha]"));
+        assert!(out.contains("#link(\"ockr://beta.typ\")[Beta]"));
     }
 
     #[test]
@@ -137,6 +140,6 @@ mod tests {
         let files = vec![file("my-note", "my-note.typ")];
         // "My Note" (spaces) should match "my-note" (hyphens) after normalisation.
         let out = preprocess_wikilinks("[[My Note]]", &files);
-        assert!(out.contains("#link(\"my-note.typ\")"), "hyphen↔space normalisation failed");
+        assert!(out.contains("#link(\"ockr://my-note.typ\")"), "hyphen↔space normalisation failed");
     }
 }

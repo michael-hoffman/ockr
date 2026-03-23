@@ -24,4 +24,11 @@ futures = "0.3"
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage", "NSView", "NSWindow"] }
-objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKWebViewConfiguration"] }
+objc2-web-kit = { version = "0.3.2", features = [
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKScriptMessage",
+    "WKScriptMessageHandler",
+] }

@@ -50,7 +50,7 @@ use crate::ui::template_picker::{
 };
 use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
 use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
-use crate::ui::preview::PreviewPane;
+use crate::ui::preview::{PreviewEvent, PreviewPane};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
@@ -69,11 +69,29 @@ enum SplitLayout {
     Horizontal,
 }
 
+// ── Tab ───────────────────────────────────────────────────────────────────────
+
+/// Saved state for one open file tab within a pane.
+///
+/// When the user switches away from a tab, its cursor position and viewport
+/// are persisted here so they are restored on return.
+#[derive(Clone)]
+struct TabInfo {
+    path: PathBuf,
+    /// File stem shown in the tab label (e.g. `"my-note"`).
+    title: String,
+}
+
 // ── Pane entry ────────────────────────────────────────────────────────────────
 
-/// One slot in the editor area.
+/// One slot in the editor area: a single `EditorPane` entity plus the ordered
+/// list of tabs it currently holds.
 struct PaneEntry {
     editor: Entity<EditorPane>,
+    /// Open tabs.  Always at least one entry while a file is loaded.
+    tabs: Vec<TabInfo>,
+    /// Index of the currently displayed tab.
+    active_tab: usize,
 }
 
 // ── Drag state ────────────────────────────────────────────────────────────────
@@ -111,6 +129,10 @@ pub struct MainWindow {
     preview: Entity<PreviewPane>,
     /// HTML preview via WKWebView (lazily created on first HTML-mode render).
     html_webview: Option<HtmlWebView>,
+    /// Sender half of the wikilink-click channel.  Cloned into `HtmlWebView`
+    /// on creation so the JS message handler can forward clicked `ockr://`
+    /// paths back to the async task in `new()`.
+    html_link_sender: futures::channel::mpsc::UnboundedSender<String>,
     vault: Entity<VaultState>,
     sidebar_visible: bool,
     sidebar_width: f32,
@@ -137,6 +159,32 @@ impl MainWindow {
         let compiler_handle = spawn_compiler_thread(move |result| {
             let _ = tx.unbounded_send(result);
         });
+
+        // ── Wikilink click channel (HTML preview → open_path) ────────────────
+        // OckrLinkHandler posts vault-relative paths here when the user
+        // clicks an ockr:// link in the HTML preview.  We keep the sender so
+        // we can pass it to HtmlWebView when it is created lazily on first
+        // render (stored in html_link_sender below).
+        let (link_tx, mut link_rx) =
+            futures::channel::mpsc::unbounded::<String>();
+
+        // Spawn an async task to drain the channel and open clicked links.
+        {
+            let vault_for_links = vault.clone();
+            cx.spawn(async move |this, cx| {
+                while let Some(rel_path) = link_rx.next().await {
+                    let path = cx.update(|cx| {
+                        let root = vault_for_links.read(cx).root.clone()?;
+                        Some(root.join(&rel_path))
+                    }).ok().flatten();
+                    if let Some(abs_path) = path {
+                        cx.update(|cx| {
+                            this.update(cx, |win, cx| win.open_path(abs_path, cx)).ok();
+                        }).ok();
+                    }
+                }
+            }).detach();
+        }
 
         // ── Initial pane ─────────────────────────────────────────────────────
         let editor = cx.new(|cx| EditorPane::new(cx));
@@ -189,6 +237,21 @@ impl MainWindow {
             }
         }).detach();
 
+        // ── Paged preview → open wikilink ─────────────────────────────────────
+        // When the user clicks an ockr:// link in the rasterised preview,
+        // resolve the vault-relative path and open it in the active editor.
+        cx.subscribe(&preview, {
+            let vault = vault.clone();
+            move |this, _, event: &PreviewEvent, cx| {
+                let PreviewEvent::OpenLink(url) = event;
+                let rel_path = url.strip_prefix("ockr://").unwrap_or(url.as_str());
+                if let Some(root) = vault.read(cx).root.clone() {
+                    let abs_path = root.join(rel_path);
+                    this.open_path(abs_path, cx);
+                }
+            }
+        }).detach();
+
         // ── Sidebar → active editor ───────────────────────────────────────────
         cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| {
             match event {
@@ -201,7 +264,7 @@ impl MainWindow {
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
 
-        let panes = vec![PaneEntry { editor }];
+        let panes = vec![PaneEntry { editor, tabs: Vec::new(), active_tab: 0 }];
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -226,6 +289,7 @@ impl MainWindow {
             vault_search: None,
             graph_view: None,
             recent_paths: Vec::new(),
+            html_link_sender: link_tx,
         }
     }
 
@@ -312,7 +376,10 @@ impl MainWindow {
         let new_editor = self.new_pane(cx);
         // Open the same file as the active pane in the new pane.
         self.copy_file_to_new_pane(&new_editor, cx);
-        self.panes.push(PaneEntry { editor: new_editor });
+        // Mirror the active pane's tabs into the new pane entry.
+        let tabs = self.panes[self.active_idx].tabs.clone();
+        let active_tab = self.panes[self.active_idx].active_tab;
+        self.panes.push(PaneEntry { editor: new_editor, tabs, active_tab });
         self.split_layout = SplitLayout::Vertical;
         self.pane_split_frac = 0.5;
         let new_idx = self.panes.len() - 1;
@@ -332,7 +399,9 @@ impl MainWindow {
         }
         let new_editor = self.new_pane(cx);
         self.copy_file_to_new_pane(&new_editor, cx);
-        self.panes.push(PaneEntry { editor: new_editor });
+        let tabs = self.panes[self.active_idx].tabs.clone();
+        let active_tab = self.panes[self.active_idx].active_tab;
+        self.panes.push(PaneEntry { editor: new_editor, tabs, active_tab });
         self.split_layout = SplitLayout::Horizontal;
         self.pane_split_frac = 0.5;
         let new_idx = self.panes.len() - 1;
@@ -457,24 +526,141 @@ impl MainWindow {
             *vs = crate::vault::VaultState::open(root.clone());
         });
 
-        let rel = PathBuf::from(".ockr/daily").join(format!("{date_str}.typ"));
-        let vault_files = self.vault.read(cx).files.clone();
-        if let Some(file) = vault_files.iter().find(|f| f.rel_path == rel).cloned() {
-            self.active_editor().clone().update(cx, |pane, cx| {
-                pane.open_file(&file, root, window, cx);
-            });
-            self.recent_paths.retain(|p| p != &note_path);
-            self.recent_paths.insert(0, note_path);
-            self.recent_paths.truncate(20);
-            cx.notify();
-        }
+        // Route through tab management so the daily note gets a tab.
+        let _ = window; // Window not needed — open_tab_in_pane uses open_file_no_focus.
+        self.open_tab_in_pane(self.active_idx, note_path, cx);
+        cx.notify();
     }
 
     fn open_path(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
-        open_file_in_editor(&abs_path, self.active_editor(), &self.vault, cx);
+        self.open_tab_in_pane(self.active_idx, abs_path, cx);
+    }
+
+    // ── Tab management ────────────────────────────────────────────────────────
+
+    /// Open `abs_path` as a new tab in `pane_idx`, or switch to it if already open.
+    fn open_tab_in_pane(&mut self, pane_idx: usize, abs_path: PathBuf, cx: &mut Context<Self>) {
+        // Derive a display title from the file stem.
+        let title = abs_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("untitled")
+            .to_string();
+
+        // If the file is already open in this pane, just switch to that tab.
+        if let Some(existing_idx) = self.panes[pane_idx]
+            .tabs
+            .iter()
+            .position(|t| t.path == abs_path)
+        {
+            if existing_idx != self.panes[pane_idx].active_tab {
+                self.switch_tab_in_pane(pane_idx, existing_idx, cx);
+            }
+            self.recent_paths.retain(|p| p != &abs_path);
+            self.recent_paths.insert(0, abs_path);
+            self.recent_paths.truncate(20);
+            return;
+        }
+
+        // New file: load it into the editor.
+        open_file_in_editor(&abs_path, &self.panes[pane_idx].editor, &self.vault, cx);
+
+        // Add or replace a tab entry.
+        // Strategy: add after the currently active tab so new tabs feel adjacent.
+        let insert_at = self.panes[pane_idx].active_tab + 1;
+        let new_tab = TabInfo { path: abs_path.clone(), title };
+        if insert_at >= self.panes[pane_idx].tabs.len() {
+            self.panes[pane_idx].tabs.push(new_tab);
+            self.panes[pane_idx].active_tab = self.panes[pane_idx].tabs.len() - 1;
+        } else {
+            self.panes[pane_idx].tabs.insert(insert_at, new_tab);
+            self.panes[pane_idx].active_tab = insert_at;
+        }
+
         self.recent_paths.retain(|p| p != &abs_path);
         self.recent_paths.insert(0, abs_path);
         self.recent_paths.truncate(20);
+    }
+
+    /// Switch the active tab of `pane_idx` to `tab_idx`, loading that file.
+    fn switch_tab_in_pane(&mut self, pane_idx: usize, tab_idx: usize, cx: &mut Context<Self>) {
+        if pane_idx >= self.panes.len() { return; }
+        let pane = &self.panes[pane_idx];
+        if tab_idx >= pane.tabs.len() || tab_idx == pane.active_tab { return; }
+
+        // Load the target file into the editor.
+        let path = pane.tabs[tab_idx].path.clone();
+        open_file_in_editor(&path, &self.panes[pane_idx].editor, &self.vault, cx);
+        self.panes[pane_idx].active_tab = tab_idx;
+    }
+
+    fn buffer_next(
+        &mut self,
+        _: &BufferNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = &self.panes[self.active_idx];
+        if pane.tabs.len() <= 1 { return; }
+        let next = (pane.active_tab + 1) % pane.tabs.len();
+        self.switch_tab_in_pane(self.active_idx, next, cx);
+        cx.notify();
+    }
+
+    fn buffer_prev(
+        &mut self,
+        _: &BufferPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = &self.panes[self.active_idx];
+        if pane.tabs.len() <= 1 { return; }
+        let prev = if pane.active_tab == 0 {
+            pane.tabs.len() - 1
+        } else {
+            pane.active_tab - 1
+        };
+        self.switch_tab_in_pane(self.active_idx, prev, cx);
+        cx.notify();
+    }
+
+    fn buffer_close_tab(
+        &mut self,
+        _: &BufferClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane_idx = self.active_idx;
+        let pane = &mut self.panes[pane_idx];
+
+        if pane.tabs.is_empty() {
+            return;
+        }
+
+        let closing = pane.active_tab;
+        pane.tabs.remove(closing);
+
+        if pane.tabs.is_empty() {
+            // No more tabs — nothing left to show; just notify.
+            pane.active_tab = 0;
+            cx.notify();
+            return;
+        }
+
+        // Adjust active index after removal.
+        let new_active = if closing >= pane.tabs.len() {
+            pane.tabs.len() - 1
+        } else {
+            closing
+        };
+        let path = pane.tabs[new_active].path.clone();
+        let editor = pane.editor.clone();
+        open_file_in_editor(&path, &editor, &self.vault, cx);
+        self.panes[pane_idx].active_tab = new_active;
+
+        // Re-focus the editor after closing.
+        editor.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
     }
 
     // ── Story 18: Note Templates ──────────────────────────────────────────────
@@ -568,18 +754,9 @@ impl MainWindow {
             *vs = crate::vault::VaultState::open(vault_root.clone());
         });
 
-        let abs_path = note_path.clone();
-        let vault_files = self.vault.read(cx).files.clone();
-        if let Some(file) = vault_files.iter().find(|f| f.abs_path == abs_path).cloned() {
-            let editor = self.active_editor().clone();
-            editor.update(cx, |pane, cx| {
-                pane.open_file_no_focus(&file, vault_root, cx);
-            });
-            self.recent_paths.retain(|p| p != &abs_path);
-            self.recent_paths.insert(0, abs_path);
-            self.recent_paths.truncate(20);
-            cx.notify();
-        }
+        // Route through tab management.
+        self.open_tab_in_pane(self.active_idx, note_path, cx);
+        cx.notify();
     }
 
     /// Create a new note when a `Window` is available (direct call path).
@@ -615,18 +792,10 @@ impl MainWindow {
             *vs = crate::vault::VaultState::open(vault_root.clone());
         });
 
-        let abs_path = note_path.clone();
-        let vault_files = self.vault.read(cx).files.clone();
-        if let Some(file) = vault_files.iter().find(|f| f.abs_path == abs_path).cloned() {
-            let editor = self.active_editor().clone();
-            editor.update(cx, |pane, cx| {
-                pane.open_file(&file, vault_root, window, cx);
-            });
-            self.recent_paths.retain(|p| p != &abs_path);
-            self.recent_paths.insert(0, abs_path);
-            self.recent_paths.truncate(20);
-            cx.notify();
-        }
+        // Route through tab management.
+        let _ = window; // open_tab_in_pane uses open_file_no_focus (no Window needed).
+        self.open_tab_in_pane(self.active_idx, note_path, cx);
+        cx.notify();
     }
 
     // ── Story 19: Graph View ──────────────────────────────────────────────────
@@ -1000,7 +1169,7 @@ impl Render for MainWindow {
         match preview_mode {
             PreviewMode::Html => {
                 if self.html_webview.is_none() {
-                    self.html_webview = HtmlWebView::new();
+                    self.html_webview = HtmlWebView::new(self.html_link_sender.clone());
                 }
                 if let Some(ref wv) = self.html_webview {
                     wv.update_frame(preview_x, 0.0, self.preview_width as f64, content_h);
@@ -1053,6 +1222,9 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::buffer_next))
+            .on_action(cx.listener(Self::buffer_prev))
+            .on_action(cx.listener(Self::buffer_close_tab))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 
@@ -1069,47 +1241,134 @@ impl Render for MainWindow {
         // Sidebar width + 4 handle + [editor area] + 4 handle + preview width.
         // Editor area = flex_1 so it fills whatever remains.
         //
-        // In split mode, the editor area is further divided into two sub-panes
-        // separated by a PaneDivider handle.
+        // Each sub-pane is rendered as a flex-col with a tab bar at the top.
 
         let sidebar_w = if self.sidebar_visible { self.sidebar_width + 4.0 } else { 0.0 };
         let editor_area_w = (content_w as f32 - sidebar_w - self.preview_width - 4.0).max(200.0);
 
-        let pane0 = self.panes[0].editor.clone();
-        let pane1 = self.panes.get(1).map(|p| p.editor.clone());
+        // Build a pane column (tab bar + editor) for pane at `idx`.
+        let pane_col = |pane_idx: usize, this: &Self, cx: &mut Context<Self>| -> gpui::AnyElement {
+            let pane = &this.panes[pane_idx];
+            let editor = pane.editor.clone();
+            let is_active = pane_idx == this.active_idx;
 
-        let editor_area = match (self.split_layout, &pane1) {
-            (SplitLayout::Vertical, Some(p1)) => {
+            // Tab bar (only shown when there are tabs to display).
+            let tab_bar: gpui::AnyElement = if pane.tabs.is_empty() {
+                div().into_any_element()
+            } else {
+                let tab_items: Vec<gpui::AnyElement> = pane.tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tab)| {
+                        let is_active_tab = i == pane.active_tab && is_active;
+                        let label = tab.title.clone();
+                        // Dirty indicator: read from editor only for the active tab.
+                        let dirty = if i == pane.active_tab {
+                            pane.editor.read(cx).is_dirty()
+                        } else {
+                            false
+                        };
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .font_family("Menlo")
+                            .cursor_pointer()
+                            .border_b_2()
+                            .border_color(if is_active_tab {
+                                gpui::rgb(t.ochre)
+                            } else {
+                                gpui::rgb(t.bg_base)
+                            })
+                            .text_color(if is_active_tab {
+                                gpui::rgb(t.text)
+                            } else {
+                                gpui::rgb(t.text_muted)
+                            })
+                            .hover(|s| s.text_color(gpui::rgb(t.text)))
+                            .child(label)
+                            .when(dirty, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(gpui::rgb(t.ochre))
+                                        .child("●"),
+                                )
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event, _window, cx| {
+                                    this.switch_tab_in_pane(pane_idx, i, cx);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element()
+                    })
+                    .collect();
+
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .h(px(30.0))
+                    .bg(gpui::rgb(t.bg_base))
+                    .border_b_1()
+                    .border_color(gpui::rgb(t.border_subtle))
+                    .overflow_x_hidden()
+                    .children(tab_items)
+                    .into_any_element()
+            };
+
+            div()
+                .h_full()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(tab_bar)
+                .child(div().flex_1().overflow_hidden().child(editor))
+                .into_any_element()
+        };
+
+        let editor_area = match self.split_layout {
+            SplitLayout::Vertical if self.panes.len() >= 2 => {
                 let w0 = (editor_area_w * self.pane_split_frac).round();
-                let w1 = editor_area_w - w0 - 4.0; // minus divider handle
+                let w1 = editor_area_w - w0 - 4.0;
 
-                // Store editor_area_w for the drag handler (encoded in start_y).
-                // We do this by mutating the drag if PaneDivider is active.
                 if let Some(ref mut drag) = self.drag {
                     if drag.target == DragTarget::PaneDivider {
                         drag.start_y = editor_area_w;
                     }
                 }
 
+                let col0 = pane_col(0, self, cx);
+                let col1 = pane_col(1, self, cx);
                 div().flex_1().min_w_0().h_full().flex().flex_row()
-                    .child(div().w(px(w0)).h_full().overflow_hidden().child(pane0))
+                    .child(div().w(px(w0)).h_full().overflow_hidden().child(col0))
                     .child(handle(DragTarget::PaneDivider, true, cx))
-                    .child(div().w(px(w1)).h_full().overflow_hidden().child(p1.clone()))
+                    .child(div().w(px(w1)).h_full().overflow_hidden().child(col1))
                     .into_any_element()
             }
-            (SplitLayout::Horizontal, Some(p1)) => {
+            SplitLayout::Horizontal if self.panes.len() >= 2 => {
                 let h0 = (content_h as f32 * self.pane_split_frac).round();
                 let h1 = content_h as f32 - h0 - 4.0;
 
+                let col0 = pane_col(0, self, cx);
+                let col1 = pane_col(1, self, cx);
                 div().flex_1().min_w_0().h_full().flex().flex_col()
-                    .child(div().w_full().h(px(h0)).overflow_hidden().child(pane0))
+                    .child(div().w_full().h(px(h0)).overflow_hidden().child(col0))
                     .child(handle(DragTarget::PaneDivider, false, cx))
-                    .child(div().w_full().h(px(h1)).overflow_hidden().child(p1.clone()))
+                    .child(div().w_full().h(px(h1)).overflow_hidden().child(col1))
                     .into_any_element()
             }
             _ => {
+                let col0 = pane_col(0, self, cx);
                 div().flex_1().min_w_0().h_full().overflow_hidden()
-                    .child(pane0)
+                    .child(col0)
                     .into_any_element()
             }
         };

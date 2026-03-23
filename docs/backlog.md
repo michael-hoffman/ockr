@@ -4,20 +4,18 @@ Deferred features and known gaps, in rough priority order.
 
 ---
 
-## After Tabs
+## Paged / PDF Mode
 
 ### Wikilink hyperlinks in paged / PDF preview
-**Status:** Known gap
-**Context:** `preprocess_wikilinks` strips `[[Title]]` down to plain display text before
-Typst sees it, so paged output has no link annotations.
-**Plan:**
-1. Emit `#link("ockr://title")[Title]` in `preprocess.rs` instead of bare text.
-2. **HTML mode** — the webview already intercepts `ockr://` clicks (follow-link action works).
-3. **Paged / PDF mode** — Typst encodes `#link` calls as PDF URI annotations.
-   The rasterised preview pane needs a mouse-click handler that reads the annotation
-   URL, resolves `ockr://` to a vault file, and opens it (same path as `FollowLink`).
-4. **PDF export** (future) — exported files will carry real clickable links automatically
-   once step 1 is in place.
+**Status:** ✅ Done — HTML mode and paged mode both working.
+**Implementation:** `preprocess_wikilinks` emits `#link("ockr://rel/path.typ")[Title]`.
+Typst stores these as `FrameItem::Link(Destination::Url, Size)` in the compiled frame.
+`PreviewPane::set_document` extracts these annotations (recursing into `FrameItem::Group`),
+stores them as `LinkRegion` values in typst-pt coordinates.  A GPUI canvas overlay
+captures the element's screen bounds each paint pass; `on_mouse_down` on the container
+maps the click through the `ObjectFit::Contain` transform back to typst-pt coords and
+hit-tests against stored regions.  A match emits `PreviewEvent::OpenLink(url)` which
+`MainWindow` subscribes to and routes to `open_path`, mirroring the HTML wikilink path.
 
 ---
 

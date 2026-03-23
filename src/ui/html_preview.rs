@@ -24,11 +24,65 @@
 //! All methods must be called from the **main thread**.  GPUI's render and
 //! action handlers satisfy this requirement.
 
-use objc2::MainThreadOnly as _;
+use futures::channel::mpsc::UnboundedSender;
+use objc2::runtime::ProtocolObject;
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2::rc::Retained;
-use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
 use objc2_app_kit::NSApplication;
-use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{
+    WKScriptMessage, WKScriptMessageHandler, WKUserContentController,
+    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
+};
+
+// ── Wikilink click handler (WKScriptMessageHandler) ───────────────────────────
+
+/// Instance variables for `OckrLinkHandler`.
+///
+/// Holds the channel sender used to report clicked `ockr://` link paths back
+/// to the main-window async loop where they are resolved and opened.
+struct LinkHandlerIvars {
+    sender: UnboundedSender<String>,
+}
+
+define_class!(
+    // SAFETY: Super is NSObject (no subclassing requirements); we don't impl Drop.
+    #[unsafe(super(NSObject))]
+    // Mark as main-thread-only to satisfy the WKScriptMessageHandler requirement.
+    #[thread_kind = MainThreadOnly]
+    #[name = "OckrLinkHandler"]
+    #[ivars = LinkHandlerIvars]
+    struct OckrLinkHandler;
+
+    unsafe impl NSObjectProtocol for OckrLinkHandler {}
+
+    unsafe impl WKScriptMessageHandler for OckrLinkHandler {
+        /// Called by WebKit when JS posts a message to the `"ockrLink"` handler.
+        ///
+        /// The message body is the `ockr://` path stripped of its scheme, e.g.
+        /// `"zettels/bayes-theorem.typ"`.  We forward it to the main-window
+        /// async loop via the unbounded channel.
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        unsafe fn user_content_controller_did_receive_message(
+            &self,
+            _controller: &WKUserContentController,
+            message: &WKScriptMessage,
+        ) {
+            let body = message.body();
+            if let Some(s) = body.downcast_ref::<NSString>() {
+                let path = s.to_string();
+                let _ = self.ivars().sender.unbounded_send(path);
+            }
+        }
+    }
+);
+
+impl OckrLinkHandler {
+    fn new(sender: UnboundedSender<String>, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(LinkHandlerIvars { sender });
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 // ── CSS theme (Oxide — warm dark) ─────────────────────────────────────────────
 
@@ -135,6 +189,27 @@ const PRELOAD_HTML: &str = concat!(
     "</style></head><body></body></html>"
 );
 
+/// JavaScript injected into every preview page to intercept `ockr://` link clicks.
+///
+/// When the user clicks a `<a href="ockr://some/path.typ">` element the default
+/// navigation is cancelled and the path (everything after `ockr://`) is posted
+/// to the native `WKScriptMessageHandler` registered under `"ockrLink"`.
+const LINK_INTERCEPT_JS: &str = r#"
+(function() {
+    document.addEventListener('click', function(evt) {
+        var a = evt.target.closest('a[href]');
+        if (!a) return;
+        var href = a.getAttribute('href') || '';
+        if (href.startsWith('ockr://')) {
+            evt.preventDefault();
+            evt.stopPropagation();
+            var path = href.slice('ockr://'.length);
+            window.webkit.messageHandlers.ockrLink.postMessage(path);
+        }
+    }, true);
+})();
+"#;
+
 // ── Wrapper struct ─────────────────────────────────────────────────────────────
 
 /// A live `WKWebView` positioned over the GPUI preview area.
@@ -149,17 +224,45 @@ impl HtmlWebView {
     /// Create a new `WKWebView`, attach it as a subview of the main window's
     /// content view, and immediately pre-warm it with the Oxide CSS skeleton.
     ///
+    /// `link_sender` receives the vault-relative path (e.g.
+    /// `"zettels/bayes-theorem.typ"`) whenever the user clicks an `ockr://`
+    /// link inside the preview.  The caller is responsible for resolving this
+    /// to an absolute path and opening it.
+    ///
     /// Returns `None` if no main window is available yet (should not happen
     /// in normal usage since we create this lazily during first render).
-    pub fn new() -> Option<Self> {
+    pub fn new(link_sender: UnboundedSender<String>) -> Option<Self> {
         unsafe {
             let mtm = MainThreadMarker::new_unchecked();
             let app = NSApplication::sharedApplication(mtm);
             let ns_window = app.mainWindow()?;
             let content_view = ns_window.contentView()?;
 
-            // Build WKWebView with default configuration.
+            // Build WKWebView configuration.
             let config = WKWebViewConfiguration::new(mtm);
+
+            // ── Wikilink message handler ──────────────────────────────────
+            // OckrLinkHandler implements WKScriptMessageHandler and forwards
+            // `ockr://` link click payloads to `link_sender`.
+            let handler = OckrLinkHandler::new(link_sender, mtm);
+            let ucc = config.userContentController();
+            let handler_proto = ProtocolObject::from_ref(&*handler);
+            let handler_name = NSString::from_str("ockrLink");
+            ucc.addScriptMessageHandler_name(handler_proto, &handler_name);
+
+            // ── Inject link-interception user script ──────────────────────
+            // Runs at document-end in every page so freshly loaded HTML is
+            // already in the DOM.  Any click on an <a href="ockr://..."> is
+            // cancelled and the path (after stripping the scheme) is posted
+            // to the native handler above.
+            let js_source = NSString::from_str(LINK_INTERCEPT_JS);
+            let user_script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &js_source,
+                WKUserScriptInjectionTime::AtDocumentEnd,
+                true,
+            );
+            ucc.addUserScript(&user_script);
 
             // Create with a zero frame; `update_frame` sets the real position.
             let frame = objc2_foundation::NSRect {

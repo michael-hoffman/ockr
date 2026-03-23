@@ -264,6 +264,31 @@ impl EditorPane {
         self.file_rel_path.as_deref()
     }
 
+    /// Absolute path of the currently open file, if any.
+    pub fn current_path(&self) -> Option<&std::path::PathBuf> {
+        self.state.path.as_ref()
+    }
+
+    /// Current cursor position.
+    pub fn cursor_pos(&self) -> Pos {
+        self.state.cursor()
+    }
+
+    /// Index of the topmost visible line in the viewport.
+    pub fn viewport_top(&self) -> usize {
+        self.viewport_top
+    }
+
+    /// Restore the viewport top (used when switching tabs).
+    pub fn set_viewport_top(&mut self, top: usize) {
+        self.viewport_top = top;
+    }
+
+    /// Whether the buffer has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.state.is_dirty
+    }
+
     pub fn set_compiler(&mut self, handle: CompilerHandle, preview: Entity<PreviewPane>) {
         self.compiler = Some(handle);
         self.preview = Some(preview);
@@ -780,6 +805,37 @@ impl EditorPane {
         if k.modifiers.platform && k.key == "p" {
             cx.stop_propagation();
             cx.emit(EditorPaneEvent::OpenPalette);
+            return;
+        }
+
+        // Cmd-Z: undo (macOS convention — works in all modes).
+        if k.modifiers.platform && k.key == "z" && !k.modifiers.shift {
+            if let Some((text, pos)) = self.undo_history.pop() {
+                let redo_snap = (self.buffer.text(), self.state.cursor());
+                self.redo_history.push(redo_snap);
+                self.buffer = InMemoryBuffer::from_text(&text);
+                self.state.mode = Mode::Normal;
+                self.state.move_cursor_to(pos);
+                self.state.is_dirty = true;
+                self.update_viewport();
+                self.trigger_compile(cx);
+                cx.notify();
+            }
+            return;
+        }
+
+        // Cmd-Shift-Z: redo (macOS convention).
+        if k.modifiers.platform && k.key == "z" && k.modifiers.shift {
+            if let Some((text, pos)) = self.redo_history.pop() {
+                self.push_undo_keeping_redo();
+                self.buffer = InMemoryBuffer::from_text(&text);
+                self.state.mode = Mode::Normal;
+                self.state.move_cursor_to(pos);
+                self.state.is_dirty = true;
+                self.update_viewport();
+                self.trigger_compile(cx);
+                cx.notify();
+            }
             return;
         }
 
@@ -1929,6 +1985,12 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         "P" => PasteBefore,
         // Helix-style: `x` selects the line, then `d` (mapped to DeleteSelection in visual) deletes it.
         "x" => SelectCurrentLine,
+        // `X` extends the selection to include the line below (or selects the current line in Normal).
+        "X" => ExtendLineBelow,
+        // `R` replaces the current line with the yank register (register is not modified).
+        "R" => ReplaceWithYanked,
+        // `=` re-indents the current line to match the previous non-empty line.
+        "=" => AutoIndent,
         // Visual-mode entry
         "v" => EnterVisualChar,
         "V" => EnterVisualLine,
@@ -1965,12 +2027,26 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
             _ => Noop,
         };
     }
+    // Alt combos in Visual mode.
+    if k.modifiers.alt {
+        return match k.key.as_str() {
+            // Alt-; flips the selection direction (swaps anchor and cursor).
+            ";" => FlipSelection,
+            _ => Noop,
+        };
+    }
     match k.key.as_str() {
         "escape" => EnterNormal,
         // Operators on selection
         "d" | "x" => DeleteSelection,
         "y" => YankSelection,
         "c" => ChangeSelection,
+        // Replace selection with yank register (register unchanged).
+        "R" => ReplaceWithYanked,
+        // Extend selection to include the next line below.
+        "X" => ExtendLineBelow,
+        // Re-indent selected lines to match the previous non-empty line.
+        "=" => AutoIndent,
         // Indent / dedent and stay in visual
         ">" => IndentLines,
         "<" => DedentLines,
@@ -2018,6 +2094,9 @@ fn key_insert(event: &KeyDownEvent) -> EditorCommand {
     if k.modifiers.control {
         return match k.key.as_str() {
             "w" => DeleteWordBefore,    // Ctrl-w: delete word before cursor
+            "u" => DeleteToLineStart,   // Ctrl-u: delete from line start to cursor
+            "k" => DeleteRestOfLine,    // Ctrl-k: delete from cursor to line end
+            "j" => InsertNewline,       // Ctrl-j: insert newline (same as Enter)
             _ => Noop,
         };
     }
@@ -2068,6 +2147,10 @@ fn is_buffer_mutating(cmd: &EditorCommand) -> bool {
             | DedentLines
             | SwitchCase
             | RepeatLastChange
+            | ReplaceWithYanked
+            | AutoIndent
+            | DeleteToLineStart
+            | DeleteRestOfLine
     )
 }
 

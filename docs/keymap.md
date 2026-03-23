@@ -40,6 +40,7 @@ Three modes: **Normal** (default), **Insert**, **Visual**.
 | `V`           | Enter Visual Line mode              |
 | `Ctrl-v`      | Enter Visual Block mode             |
 | `x`           | Select current line                 |
+| `X`           | Extend selection to line below      |
 | `%`           | Select entire file                  |
 | `gv`          | Reselect last visual selection      |
 | `;`           | Collapse selection to cursor        |
@@ -76,11 +77,15 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `p`           | Paste after cursor                  |
 | `P`           | Paste before cursor                 |
 | `r<c>`        | Replace character under cursor with `c` |
+| `R`           | Replace current line with yank register |
+| `=`           | Re-indent current line              |
 | `~`           | Toggle case of character under cursor |
 | `>` / `<`    | Indent / dedent current line        |
 | `.`           | Repeat last change                  |
 | `u`           | Undo                                |
 | `Ctrl-r`      | Redo                                |
+| `Cmd-Z`       | Undo (macOS)                        |
+| `Cmd-Shift-Z` | Redo (macOS)                        |
 
 ### Insert Entry
 
@@ -134,9 +139,13 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `d` or `x`   | Delete selection                    |
 | `y`           | Yank selection                      |
 | `c`           | Change selection (delete + Insert)  |
+| `R`           | Replace selection with yank register |
+| `X`           | Extend to include next line         |
+| `=`           | Re-indent selected lines            |
 | `~`           | Toggle case of selection            |
 | `>` / `<`    | Indent / dedent selection           |
 | `;`           | Collapse to cursor, return to Normal |
+| `Alt-;`       | Flip selection direction            |
 | `_`           | Trim selection whitespace           |
 | `v` / `V`    | Switch to Visual Char / Line        |
 | `Ctrl-v`      | Switch to Visual Block              |
@@ -156,6 +165,9 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `←` `→` `↑` `↓` | Move cursor                    |
 | `Home` / `End` | Line start / end                   |
 | `Ctrl-w`      | Delete previous word                |
+| `Ctrl-u`      | Delete from line start to cursor    |
+| `Ctrl-k`      | Delete from cursor to line end      |
+| `Ctrl-j`      | Insert newline                      |
 | `Escape`      | Return to Normal                    |
 
 ---
@@ -179,7 +191,9 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `Cmd-B`       | Toggle sidebar                      |
 | `Cmd-\`       | Split pane vertically               |
 | `Cmd-Shift-\` | Split pane horizontally             |
-| `Cmd-W`       | Close pane                          |
+| `Cmd-W`       | Close current tab (or pane when empty) |
+| `Cmd-Shift-}` | Next tab                            |
+| `Cmd-Shift-{` | Previous tab                        |
 | `Ctrl-H/L/K/J` | Focus pane left/right/up/down      |
 | `Cmd-Alt-H`   | Toggle HTML ↔ paged preview         |
 | `Cmd-Shift-G` | Graph view                          |
@@ -204,6 +218,9 @@ Open with `:` or `Cmd-P`. A `:<hint>` shows the Helix ex-command equivalent.
 | `open-backlinks` | Backlinks panel | — |
 | `open-vault-search` | Full-text vault search | — |
 | `open-daily-note` | Today's daily note | — |
+| `buffer-next` | Switch to next open tab | `Cmd-Shift-}` |
+| `buffer-previous` | Switch to previous open tab | `Cmd-Shift-{` |
+| `buffer-close` | Close current tab | `Cmd-W` |
 | `open-graph-view` | Graph view | — |
 | `toggle-preview-mode` | HTML ↔ paged preview | — |
 | `follow-link` | Follow wikilink under cursor | — |
