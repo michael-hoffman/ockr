@@ -82,7 +82,19 @@ pub enum LineNumberMode {
     Relative,
 }
 
-/// State for the in-buffer `/` search bar.
+/// State for the `[[` wikilink autocomplete popup.
+struct WikilinkState {
+    /// Text typed after `[[` and before the cursor.
+    fragment: String,
+    /// Byte offset of the opening `[` on the current line.
+    open_col: usize,
+    /// Vault file titles that match `fragment` (prefix-insensitive).
+    candidates: Vec<String>,
+    /// Currently highlighted candidate (0-based index into `candidates`).
+    selected: usize,
+}
+
+/// State for the in-buffer `/` or `?` search bar.
 struct SearchState {
     /// Text typed so far.
     query: String,
@@ -92,6 +104,8 @@ struct SearchState {
     current_idx: usize,
     /// Cursor position when search was opened — restored on Escape.
     saved_cursor: Pos,
+    /// `true` = `?` backward search; `false` = `/` forward search.
+    backward: bool,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -192,10 +206,14 @@ pub struct EditorPane {
     file_rel_path: Option<String>,
     /// Pending multi-key sequence state (e.g. `g…`, `r<c>`).
     pending: PendingKey,
+    /// Active `[[` autocomplete popup state; `Some` while in Insert mode inside `[[…`.
+    wikilink_complete: Option<WikilinkState>,
     /// Active search bar state; `Some` while `/` search is open.
     search: Option<SearchState>,
     /// Query from the last completed search; used by `n`/`N` repeat navigation.
     last_search: Option<String>,
+    /// Direction of the last completed search (`true` = backward / `?`).
+    last_search_backward: bool,
     /// How line numbers are rendered in the gutter.
     line_number_mode: LineNumberMode,
     /// Monotonically-increasing compile sequence number.
@@ -227,8 +245,10 @@ impl EditorPane {
             vault_root: None,
             file_rel_path: None,
             pending: PendingKey::None,
+            wikilink_complete: None,
             search: None,
             last_search: None,
+            last_search_backward: false,
             line_number_mode: LineNumberMode::Relative,
             compile_sequence: 0,
             viewport_top: 0,
@@ -459,14 +479,15 @@ impl EditorPane {
 
     // ── Search ────────────────────────────────────────────────────────────────
 
-    /// Open the `/` search bar, saving the current cursor for Escape-cancel.
-    fn open_search(&mut self) {
+    /// Open the search bar (`/` forward, `?` backward), saving cursor for Escape-cancel.
+    fn open_search(&mut self, backward: bool) {
         let saved = self.state.cursor();
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
             current_idx: 0,
             saved_cursor: saved,
+            backward,
         });
     }
 
@@ -483,10 +504,11 @@ impl EditorPane {
                 }
             }
             "enter" => {
-                // Confirm: persist query for n/N, close bar.
+                // Confirm: persist query and direction for n/N, close bar.
                 if let Some(ref s) = self.search {
                     if !s.query.is_empty() {
                         self.last_search = Some(s.query.clone());
+                        self.last_search_backward = s.backward;
                     }
                 }
                 self.search = None;
@@ -513,16 +535,25 @@ impl EditorPane {
 
     /// Recompute match positions from the current query and jump to the best one.
     fn update_search_matches(&mut self, _cx: &mut Context<Self>) {
-        let (query, saved) = match &self.search {
-            Some(s) => (s.query.clone(), s.saved_cursor),
+        let (query, saved, backward) = match &self.search {
+            Some(s) => (s.query.clone(), s.saved_cursor, s.backward),
             None => return,
         };
 
         let matches = find_all_matches(&self.buffer, &query);
 
-        // Pick the match at or immediately after the saved cursor.
+        // For forward search: pick first match at or after saved cursor.
+        // For backward search: pick last match at or before saved cursor.
         let idx = if matches.is_empty() {
             0
+        } else if backward {
+            matches
+                .iter()
+                .rposition(|p| {
+                    p.line < saved.line
+                        || (p.line == saved.line && p.col <= saved.col)
+                })
+                .unwrap_or(matches.len() - 1)
         } else {
             matches
                 .iter()
@@ -548,43 +579,180 @@ impl EditorPane {
         self.update_viewport();
     }
 
-    /// Move to the next match after the cursor, wrapping around.
+    /// Move to the next match in the search direction, wrapping around.
+    ///
+    /// "Next" means forward for `/` searches and backward for `?` searches,
+    /// matching Vim / Helix semantics: `n` repeats the original direction.
     fn search_next(&mut self, cx: &mut Context<Self>) {
         let query = match &self.last_search {
             Some(q) => q.clone(),
             None => return,
         };
+        let backward = self.last_search_backward;
         let matches = find_all_matches(&self.buffer, &query);
         if matches.is_empty() {
             return;
         }
         let cursor = self.state.cursor();
-        let idx = matches
-            .iter()
-            .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
-            .unwrap_or(0);
+        let idx = if backward {
+            matches
+                .iter()
+                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
+                .unwrap_or(matches.len() - 1)
+        } else {
+            matches
+                .iter()
+                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
+                .unwrap_or(0)
+        };
         self.state.move_cursor_to(matches[idx]);
         self.update_viewport();
         cx.notify();
     }
 
-    /// Move to the previous match before the cursor, wrapping around.
+    /// Move to the previous match (opposite of `search_next`), wrapping around.
     fn search_prev(&mut self, cx: &mut Context<Self>) {
         let query = match &self.last_search {
             Some(q) => q.clone(),
             None => return,
         };
+        let backward = self.last_search_backward;
         let matches = find_all_matches(&self.buffer, &query);
         if matches.is_empty() {
             return;
         }
         let cursor = self.state.cursor();
-        let idx = matches
-            .iter()
-            .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
-            .unwrap_or(matches.len() - 1);
+        // `N` is always the reverse of `n`.
+        let idx = if backward {
+            matches
+                .iter()
+                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
+                .unwrap_or(0)
+        } else {
+            matches
+                .iter()
+                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
+                .unwrap_or(matches.len() - 1)
+        };
         self.state.move_cursor_to(matches[idx]);
         self.update_viewport();
+        cx.notify();
+    }
+
+    // ── Wikilink autocomplete ─────────────────────────────────────────────────
+
+    /// Check if the cursor is inside an open `[[…` span and update the popup.
+    ///
+    /// Called after every Insert-mode keystroke that may have changed the buffer.
+    fn check_wikilink_trigger(&mut self, cx: &mut Context<Self>) {
+        // Only active in Insert mode.
+        if self.state.mode != Mode::Insert {
+            self.wikilink_complete = None;
+            return;
+        }
+
+        let pos = self.state.cursor();
+        let line = self.buffer.line(pos.line).to_string();
+        let col = pos.col.min(line.len());
+
+        // Scan backward from cursor for `[[` without an intervening `]]`.
+        let prefix = &line[..col];
+        let open_col = if let Some(idx) = prefix.rfind("[[") {
+            // Ensure no `]]` between `[[` and cursor.
+            if prefix[idx + 2..].contains("]]") {
+                None
+            } else {
+                Some(idx)
+            }
+        } else {
+            None
+        };
+
+        if let Some(open) = open_col {
+            let fragment = &line[open + 2..col];
+            // Gather matching vault titles.
+            let fragment_lower = fragment.to_ascii_lowercase();
+            let candidates: Vec<String> = if let Some(ref vault_entity) = self.vault {
+                vault_entity
+                    .read(cx)
+                    .files
+                    .iter()
+                    .filter(|f| f.title.to_ascii_lowercase().contains(&fragment_lower))
+                    .map(|f| f.title.clone())
+                    .take(8)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Keep selected index in range (reset if candidates changed significantly).
+            let selected = self
+                .wikilink_complete
+                .as_ref()
+                .map(|s| s.selected.min(candidates.len().saturating_sub(1)))
+                .unwrap_or(0);
+
+            if !candidates.is_empty() {
+                self.wikilink_complete = Some(WikilinkState {
+                    fragment: fragment.to_string(),
+                    open_col: open,
+                    candidates,
+                    selected,
+                });
+            } else {
+                self.wikilink_complete = None;
+            }
+        } else {
+            self.wikilink_complete = None;
+        }
+
+        cx.notify();
+    }
+
+    /// Apply the currently selected wikilink completion, replacing `[[fragment` with `[[title]]`.
+    fn apply_wikilink_completion(&mut self, cx: &mut Context<Self>) {
+        let (open_col, title) = match &self.wikilink_complete {
+            Some(s) if !s.candidates.is_empty() => {
+                (s.open_col, s.candidates[s.selected].clone())
+            }
+            _ => return,
+        };
+
+        let pos = self.state.cursor();
+        let line = self.buffer.line(pos.line).to_string();
+        let cursor_col = pos.col.min(line.len());
+
+        // Build the replacement: `[[Title]]`.
+        let replacement = format!("[[{}]]", title);
+
+        // Strategy: move cursor to open_col, delete to cursor_col (via Backspace
+        // from cursor_col), then insert the replacement string.
+        self.push_undo();
+
+        // Delete the `[[fragment` span (chars from open_col to cursor_col).
+        let chars_to_delete = line[open_col..cursor_col].chars().count();
+        // Position cursor at cursor_col and backspace chars_to_delete times.
+        self.state.move_cursor_to(Pos::new(pos.line, cursor_col));
+        for _ in 0..chars_to_delete {
+            let (ns, _) = apply(
+                EditorCommand::DeleteCharBefore,
+                std::mem::take(&mut self.state),
+                &mut self.buffer,
+            );
+            self.state = ns;
+        }
+
+        // Insert the replacement string as a single `Insert` command.
+        let (ns, _) = apply(
+            EditorCommand::Insert(replacement),
+            std::mem::take(&mut self.state),
+            &mut self.buffer,
+        );
+        self.state = ns;
+
+        self.wikilink_complete = None;
+        self.update_viewport();
+        self.trigger_compile(cx);
         cx.notify();
     }
 
@@ -605,9 +773,12 @@ impl EditorPane {
         }
 
         // Cmd-P / Cmd-Shift-P: open command palette.
-        // Emit an event so MainWindow can open the palette; this is more
-        // reliable than action bubbling across view boundaries.
+        // Stop propagation BEFORE emitting so the `cmd-p` key-binding action
+        // (`OpenCommandPalette`) does not also fire — that would call `open_palette`
+        // which sees palette.is_some() == true (set by the emit path) and toggles
+        // it immediately back closed.
         if k.modifiers.platform && k.key == "p" {
+            cx.stop_propagation();
             cx.emit(EditorPaneEvent::OpenPalette);
             return;
         }
@@ -633,6 +804,50 @@ impl EditorPane {
             self.handle_search_key(k, cx);
             cx.stop_propagation();
             return;
+        }
+
+        // Wikilink autocomplete navigation: intercept Up/Down/Tab/Enter while popup is open.
+        if self.wikilink_complete.is_some()
+            && !k.modifiers.platform
+            && !k.modifiers.control
+        {
+            match k.key.as_str() {
+                "up" | "ctrl-k" => {
+                    if let Some(ref mut s) = self.wikilink_complete {
+                        if s.selected > 0 {
+                            s.selected -= 1;
+                        } else {
+                            s.selected = s.candidates.len().saturating_sub(1);
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "down" | "ctrl-j" => {
+                    if let Some(ref mut s) = self.wikilink_complete {
+                        s.selected = (s.selected + 1) % s.candidates.len().max(1);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "tab" | "enter" => {
+                    self.apply_wikilink_completion(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "escape" => {
+                    // Dismiss popup but do NOT stop propagation or return —
+                    // let Escape continue through key_insert so it also
+                    // triggers EnterNormal.  Without this the user is trapped
+                    // in Insert mode after closing the popup.
+                    self.wikilink_complete = None;
+                    cx.notify();
+                    // fall through to normal key handling
+                }
+                _ => {}
+            }
         }
 
         // Cmd-C / Cmd-X: copy / cut selection or current line to OS clipboard.
@@ -826,11 +1041,12 @@ impl EditorPane {
             return;
         }
 
-        // ── `/` search, `n`/`N` repeat ───────────────────────────────────────
+        // ── `/` and `?` search, `n`/`N` repeat ──────────────────────────────
         if in_modal && !k.modifiers.platform && !k.modifiers.control {
             let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
-            if is_slash {
-                self.open_search();
+            let is_question = k.key == "?" || k.key_char.as_deref() == Some("?");
+            if is_slash || is_question {
+                self.open_search(is_question);
                 cx.stop_propagation();
                 cx.notify();
                 return;
@@ -900,8 +1116,10 @@ impl EditorPane {
 
         // OpenPalette is a UI command — emit an event so MainWindow opens it.
         // Using cx.emit is more reliable than window.dispatch_action across
-        // view boundaries.
+        // view boundaries.  Stop propagation so no competing action binding
+        // can fire and toggle the palette back closed.
         if cmd == EditorCommand::OpenPalette {
+            cx.stop_propagation();
             cx.emit(EditorPaneEvent::OpenPalette);
             return;
         }
@@ -935,6 +1153,14 @@ impl EditorPane {
         }
 
         self.update_viewport();
+
+        // Update wikilink autocomplete after every Insert-mode change.
+        if self.state.mode == Mode::Insert && mutating {
+            self.check_wikilink_trigger(cx);
+        } else if self.state.mode != Mode::Insert {
+            // Clear popup when leaving Insert mode.
+            self.wikilink_complete = None;
+        }
 
         match effect {
             SideEffect::BufferChanged => {
@@ -1122,7 +1348,7 @@ impl Render for EditorPane {
                 div().into_any_element()
             });
 
-        // ── Search bar (shown at top when `/` is active) ──────────────────────
+        // ── Search bar (shown at top when `/` or `?` is active) ──────────────
         let search_bar = self.search.as_ref().map(|s| {
             let match_info: gpui::AnyElement = if s.query.is_empty() {
                 div().into_any_element()
@@ -1138,6 +1364,8 @@ impl Render for EditorPane {
                     .into_any_element()
             };
 
+            let prompt = if s.backward { "?" } else { "/" };
+
             div()
                 .w_full()
                 .flex()
@@ -1150,13 +1378,68 @@ impl Render for EditorPane {
                 .border_color(gpui::rgb(t.border_subtle))
                 .text_sm()
                 .font_family("Menlo")
-                .child(div().text_color(gpui::rgb(t.ochre)).child("/"))
+                .child(div().text_color(gpui::rgb(t.ochre)).child(prompt))
                 .child(div().text_color(gpui::rgb(t.text)).child(s.query.clone()))
                 .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
                 .child(match_info)
         });
 
+        // ── Wikilink autocomplete popup ───────────────────────────────────────
+        // Positioned immediately below and to the right of the `[[` opening on
+        // the cursor line, using approximate fixed character metrics.
+        let wikilink_popup = self.wikilink_complete.as_ref().map(|wl| {
+            const CHAR_W: f32 = 8.4;
+            const LINE_H: f32 = 20.0;
+            const PADDING: f32 = 16.0;
+            // Gutter contributes roughly (digits × CHAR_W) + 12 px right-padding.
+            let gutter_w = if lnm != LineNumberMode::Off {
+                gutter_digits(line_count) as f32 * CHAR_W + 12.0
+            } else {
+                0.0
+            };
+            // Leave vertical room for the search bar when it is open.
+            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let popup_left = px(PADDING + gutter_w + wl.open_col as f32 * CHAR_W);
+            let popup_top = px(
+                search_h
+                    + PADDING
+                    + (cursor.line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H,
+            );
+
+            let items: Vec<gpui::AnyElement> = wl
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(i, title)| {
+                    let is_sel = i == wl.selected;
+                    div()
+                        .px_2()
+                        .py(px(3.0))
+                        .text_sm()
+                        .font_family("Menlo")
+                        .text_color(gpui::rgb(if is_sel { t.cursor_fg } else { t.text }))
+                        .when(is_sel, |d| d.bg(gpui::rgb(t.ochre)))
+                        .child(format!("[[{}]]", title))
+                        .into_any_element()
+                })
+                .collect();
+
+            div()
+                .absolute()
+                .top(popup_top)
+                .left(popup_left)
+                .min_w(px(220.0))
+                .bg(gpui::rgb(t.bg_surface))
+                .border_1()
+                .border_color(gpui::rgb(t.ochre_border))
+                .rounded(px(6.0))
+                .shadow_lg()
+                .overflow_hidden()
+                .children(items)
+        });
+
         div()
+            .relative()
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
@@ -1192,6 +1475,7 @@ impl Render for EditorPane {
                     .children(line_elements),
             )
             .child(status_bar)
+            .when_some(wikilink_popup, |root, popup| root.child(popup))
     }
 }
 
@@ -1242,25 +1526,43 @@ fn gutter_digits(count: usize) -> usize {
     else { 5 }
 }
 
+/// A single syntax-highlight span on a line.
+#[derive(Clone, Copy)]
+struct SyntaxSpan {
+    start: usize,
+    end: usize,
+    color: u32,
+    bold: bool,
+    italic: bool,
+}
+
+impl SyntaxSpan {
+    fn new(start: usize, end: usize, color: u32) -> Self {
+        Self { start, end, color, bold: false, italic: false }
+    }
+    fn bold(mut self) -> Self { self.bold = true; self }
+    fn italic(mut self) -> Self { self.italic = true; self }
+}
+
 /// Compute syntax-highlight spans for a single line.
 ///
-/// Returns a sorted, non-overlapping list of `(start_byte, end_byte, fg_color)`.
+/// Returns a sorted, non-overlapping list of `SyntaxSpan` values.
 /// Text not covered by any span uses the caller-supplied default foreground.
 /// Front-matter lines are left unhighlighted (returned as empty vec).
-fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(usize, usize, u32)> {
+fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<SyntaxSpan> {
     if is_front_matter || line.is_empty() {
         return Vec::new();
     }
 
     let b = line.as_bytes();
     let n = b.len();
-    let mut spans: Vec<(usize, usize, u32)> = Vec::new();
+    let mut spans: Vec<SyntaxSpan> = Vec::new();
 
     // Full-line: Typst headings (`=`, `==`, `===`, …)
     {
         let eq_count = b.iter().take_while(|&&c| c == b'=').count();
         if eq_count > 0 && (eq_count == n || b[eq_count] == b' ') {
-            spans.push((0, n, t.syntax_heading));
+            spans.push(SyntaxSpan::new(0, n, t.syntax_heading).bold());
             return spans;
         }
     }
@@ -1269,7 +1571,7 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(
     while i < n {
         // `//` comment — captures rest of line.
         if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
-            spans.push((i, n, t.syntax_comment));
+            spans.push(SyntaxSpan::new(i, n, t.syntax_comment).italic());
             break;
         }
 
@@ -1277,7 +1579,7 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(
         if b[i] == b'[' && i + 1 < n && b[i + 1] == b'[' {
             if let Some(rel) = line[i + 2..].find("]]") {
                 let end = i + 2 + rel + 2;
-                spans.push((i, end, t.syntax_link));
+                spans.push(SyntaxSpan::new(i, end, t.syntax_link));
                 i = end;
                 continue;
             }
@@ -1287,7 +1589,7 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(
         if b[i] == b'`' {
             if let Some(rel) = line[i + 1..].find('`') {
                 let end = i + 1 + rel + 1;
-                spans.push((i, end, t.syntax_code));
+                spans.push(SyntaxSpan::new(i, end, t.syntax_code));
                 i = end;
                 continue;
             }
@@ -1297,9 +1599,40 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(
         if b[i] == b'$' {
             if let Some(rel) = line[i + 1..].find('$') {
                 let end = i + 1 + rel + 1;
-                spans.push((i, end, t.syntax_math));
+                spans.push(SyntaxSpan::new(i, end, t.syntax_math));
                 i = end;
                 continue;
+            }
+        }
+
+        // `*bold*` — must not be whitespace immediately inside delimiters.
+        if b[i] == b'*' {
+            let inner_start = i + 1;
+            if inner_start < n && b[inner_start] != b' ' {
+                if let Some(rel) = line[inner_start..].find('*') {
+                    let end = inner_start + rel + 1;
+                    // Avoid matching `**` (empty bold).
+                    if rel > 0 {
+                        spans.push(SyntaxSpan::new(i, end, t.text).bold());
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // `_italic_` — must not be whitespace immediately inside delimiters.
+        if b[i] == b'_' {
+            let inner_start = i + 1;
+            if inner_start < n && b[inner_start] != b' ' && b[inner_start] != b'_' {
+                if let Some(rel) = line[inner_start..].find('_') {
+                    let end = inner_start + rel + 1;
+                    if rel > 0 {
+                        spans.push(SyntaxSpan::new(i, end, t.text).italic());
+                        i = end;
+                        continue;
+                    }
+                }
             }
         }
 
@@ -1313,7 +1646,7 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(
             while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1;
             }
-            spans.push((start, i, t.syntax_keyword));
+            spans.push(SyntaxSpan::new(start, i, t.syntax_keyword));
             continue;
         }
 
@@ -1411,9 +1744,9 @@ fn render_line(
         boundaries.push(cursor_col);
         boundaries.push(cursor_end);
     }
-    for &(s, e, _) in &spans {
-        boundaries.push(s);
-        boundaries.push(e);
+    for sp in &spans {
+        boundaries.push(sp.start);
+        boundaries.push(sp.end);
     }
     for &(s, e) in other_matches {
         boundaries.push(s);
@@ -1453,14 +1786,20 @@ fn render_line(
         let is_cursor_bar =
             is_cursor_line && a == cursor_col && mode == Mode::Insert;
 
-        // Foreground from syntax spans (or default).
-        let syn_fg = spans
-            .iter()
-            .find(|&&(s, e, _)| s <= a && a < e)
-            .map(|&(_, _, c)| c)
-            .unwrap_or(default_fg);
+        // Foreground and font attributes from syntax spans (or default).
+        let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
+        let syn_fg = active_span.map(|sp| sp.color).unwrap_or(default_fg);
+        let syn_bold = active_span.map(|sp| sp.bold).unwrap_or(false);
+        let syn_italic = active_span.map(|sp| sp.italic).unwrap_or(false);
 
         let cell = div().text_sm().font_family("Menlo");
+        // Apply bold / italic from syntax spans.
+        let cell = if syn_bold {
+            cell.font_weight(gpui::FontWeight::BOLD)
+        } else {
+            cell
+        };
+        let cell = if syn_italic { cell.italic() } else { cell };
 
         let cell = if is_cursor_block {
             cell.text_color(gpui::rgb(t.cursor_fg)).bg(cursor_rgb)

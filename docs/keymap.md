@@ -105,6 +105,17 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `ge`          | Go to next word end                 |
 | `gv`          | Reselect last visual selection      |
 
+### Search
+
+| Key           | Action                              |
+|---------------|-------------------------------------|
+| `/`           | Open forward search bar             |
+| `?`           | Open backward search bar            |
+| `n`           | Jump to next match                  |
+| `N`           | Jump to previous match              |
+| `Enter`       | Confirm search, close bar           |
+| `Escape`      | Cancel search, restore cursor       |
+
 ### Command Palette
 
 | Key           | Action                              |
@@ -154,7 +165,48 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | Key           | Action                              |
 |---------------|-------------------------------------|
 | `Cmd-S`       | Save file                           |
-| `Cmd-P`       | Command palette                     |
+| `Cmd-P` / `Cmd-Shift-P` | Command palette           |
 | `Cmd-V`       | Paste from system clipboard         |
 | `Cmd-C`       | Copy selection / line to clipboard  |
 | `Cmd-X`       | Cut selection / line to clipboard   |
+| `Cmd-O`       | Open vault (folder picker)          |
+| `Cmd-N`       | New note                            |
+| `Cmd-K`       | Quick switch (fuzzy-open note)      |
+| `Cmd-Shift-K` | Backlinks panel                     |
+| `Cmd-Shift-F` | Vault full-text search              |
+| `Cmd-Enter`   | Follow `[[wikilink]]` under cursor  |
+| `Cmd-T`       | Open / create today's daily note    |
+| `Cmd-B`       | Toggle sidebar                      |
+| `Cmd-\`       | Split pane vertically               |
+| `Cmd-Shift-\` | Split pane horizontally             |
+| `Cmd-W`       | Close pane                          |
+| `Ctrl-H/L/K/J` | Focus pane left/right/up/down      |
+| `Cmd-Alt-H`   | Toggle HTML ↔ paged preview         |
+| `Cmd-Shift-G` | Graph view                          |
+| `Cmd-Q`       | Quit                                |
+
+---
+
+## Command Palette Commands
+
+Open with `:` or `Cmd-P`. A `:<hint>` shows the Helix ex-command equivalent.
+
+| ID | Description | Hint |
+|----|-------------|------|
+| `new-note` | Create new note | — |
+| `save-file` | Save | `:w` |
+| `save-file-and-quit` | Save and quit | `:wq` |
+| `quit` | Quit | `:q` |
+| `force-quit` | Quit without saving | `:q!` |
+| `open-vault` | Open vault folder | — |
+| `toggle-sidebar` | Show / hide sidebar | — |
+| `open-quick-switch` | Quick-switch note | — |
+| `open-backlinks` | Backlinks panel | — |
+| `open-vault-search` | Full-text vault search | — |
+| `open-daily-note` | Today's daily note | — |
+| `open-graph-view` | Graph view | — |
+| `toggle-preview-mode` | HTML ↔ paged preview | — |
+| `follow-link` | Follow wikilink under cursor | — |
+| `line-numbers-relative` | Relative line numbers | `:set nu rel` |
+| `line-numbers-absolute` | Absolute line numbers | `:set nu abs` |
+| `line-numbers-off` | No line numbers | `:set nonu` |
