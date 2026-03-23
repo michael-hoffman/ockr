@@ -46,6 +46,13 @@ pub struct ThemeFile {
     pub mode_visual: String,
 
     pub cursor_fg: String,
+
+    pub syntax_heading: String,
+    pub syntax_keyword: String,
+    pub syntax_math: String,
+    pub syntax_link: String,
+    pub syntax_code: String,
+    pub syntax_comment: String,
 }
 
 // ── Runtime palette ───────────────────────────────────────────────────────────
@@ -82,6 +89,13 @@ pub struct ThemePalette {
     pub mode_visual: u32,
 
     pub cursor_fg: u32,
+
+    pub syntax_heading: u32,
+    pub syntax_keyword: u32,
+    pub syntax_math: u32,
+    pub syntax_link: u32,
+    pub syntax_code: u32,
+    pub syntax_comment: u32,
 }
 
 impl gpui::Global for ThemePalette {}
@@ -118,6 +132,12 @@ impl ThemePalette {
             mode_normal: hex(&f.mode_normal),
             mode_visual: hex(&f.mode_visual),
             cursor_fg: hex(&f.cursor_fg),
+            syntax_heading: hex(&f.syntax_heading),
+            syntax_keyword: hex(&f.syntax_keyword),
+            syntax_math: hex(&f.syntax_math),
+            syntax_link: hex(&f.syntax_link),
+            syntax_code: hex(&f.syntax_code),
+            syntax_comment: hex(&f.syntax_comment),
         }
     }
 

@@ -121,6 +121,36 @@ pub enum EditorCommand {
     /// In Normal mode the cursor moves to the first non-whitespace char (identical to `^`).
     TrimSelection,
 
+    // ── Find-char motions (`f` / `F` / `t` / `T`) ────────────────────────
+    /// Move cursor to the next occurrence of `c` on the current line (`f<c>`).
+    FindChar(char),
+    /// Move cursor to the previous occurrence of `c` on the current line (`F<c>`).
+    FindCharBack(char),
+    /// Move cursor to just *before* the next occurrence of `c` (`t<c>`).
+    TillChar(char),
+    /// Move cursor to just *after* the previous occurrence of `c` (`T<c>`).
+    TillCharBack(char),
+
+    // ── Paragraph navigation ───────────────────────────────────────────────
+    /// Move to the start of the previous paragraph (`{`).
+    MoveParagraphBack,
+    /// Move to the start of the next paragraph (`}`).
+    MoveParagraphForward,
+
+    // ── Miscellaneous ──────────────────────────────────────────────────────
+    /// Select the entire file content — Helix `%`.
+    SelectWholeFile,
+    /// Jump to matching bracket under cursor — bonus `m%`.
+    MatchBracket,
+    /// Switch case of the character under cursor (or selection) — `~`.
+    SwitchCase,
+    /// Scroll half-page down (~20 lines) — `Ctrl-f`.
+    ScrollPageDown,
+    /// Scroll half-page up (~20 lines) — `Ctrl-b`.
+    ScrollPageUp,
+    /// Repeat the last buffer-mutating change — `.`.
+    RepeatLastChange,
+
     // ── Text object selection (Helix `mi` / `ma`) ─────────────────────────
     /// Select a text object, entering Visual Char mode.
     ///

@@ -220,6 +220,10 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("focus-pane-down",      "Focus Pane Down",                 Some("Ctrl-J")),
         ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
         ("open-graph-view",      "Graph View",                       Some("Cmd-Shift-G")),
+        // Editor display
+        ("line-numbers-relative", "Line Numbers: Relative",          Some(":set nu rel")),
+        ("line-numbers-absolute", "Line Numbers: Absolute",          Some(":set nu abs")),
+        ("line-numbers-off",      "Line Numbers: Off",               Some(":set nonu")),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));

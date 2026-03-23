@@ -34,10 +34,10 @@ use gpui::{
 
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, ForceQuit, NewNote, OpenBacklinks, OpenCommandPalette,
-    OpenDailyNote, OpenGraphView, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile,
-    SaveFile, SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode,
-    ToggleSidebar,
+    FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
+    LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
+    OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile, SaveFileAndQuit,
+    SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
@@ -818,6 +818,9 @@ impl MainWindow {
             "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
             "close-pane" => cx.dispatch_action(&ClosePane),
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
+            "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
+            "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
+            "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
             _ => {}
         }
     }

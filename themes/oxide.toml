@@ -34,3 +34,11 @@ mode_visual = "#A855F7"   # purple
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
 cursor_fg = "#0A0A0A"   # text colour on top of a block cursor fill
+
+# ── Syntax highlighting ───────────────────────────────────────────────────────
+syntax_heading  = "#F4F4F5"   # text — headings use full brightness
+syntax_keyword  = "#CC7722"   # ochre — typst directives (#let, #set, …)
+syntax_math     = "#528BFF"   # blue  — $inline$ and $block$ math
+syntax_link     = "#A855F7"   # purple — [[wikilinks]]
+syntax_code     = "#2DD4BF"   # teal  — `inline code`
+syntax_comment  = "#52525B"   # text_faint — // comments

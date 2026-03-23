@@ -89,6 +89,7 @@ pub enum VisualKind {
 /// Story 07: yank register added here; undo history lives in `EditorPane`
 ///           (it requires buffer snapshots which are not part of pure state).
 /// Story 13: last_visual_selection for `gv` reselect.
+/// Story 20+: last_change for `.` repeat.
 #[derive(Debug, Clone)]
 pub struct EditorState {
     pub selection: Selection,
@@ -103,6 +104,9 @@ pub struct EditorState {
     /// The last visual selection, stored when leaving Visual mode.
     /// Restored by `gv`.
     pub last_visual_selection: Option<(Selection, VisualKind)>,
+    /// The last buffer-mutating command sequence, for `.` (repeat last change).
+    /// Stored as a `Vec` to support compound changes (e.g. change-line + insert).
+    pub last_change: Option<Vec<crate::editor::command::EditorCommand>>,
 }
 
 impl EditorState {
@@ -114,6 +118,7 @@ impl EditorState {
             path: None,
             yank_register: String::new(),
             last_visual_selection: None,
+            last_change: None,
         }
     }
 

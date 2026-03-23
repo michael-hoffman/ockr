@@ -746,6 +746,191 @@ pub fn apply<B: Buffer>(
             (state, BufferChanged)
         }
 
+        // ── Find-char motions ──────────────────────────────────────────────
+        FindChar(c) => {
+            let pos = state.cursor();
+            let line = buf.line(pos.line);
+            // Search forward from pos.col+1
+            if let Some(next_col) = find_char_forward(line, pos.col, c, false) {
+                navigate(&mut state, Pos::new(pos.line, next_col));
+            }
+            (state, None)
+        }
+        FindCharBack(c) => {
+            let pos = state.cursor();
+            let line = buf.line(pos.line);
+            if let Some(prev_col) = find_char_backward(line, pos.col, c, false) {
+                navigate(&mut state, Pos::new(pos.line, prev_col));
+            }
+            (state, None)
+        }
+        TillChar(c) => {
+            let pos = state.cursor();
+            let line = buf.line(pos.line);
+            if let Some(next_col) = find_char_forward(line, pos.col, c, true) {
+                navigate(&mut state, Pos::new(pos.line, next_col));
+            }
+            (state, None)
+        }
+        TillCharBack(c) => {
+            let pos = state.cursor();
+            let line = buf.line(pos.line);
+            if let Some(prev_col) = find_char_backward(line, pos.col, c, true) {
+                navigate(&mut state, Pos::new(pos.line, prev_col));
+            }
+            (state, None)
+        }
+
+        // ── Paragraph navigation ───────────────────────────────────────────
+        MoveParagraphBack => {
+            let pos = state.cursor();
+            let new_pos = paragraph_back(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+        MoveParagraphForward => {
+            let pos = state.cursor();
+            let new_pos = paragraph_forward(pos, buf);
+            navigate(&mut state, new_pos);
+            (state, None)
+        }
+
+        // ── Miscellaneous ──────────────────────────────────────────────────
+        SelectWholeFile => {
+            let last_line = buf.line_count() - 1;
+            let last_col  = buf.line(last_line).len();
+            state.selection = Selection {
+                anchor: Pos::new(0, 0),
+                cursor: Pos::new(last_line, last_col),
+            };
+            state.mode = Mode::Visual(VisualKind::Char);
+            (state, None)
+        }
+
+        MatchBracket => {
+            let pos = state.cursor();
+            let line = buf.line(pos.line);
+            // Find a bracket at or after the cursor on the same line.
+            let bracket_pos = line[pos.col..].char_indices().find_map(|(i, c)| {
+                if "(){}[]<>".contains(c) { Some((pos.col + i, c)) } else { Option::None }
+            });
+            if let Some((bcol, bchar)) = bracket_pos {
+                let (open, close, forward) = match bchar {
+                    '(' => ('(', ')', true),
+                    ')' => ('(', ')', false),
+                    '{' => ('{', '}', true),
+                    '}' => ('{', '}', false),
+                    '[' => ('[', ']', true),
+                    ']' => ('[', ']', false),
+                    '<' => ('<', '>', true),
+                    '>' => ('<', '>', false),
+                    _   => return (state, None),
+                };
+                let search_from = Pos::new(pos.line, bcol);
+                let maybe = if forward {
+                    obj_surround(buf, search_from, open, close, false)
+                        .map(|(_, e)| Pos::new(e.line, e.col.saturating_sub(close.len_utf8())))
+                } else {
+                    obj_surround(buf, search_from, open, close, false)
+                        .map(|(s, _)| s)
+                };
+                if let Some(dest) = maybe {
+                    navigate(&mut state, dest);
+                }
+            }
+            (state, None)
+        }
+
+        SwitchCase => {
+            match state.mode {
+                Mode::Visual(VisualKind::Char) => {
+                    let start = state.selection.start();
+                    let end   = state.selection.end();
+                    if start.line == end.line {
+                        let chunk = buf.line(start.line)[start.col..end.col].to_owned();
+                        let toggled = toggle_case(&chunk);
+                        buf.delete_range(start.line, start.col, end.col);
+                        buf.insert(start.line, start.col, &toggled);
+                    } else {
+                        // Multi-line: toggle each line's slice.
+                        let start_chunk = buf.line(start.line)[start.col..].to_owned();
+                        let toggled_s = toggle_case(&start_chunk);
+                        let start_end = buf.line(start.line).len();
+                        buf.delete_range(start.line, start.col, start_end);
+                        buf.insert(start.line, start.col, &toggled_s);
+                        for l in start.line + 1..end.line {
+                            let chunk = buf.line(l).to_owned();
+                            let toggled = toggle_case(&chunk);
+                            buf.delete_range(l, 0, chunk.len());
+                            buf.insert(l, 0, &toggled);
+                        }
+                        let end_chunk = buf.line(end.line)[..end.col].to_owned();
+                        let toggled_e = toggle_case(&end_chunk);
+                        buf.delete_range(end.line, 0, end.col);
+                        buf.insert(end.line, 0, &toggled_e);
+                    }
+                    state.mode = Mode::Normal;
+                    state.move_cursor_to(start);
+                    state.is_dirty = true;
+                    (state, BufferChanged)
+                }
+                _ => {
+                    // Normal mode: toggle char at cursor.
+                    let pos = state.cursor();
+                    let line = buf.line(pos.line);
+                    if pos.col < line.len() {
+                        let ch = line[pos.col..].chars().next().unwrap();
+                        let new_ch = if ch.is_uppercase() {
+                            ch.to_lowercase().to_string()
+                        } else {
+                            ch.to_uppercase().to_string()
+                        };
+                        let end_col = pos.col + ch.len_utf8();
+                        buf.delete_range(pos.line, pos.col, end_col);
+                        buf.insert(pos.line, pos.col, &new_ch);
+                        // Advance cursor one char (Helix behaviour).
+                        let line2 = buf.line(pos.line);
+                        let next = next_char_boundary(line2, pos.col);
+                        state.move_cursor_to(Pos::new(pos.line, next.min(line2.len())));
+                        state.is_dirty = true;
+                        (state, BufferChanged)
+                    } else {
+                        (state, None)
+                    }
+                }
+            }
+        }
+
+        ScrollPageDown => {
+            let pos = state.cursor();
+            let new_line = (pos.line + 40).min(buf.line_count() - 1);
+            let new_col = pos.col.min(buf.line(new_line).len());
+            navigate(&mut state, Pos::new(new_line, new_col));
+            (state, None)
+        }
+
+        ScrollPageUp => {
+            let pos = state.cursor();
+            let new_line = pos.line.saturating_sub(40);
+            let new_col = pos.col.min(buf.line(new_line).len());
+            navigate(&mut state, Pos::new(new_line, new_col));
+            (state, None)
+        }
+
+        RepeatLastChange => {
+            if let Some(seq) = state.last_change.clone() {
+                for cmd in seq {
+                    let prev = std::mem::take(&mut state);
+                    let (new_state, _) = apply(cmd, prev, buf);
+                    state = new_state;
+                }
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
         // ── Text object selection ──────────────────────────────────────────
         SelectObject { inner, kind } => {
             let pos = state.cursor();
@@ -1006,6 +1191,101 @@ fn word_backward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 /// Move to the end of the current/next WORD (whitespace-delimited).
 fn word_end_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     word_end_forward(pos, buf)
+}
+
+// ── Find-char helpers ─────────────────────────────────────────────────────────
+
+/// Find the next occurrence of `c` after `col` on `line`.
+/// If `till`, returns the position just before `c`; otherwise on `c`.
+fn find_char_forward(line: &str, col: usize, c: char, till: bool) -> Option<usize> {
+    // Start scanning one byte past the current char.
+    let start = if col < line.len() {
+        col + line[col..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1)
+    } else {
+        return None;
+    };
+    for (i, ch) in line[start..].char_indices() {
+        if ch == c {
+            let found = start + i;
+            return if till {
+                // Position just before: last char boundary before `found`.
+                if found > 0 { Some(prev_char_boundary(line, found)) } else { None }
+            } else {
+                Some(found)
+            };
+        }
+    }
+    None
+}
+
+/// Find the previous occurrence of `c` before `col` on `line`.
+/// If `till`, returns the position just after `c`.
+fn find_char_backward(line: &str, col: usize, c: char, till: bool) -> Option<usize> {
+    if col == 0 { return None; }
+    let scan = &line[..col];
+    // Walk backwards through chars.
+    let chars: Vec<(usize, char)> = scan.char_indices().collect();
+    for &(i, ch) in chars.iter().rev() {
+        if ch == c {
+            return if till {
+                Some(i + ch.len_utf8())
+            } else {
+                Some(i)
+            };
+        }
+    }
+    None
+}
+
+// ── Paragraph navigation helpers ──────────────────────────────────────────────
+
+/// Move to the start of the previous paragraph (blank-line boundary).
+fn paragraph_back<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    let is_blank = |l: usize| buf.line(l).trim().is_empty();
+    let mut line = pos.line;
+
+    // If already at top, stay.
+    if line == 0 { return Pos::new(0, 0); }
+
+    // Step over any blank lines directly above.
+    while line > 0 && is_blank(line) {
+        line -= 1;
+    }
+    // Now step over the text block above us.
+    while line > 0 && !is_blank(line - 1) {
+        line -= 1;
+    }
+    Pos::new(line, 0)
+}
+
+/// Move to the start of the next paragraph (blank-line boundary).
+fn paragraph_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
+    let total = buf.line_count();
+    let is_blank = |l: usize| buf.line(l).trim().is_empty();
+    let mut line = pos.line;
+
+    if line + 1 >= total { return Pos::new(line, buf.line(line).len()); }
+
+    // Step over non-blank lines first (skip current block).
+    while line + 1 < total && !is_blank(line) {
+        line += 1;
+    }
+    // Step over blank lines to reach the next block.
+    while line + 1 < total && is_blank(line) {
+        line += 1;
+    }
+    Pos::new(line, 0)
+}
+
+// ── Case helper ───────────────────────────────────────────────────────────────
+
+fn toggle_case(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_uppercase() { c.to_lowercase().collect::<String>() }
+            else { c.to_uppercase().collect::<String>() }
+        })
+        .collect()
 }
 
 // ── Text object finders ───────────────────────────────────────────────────────
@@ -1761,6 +2041,92 @@ mod tests {
         s.move_cursor_to(Pos::new(0, 2));
         let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::Word }, s, &mut b);
         assert!(matches!(s2.mode, Mode::Visual(VisualKind::Char)));
+    }
+
+    // ── Find-char tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn find_char_moves_to_next_occurrence() {
+        let mut b = buf("hello world");
+        let mut s = normal_state(); // col 0
+        let (s2, _) = apply(FindChar('o'), s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 4)); // 'o' in "hello"
+    }
+
+    #[test]
+    fn find_char_no_match_stays_put() {
+        let mut b = buf("hello");
+        let s = normal_state();
+        let (s2, _) = apply(FindChar('z'), s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 0));
+    }
+
+    #[test]
+    fn till_char_stops_before_target() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        let (s2, _) = apply(TillChar('o'), s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 3)); // just before 'o' at col 4
+    }
+
+    #[test]
+    fn find_char_back_moves_to_prev_occurrence() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 7)); // 'o' in "world"
+        let (s2, _) = apply(FindCharBack('l'), s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 3)); // 'l' in "hello" at col 3
+    }
+
+    // ── Paragraph navigation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn paragraph_forward_jumps_to_next_block() {
+        let mut b = buf("line1\nline2\n\nline3\nline4");
+        let mut s = normal_state(); // col 0, line 0
+        let (s2, _) = apply(MoveParagraphForward, s, &mut b);
+        assert_eq!(s2.cursor().line, 3); // "line3"
+    }
+
+    #[test]
+    fn paragraph_back_jumps_to_start_of_block() {
+        let mut b = buf("line1\nline2\n\nline3\nline4");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(4, 0)); // "line4"
+        let (s2, _) = apply(MoveParagraphBack, s, &mut b);
+        assert_eq!(s2.cursor().line, 3); // start of second block
+    }
+
+    // ── SwitchCase tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn switch_case_normal_mode_uppercases() {
+        let mut b = buf("hello");
+        let s = normal_state();
+        let (s2, _) = apply(SwitchCase, s, &mut b);
+        assert_eq!(b.line(0), "Hello");
+        assert_eq!(s2.cursor().col, 1); // advanced one char
+    }
+
+    #[test]
+    fn switch_case_visual_toggles_selection() {
+        let mut b = buf("Hello World");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 5) };
+        let (_, _) = apply(SwitchCase, s, &mut b);
+        assert_eq!(&b.line(0)[..5], "hELLO");
+    }
+
+    // ── SelectWholeFile tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn select_whole_file_enters_visual_char() {
+        let mut b = buf("hello\nworld");
+        let s = normal_state();
+        let (s2, _) = apply(SelectWholeFile, s, &mut b);
+        assert!(matches!(s2.mode, Mode::Visual(VisualKind::Char)));
+        assert_eq!(s2.selection.start(), Pos::new(0, 0));
+        assert_eq!(s2.selection.end(), Pos::new(1, 5));
     }
 
     #[test]

@@ -42,5 +42,9 @@ actions!(
         TogglePreviewMode,
         // Graph view
         OpenGraphView,
+        // Editor display
+        LineNumbersRelative,
+        LineNumbersAbsolute,
+        LineNumbersOff,
     ]
 );

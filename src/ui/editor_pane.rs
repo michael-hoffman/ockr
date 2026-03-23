@@ -27,7 +27,11 @@
 //!   v/V         — enter Visual Char / Line       gv — reselect last visual
 //!   Ctrl-V      — enter Visual Block
 //!   u           — undo              Ctrl-r       — redo
-//!   Ctrl-d/u    — scroll half page down / up
+//!   Ctrl-d/u    — scroll half page down / up  Ctrl-f/b  — page down / up
+//!   f/F/t/T<c>  — find char forward/back / till forward/back
+//!   {/}         — paragraph back / forward     %         — select whole file
+//!   ~           — switch case                  .         — repeat last change
+//!   mi/ma<obj>  — select inner/around object (Story 20)
 //!   ;           — collapse selection (no-op in Normal)
 //!   Escape      — enter Normal
 //!
@@ -42,10 +46,10 @@ use std::path::PathBuf;
 
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px,
+    MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px, rgba,
 };
 
-use crate::actions::{FollowLink, SaveFile};
+use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -64,6 +68,31 @@ use crate::vault::{VaultFile, VaultState};
 /// as GPUI elements; the rest are skipped.  80 lines @ 20 px = 1600 px,
 /// comfortably covering any realistic window height.
 const VIEWPORT_LINES: usize = 80;
+
+/// How line numbers are displayed in the gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum LineNumberMode {
+    /// No gutter — maximum horizontal space for content.
+    Off,
+    /// Show the 1-based absolute line number on every line.
+    Absolute,
+    /// Show the cursor line's absolute number; other lines show distance from cursor.
+    /// Matches Helix / Neovim `relativenumber` behaviour.
+    #[default]
+    Relative,
+}
+
+/// State for the in-buffer `/` search bar.
+struct SearchState {
+    /// Text typed so far.
+    query: String,
+    /// All match start positions across the whole buffer (updated on every keystroke).
+    matches: Vec<Pos>,
+    /// Index into `matches` for the "current" focused match.
+    current_idx: usize,
+    /// Cursor position when search was opened — restored on Escape.
+    saved_cursor: Pos,
+}
 
 /// Typst preamble prepended for HTML-mode compilation only.
 ///
@@ -132,6 +161,14 @@ enum PendingKey {
     MatchInner,
     /// `ma` pressed; awaiting the text-object character.
     MatchAround,
+    /// `f` pressed; awaiting the target character (`f<c>`).
+    FindChar,
+    /// `F` pressed; awaiting the target character (`F<c>`).
+    FindCharBack,
+    /// `t` pressed; awaiting the target character (`t<c>`).
+    TillChar,
+    /// `T` pressed; awaiting the target character (`T<c>`).
+    TillCharBack,
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
@@ -155,6 +192,12 @@ pub struct EditorPane {
     file_rel_path: Option<String>,
     /// Pending multi-key sequence state (e.g. `g…`, `r<c>`).
     pending: PendingKey,
+    /// Active search bar state; `Some` while `/` search is open.
+    search: Option<SearchState>,
+    /// Query from the last completed search; used by `n`/`N` repeat navigation.
+    last_search: Option<String>,
+    /// How line numbers are rendered in the gutter.
+    line_number_mode: LineNumberMode,
     /// Monotonically-increasing compile sequence number.
     ///
     /// Incremented on every `trigger_compile` call.  The async debounce task
@@ -184,6 +227,9 @@ impl EditorPane {
             vault_root: None,
             file_rel_path: None,
             pending: PendingKey::None,
+            search: None,
+            last_search: None,
+            line_number_mode: LineNumberMode::Relative,
             compile_sequence: 0,
             viewport_top: 0,
         }
@@ -411,6 +457,137 @@ impl EditorPane {
         }
     }
 
+    // ── Search ────────────────────────────────────────────────────────────────
+
+    /// Open the `/` search bar, saving the current cursor for Escape-cancel.
+    fn open_search(&mut self) {
+        let saved = self.state.cursor();
+        self.search = Some(SearchState {
+            query: String::new(),
+            matches: Vec::new(),
+            current_idx: 0,
+            saved_cursor: saved,
+        });
+    }
+
+    /// Route a keystroke to the search bar while it is open.
+    fn handle_search_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match k.key.as_str() {
+            "escape" => {
+                // Cancel: restore cursor to pre-search position.
+                let saved = self.search.as_ref().map(|s| s.saved_cursor);
+                self.search = None;
+                if let Some(pos) = saved {
+                    self.state.move_cursor_to(pos);
+                    self.update_viewport();
+                }
+            }
+            "enter" => {
+                // Confirm: persist query for n/N, close bar.
+                if let Some(ref s) = self.search {
+                    if !s.query.is_empty() {
+                        self.last_search = Some(s.query.clone());
+                    }
+                }
+                self.search = None;
+            }
+            "backspace" => {
+                if let Some(ref mut s) = self.search {
+                    s.query.pop();
+                }
+                self.update_search_matches(cx);
+            }
+            _ => {
+                if !k.modifiers.platform && !k.modifiers.control {
+                    if let Some(ch) = &k.key_char {
+                        if let Some(ref mut s) = self.search {
+                            s.query.push_str(ch);
+                        }
+                        self.update_search_matches(cx);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Recompute match positions from the current query and jump to the best one.
+    fn update_search_matches(&mut self, _cx: &mut Context<Self>) {
+        let (query, saved) = match &self.search {
+            Some(s) => (s.query.clone(), s.saved_cursor),
+            None => return,
+        };
+
+        let matches = find_all_matches(&self.buffer, &query);
+
+        // Pick the match at or immediately after the saved cursor.
+        let idx = if matches.is_empty() {
+            0
+        } else {
+            matches
+                .iter()
+                .position(|p| {
+                    p.line > saved.line
+                        || (p.line == saved.line && p.col >= saved.col)
+                })
+                .unwrap_or(0)
+        };
+
+        let dest = matches.get(idx).copied();
+
+        if let Some(s) = &mut self.search {
+            s.matches = matches;
+            s.current_idx = idx;
+        }
+
+        if let Some(pos) = dest {
+            self.state.move_cursor_to(pos);
+        } else if query.is_empty() {
+            self.state.move_cursor_to(saved);
+        }
+        self.update_viewport();
+    }
+
+    /// Move to the next match after the cursor, wrapping around.
+    fn search_next(&mut self, cx: &mut Context<Self>) {
+        let query = match &self.last_search {
+            Some(q) => q.clone(),
+            None => return,
+        };
+        let matches = find_all_matches(&self.buffer, &query);
+        if matches.is_empty() {
+            return;
+        }
+        let cursor = self.state.cursor();
+        let idx = matches
+            .iter()
+            .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
+            .unwrap_or(0);
+        self.state.move_cursor_to(matches[idx]);
+        self.update_viewport();
+        cx.notify();
+    }
+
+    /// Move to the previous match before the cursor, wrapping around.
+    fn search_prev(&mut self, cx: &mut Context<Self>) {
+        let query = match &self.last_search {
+            Some(q) => q.clone(),
+            None => return,
+        };
+        let matches = find_all_matches(&self.buffer, &query);
+        if matches.is_empty() {
+            return;
+        }
+        let cursor = self.state.cursor();
+        let idx = matches
+            .iter()
+            .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
+            .unwrap_or(matches.len() - 1);
+        self.state.move_cursor_to(matches[idx]);
+        self.update_viewport();
+        cx.notify();
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -448,6 +625,13 @@ impl EditorPane {
                     cx.notify();
                 }
             }
+            return;
+        }
+
+        // Search bar routing: while `/` search is open, send non-Cmd keys there.
+        if self.search.is_some() && !k.modifiers.platform {
+            self.handle_search_key(k, cx);
+            cx.stop_propagation();
             return;
         }
 
@@ -642,6 +826,73 @@ impl EditorPane {
             return;
         }
 
+        // ── `/` search, `n`/`N` repeat ───────────────────────────────────────
+        if in_modal && !k.modifiers.platform && !k.modifiers.control {
+            let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
+            if is_slash {
+                self.open_search();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            // n / N: navigate matches from last search (when one exists).
+            if k.key == "n" && self.last_search.is_some() {
+                self.search_next(cx);
+                cx.stop_propagation();
+                return;
+            }
+            if k.key == "N" && self.last_search.is_some() {
+                self.search_prev(cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
+
+        // ── f/F/t/T find-char sequences ──────────────────────────────────────
+        // Available in Normal and Visual modes; only when no other sequence pending.
+        if in_modal && self.pending == PendingKey::None
+            && !k.modifiers.platform && !k.modifiers.control
+        {
+            let next = match k.key.as_str() {
+                "f" => Some(PendingKey::FindChar),
+                "F" => Some(PendingKey::FindCharBack),
+                "t" => Some(PendingKey::TillChar),
+                "T" => Some(PendingKey::TillCharBack),
+                _ => None,
+            };
+            if let Some(pk) = next {
+                self.pending = pk;
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if matches!(
+            self.pending,
+            PendingKey::FindChar | PendingKey::FindCharBack
+            | PendingKey::TillChar | PendingKey::TillCharBack
+        ) {
+            let pending_kind = self.pending;
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    cx.stop_propagation();
+                    let cmd = match pending_kind {
+                        PendingKey::FindChar     => EditorCommand::FindChar(ch),
+                        PendingKey::FindCharBack => EditorCommand::FindCharBack(ch),
+                        PendingKey::TillChar     => EditorCommand::TillChar(ch),
+                        PendingKey::TillCharBack => EditorCommand::TillCharBack(ch),
+                        _ => unreachable!(),
+                    };
+                    let prev = std::mem::take(&mut self.state);
+                    let (new_state, _) = apply(cmd, prev, &mut self.buffer);
+                    self.state = new_state;
+                    self.update_viewport();
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         let cmd = keystroke_to_command(event, &self.state);
         if cmd == EditorCommand::Noop {
             return;
@@ -660,14 +911,29 @@ impl EditorPane {
         // triggers a second insertion via the IME pipeline and doubles every character.
         cx.stop_propagation();
 
+        let mutating = is_buffer_mutating(&cmd);
+
         // Snapshot before any mutating command.
-        if is_buffer_mutating(&cmd) {
+        if mutating {
             self.push_undo();
         }
+
+        // Record the command for `.` repeat — but not RepeatLastChange itself.
+        let record = if mutating && cmd != EditorCommand::RepeatLastChange {
+            Some(cmd.clone())
+        } else {
+            None
+        };
 
         let prev_state = std::mem::take(&mut self.state);
         let (new_state, effect) = apply(cmd, prev_state, &mut self.buffer);
         self.state = new_state;
+
+        // Persist the last-change record after apply (so state is fresh).
+        if let Some(c) = record {
+            self.state.last_change = Some(vec![c]);
+        }
+
         self.update_viewport();
 
         match effect {
@@ -747,12 +1013,47 @@ impl Render for EditorPane {
         let first = self.viewport_top;
         let last = (first + VIEWPORT_LINES).min(line_count);
 
+        // Per-line search highlight data (only computed when search bar is open).
+        let (search_query_len, search_matches_ref) = if let Some(ref s) = self.search {
+            (s.query.len(), Some((&s.matches, s.current_idx)))
+        } else {
+            (0, None)
+        };
+
+        let lnm = self.line_number_mode;
+
         let mut line_elements = Vec::with_capacity(last - first);
         for i in first..last {
             let text = self.buffer.line(i).to_string();
             let in_selection = is_line_in_visual_selection(i, mode, &selection);
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
-            line_elements.push(render_line(i, text, cursor, mode, in_selection, is_front_matter, &t));
+
+            // Collect search match byte-ranges that fall on this line.
+            let (focused_match, other_matches): (Option<(usize, usize)>, Vec<(usize, usize)>) =
+                if let Some((matches, cur_idx)) = search_matches_ref {
+                    if search_query_len > 0 {
+                        let focused = matches
+                            .get(cur_idx)
+                            .filter(|p| p.line == i)
+                            .map(|p| (p.col, p.col + search_query_len));
+                        let others: Vec<_> = matches
+                            .iter()
+                            .enumerate()
+                            .filter(|&(idx, p)| p.line == i && idx != cur_idx)
+                            .map(|(_, p)| (p.col, p.col + search_query_len))
+                            .collect();
+                        (focused, others)
+                    } else {
+                        (None, vec![])
+                    }
+                } else {
+                    (None, vec![])
+                };
+
+            line_elements.push(render_line(
+                i, text, cursor, mode, in_selection, is_front_matter,
+                lnm, line_count, &other_matches, focused_match, &t,
+            ));
         }
 
         let mode_label = match mode {
@@ -821,6 +1122,40 @@ impl Render for EditorPane {
                 div().into_any_element()
             });
 
+        // ── Search bar (shown at top when `/` is active) ──────────────────────
+        let search_bar = self.search.as_ref().map(|s| {
+            let match_info: gpui::AnyElement = if s.query.is_empty() {
+                div().into_any_element()
+            } else if s.matches.is_empty() {
+                div()
+                    .text_color(gpui::rgb(0xF87171)) // soft red — no matches
+                    .child("  no matches")
+                    .into_any_element()
+            } else {
+                div()
+                    .text_color(gpui::rgb(t.text_faint))
+                    .child(format!("  [{}/{}]", s.current_idx + 1, s.matches.len()))
+                    .into_any_element()
+            };
+
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_4()
+                .py_1()
+                .bg(gpui::rgb(t.bg_base))
+                .border_b_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .text_sm()
+                .font_family("Menlo")
+                .child(div().text_color(gpui::rgb(t.ochre)).child("/"))
+                .child(div().text_color(gpui::rgb(t.text)).child(s.query.clone()))
+                .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
+                .child(match_info)
+        });
+
         div()
             .track_focus(&self.focus_handle)
             .size_full()
@@ -831,9 +1166,22 @@ impl Render for EditorPane {
                 this.save(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| {
+                this.line_number_mode = LineNumberMode::Relative;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &LineNumbersAbsolute, _, cx| {
+                this.line_number_mode = LineNumberMode::Absolute;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &LineNumbersOff, _, cx| {
+                this.line_number_mode = LineNumberMode::Off;
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::follow_link))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+            .when_some(search_bar, |root, bar| root.child(bar))
             .child(
                 div()
                     .flex_1()
@@ -878,6 +1226,122 @@ fn front_matter_end(buffer: &InMemoryBuffer, line_count: usize) -> Option<usize>
     None
 }
 
+/// Render one editor line, including optional gutter, syntax highlighting,
+/// search-match backgrounds, selection background, and the block/bar cursor.
+///
+/// All styling concerns are composed via a single segment-building pass:
+/// boundaries are collected from syntax spans, search ranges, and the cursor
+/// position, then each interval gets the highest-priority style applied.
+#[allow(clippy::too_many_arguments)]
+/// Number of digits needed to display line numbers up to `count`.
+/// Minimum of 2 so the gutter always has a reasonable width.
+fn gutter_digits(count: usize) -> usize {
+    if count < 10 { 2 }
+    else if count < 100 { 3 }
+    else if count < 1000 { 4 }
+    else { 5 }
+}
+
+/// Compute syntax-highlight spans for a single line.
+///
+/// Returns a sorted, non-overlapping list of `(start_byte, end_byte, fg_color)`.
+/// Text not covered by any span uses the caller-supplied default foreground.
+/// Front-matter lines are left unhighlighted (returned as empty vec).
+fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<(usize, usize, u32)> {
+    if is_front_matter || line.is_empty() {
+        return Vec::new();
+    }
+
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut spans: Vec<(usize, usize, u32)> = Vec::new();
+
+    // Full-line: Typst headings (`=`, `==`, `===`, …)
+    {
+        let eq_count = b.iter().take_while(|&&c| c == b'=').count();
+        if eq_count > 0 && (eq_count == n || b[eq_count] == b' ') {
+            spans.push((0, n, t.syntax_heading));
+            return spans;
+        }
+    }
+
+    let mut i = 0usize;
+    while i < n {
+        // `//` comment — captures rest of line.
+        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            spans.push((i, n, t.syntax_comment));
+            break;
+        }
+
+        // `[[wikilink]]`
+        if b[i] == b'[' && i + 1 < n && b[i + 1] == b'[' {
+            if let Some(rel) = line[i + 2..].find("]]") {
+                let end = i + 2 + rel + 2;
+                spans.push((i, end, t.syntax_link));
+                i = end;
+                continue;
+            }
+        }
+
+        // `inline code`
+        if b[i] == b'`' {
+            if let Some(rel) = line[i + 1..].find('`') {
+                let end = i + 1 + rel + 1;
+                spans.push((i, end, t.syntax_code));
+                i = end;
+                continue;
+            }
+        }
+
+        // `$math$`
+        if b[i] == b'$' {
+            if let Some(rel) = line[i + 1..].find('$') {
+                let end = i + 1 + rel + 1;
+                spans.push((i, end, t.syntax_math));
+                i = end;
+                continue;
+            }
+        }
+
+        // `#keyword` — Typst directive
+        if b[i] == b'#'
+            && i + 1 < n
+            && (b[i + 1].is_ascii_alphabetic() || b[i + 1] == b'_')
+        {
+            let start = i;
+            i += 1;
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            spans.push((start, i, t.syntax_keyword));
+            continue;
+        }
+
+        i += 1;
+    }
+
+    spans
+}
+
+/// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
+/// Returns an empty vec if `query` is empty.
+fn find_all_matches(buf: &InMemoryBuffer, query: &str) -> Vec<Pos> {
+    let mut out = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+    for line_idx in 0..buf.line_count() {
+        let line = buf.line(line_idx);
+        let mut offset = 0usize;
+        while let Some(rel) = line[offset..].find(query) {
+            out.push(Pos::new(line_idx, offset + rel));
+            // Advance by at least 1 to avoid infinite loops on zero-width matches.
+            offset += rel + query.len().max(1);
+        }
+    }
+    out
+}
+
 fn render_line(
     line_idx: usize,
     text: String,
@@ -885,97 +1349,171 @@ fn render_line(
     mode: Mode,
     in_selection: bool,
     is_front_matter: bool,
+    line_number_mode: LineNumberMode,
+    total_lines: usize,
+    other_matches: &[(usize, usize)],
+    focused_match: Option<(usize, usize)>,
     t: &ThemePalette,
-) -> impl gpui::IntoElement {
+) -> gpui::AnyElement {
     let line_height = px(20.0);
+    let is_cursor_line = line_idx == cursor.line;
+    let text_len = text.len();
+    let default_fg = if is_front_matter { t.text_faint } else { t.text_muted };
 
-    // Selection highlight: entire-line background for Visual(Line).
-    let sel_bg = gpui::rgb(t.ochre_dim);
-    let line_bg = if in_selection && line_idx != cursor.line {
-        Some(sel_bg)
+    // ── Gutter ────────────────────────────────────────────────────────────────
+    let gutter_cell = if line_number_mode != LineNumberMode::Off {
+        let w = gutter_digits(total_lines);
+        let (label, color) = if is_cursor_line {
+            (format!("{:>width$}", line_idx + 1, width = w), t.text_subtle)
+        } else {
+            let n: isize = match line_number_mode {
+                LineNumberMode::Absolute => (line_idx + 1) as isize,
+                LineNumberMode::Relative => {
+                    (line_idx as isize - cursor.line as isize).abs()
+                }
+                LineNumberMode::Off => unreachable!(),
+            };
+            (format!("{:>width$}", n, width = w), t.text_faint)
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .pr_3()
+                .text_sm()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(color))
+                .child(label),
+        )
     } else {
         None
     };
 
-    if line_idx != cursor.line {
-        let text_color = if is_front_matter {
-            gpui::rgb(t.text_faint)
+    // ── Syntax spans ──────────────────────────────────────────────────────────
+    let spans = highlight_spans(&text, t, is_front_matter);
+
+    // ── Cursor character bounds ───────────────────────────────────────────────
+    let cursor_col = if is_cursor_line { cursor.col.min(text_len) } else { usize::MAX };
+    let cursor_end = if is_cursor_line && cursor_col < text_len {
+        text[cursor_col..]
+            .char_indices()
+            .nth(1)
+            .map(|(b, _)| cursor_col + b)
+            .unwrap_or(text_len)
+    } else {
+        text_len
+    };
+
+    // ── Collect boundary points ────────────────────────────────────────────────
+    let mut boundaries: Vec<usize> = Vec::with_capacity(16);
+    boundaries.push(0);
+    boundaries.push(text_len);
+    if is_cursor_line {
+        boundaries.push(cursor_col);
+        boundaries.push(cursor_end);
+    }
+    for &(s, e, _) in &spans {
+        boundaries.push(s);
+        boundaries.push(e);
+    }
+    for &(s, e) in other_matches {
+        boundaries.push(s);
+        boundaries.push(e);
+    }
+    if let Some((s, e)) = focused_match {
+        boundaries.push(s);
+        boundaries.push(e);
+    }
+    // Keep only valid UTF-8 char boundaries inside the string.
+    boundaries.retain(|&b| b <= text_len && text.is_char_boundary(b));
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    // ── Mode-derived colours ──────────────────────────────────────────────────
+    let cursor_rgb = match mode {
+        Mode::Insert   => gpui::rgb(t.mode_insert),
+        Mode::Normal   => gpui::rgb(t.mode_normal),
+        Mode::Visual(_)=> gpui::rgb(t.mode_visual),
+    };
+    let sel_bg        = gpui::rgb(t.ochre_dim);
+    // Non-current match: translucent ochre tint.
+    let match_bg      = rgba(((t.ochre as u64) << 8 | 0x55) as u32);
+    // Current (focused) match: solid ochre, inverted text.
+    let focused_bg    = gpui::rgb(t.ochre);
+
+    // ── Build segments ────────────────────────────────────────────────────────
+    let mut segs: Vec<gpui::AnyElement> = Vec::new();
+
+    for w in boundaries.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a >= b { continue; }
+        let Some(seg_text) = text.get(a..b) else { continue };
+
+        let is_cursor_block =
+            is_cursor_line && a == cursor_col && cursor_col < text_len && mode != Mode::Insert;
+        let is_cursor_bar =
+            is_cursor_line && a == cursor_col && mode == Mode::Insert;
+
+        // Foreground from syntax spans (or default).
+        let syn_fg = spans
+            .iter()
+            .find(|&&(s, e, _)| s <= a && a < e)
+            .map(|&(_, _, c)| c)
+            .unwrap_or(default_fg);
+
+        let cell = div().text_sm().font_family("Menlo");
+
+        let cell = if is_cursor_block {
+            cell.text_color(gpui::rgb(t.cursor_fg)).bg(cursor_rgb)
+        } else if is_cursor_bar {
+            cell.text_color(gpui::rgb(syn_fg))
+                .border_l_2()
+                .border_color(cursor_rgb)
+        } else if focused_match.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
+            cell.text_color(gpui::rgb(t.cursor_fg)).bg(focused_bg)
+        } else if other_matches.iter().any(|&(s, e)| s <= a && a < e) {
+            cell.text_color(gpui::rgb(syn_fg)).bg(match_bg)
+        } else if in_selection {
+            cell.text_color(gpui::rgb(syn_fg)).bg(sel_bg)
         } else {
-            gpui::rgb(t.text_muted)
+            cell.text_color(gpui::rgb(syn_fg))
         };
-        let mut row = div()
-            .min_h(line_height)
-            .whitespace_nowrap()
-            .overflow_x_hidden()
-            .text_color(text_color)
-            .text_sm()
-            .font_family("Menlo")
-            .child(if text.is_empty() { " ".to_string() } else { text });
-        if let Some(bg) = line_bg {
-            row = row.bg(bg);
-        }
-        return row.into_any_element();
+
+        segs.push(cell.child(seg_text.to_string()).into_any_element());
     }
 
-    // Cursor line: split at the cursor byte offset.
-    let col = cursor.col.min(text.len());
-    let before = text[..col].to_string();
+    // Cursor at end-of-line (when cursor_col >= text_len).
+    if is_cursor_line && cursor_col >= text_len {
+        let eol = if mode != Mode::Insert {
+            div()
+                .text_sm().font_family("Menlo")
+                .text_color(gpui::rgb(t.cursor_fg))
+                .bg(cursor_rgb)
+                .child(" ")
+        } else {
+            div()
+                .text_sm().font_family("Menlo")
+                .text_color(gpui::rgb(t.text_muted))
+                .border_l_2()
+                .border_color(cursor_rgb)
+                .child(" ")
+        };
+        segs.push(eol.into_any_element());
+    }
 
-    let char_end = text[col..]
-        .char_indices()
-        .nth(1)
-        .map(|(b, _)| col + b)
-        .unwrap_or(text.len());
-
-    let cursor_char = if col < text.len() {
-        text[col..char_end].to_string()
-    } else {
-        " ".to_string()
-    };
-
-    let after = if char_end < text.len() {
-        text[char_end..].to_string()
-    } else {
-        String::new()
-    };
-
-    let cursor_color = match mode {
-        Mode::Insert => gpui::rgb(t.mode_insert),
-        Mode::Normal => gpui::rgb(t.mode_normal),
-        Mode::Visual(_) => gpui::rgb(t.mode_visual),
-    };
-
-    // Insert mode → bar cursor (left border); Normal/Visual → block (filled bg).
-    let cursor_cell = if mode == Mode::Insert {
-        div()
-            .text_color(gpui::rgb(t.text_muted))
-            .border_l_2()
-            .border_color(cursor_color)
-            .child(cursor_char)
-    } else {
-        div()
-            .text_color(gpui::rgb(t.cursor_fg))
-            .bg(cursor_color)
-            .child(cursor_char)
-    };
+    // ── Assemble row ──────────────────────────────────────────────────────────
+    let content_row = div().flex().flex_row().children(segs);
 
     let mut row = div()
         .min_h(line_height)
         .flex()
         .flex_row()
         .whitespace_nowrap()
-        .overflow_x_hidden()
-        .text_sm()
-        .font_family("Menlo")
-        .child(div().text_color(gpui::rgb(t.text_muted)).child(before))
-        .child(cursor_cell)
-        .child(div().text_color(gpui::rgb(t.text_muted)).child(after));
+        .overflow_x_hidden();
 
-    if in_selection {
-        row = row.bg(gpui::rgb(t.ochre_dim));
+    if let Some(g) = gutter_cell {
+        row = row.child(g);
     }
-
-    row.into_any_element()
+    row.child(content_row).into_any_element()
 }
 
 // ── Key translation ───────────────────────────────────────────────────────────
@@ -1000,6 +1538,8 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
             "v" => EnterVisualBlock,
             "d" => ScrollHalfDown,
             "u" => ScrollHalfUp,
+            "f" => ScrollPageDown,
+            "b" => ScrollPageUp,
             _ => Noop,
         };
     }
@@ -1056,6 +1596,15 @@ fn key_normal(event: &KeyDownEvent) -> EditorCommand {
         // Indent / dedent (single-line, same key as visual-mode versions)
         ">" => IndentLines,
         "<" => DedentLines,
+        // Paragraph navigation
+        "{" => MoveParagraphBack,
+        "}" => MoveParagraphForward,
+        // Select whole file (Helix `%`)
+        "%" => SelectWholeFile,
+        // Switch case of char under cursor
+        "~" => SwitchCase,
+        // Repeat last change
+        "." => RepeatLastChange,
         _ => Noop,
     }
 }
@@ -1066,12 +1615,14 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
     if k.modifiers.platform {
         return Noop;
     }
-    // Ctrl combos — Ctrl-V cycles back to Visual Block; Ctrl-d/u scroll.
+    // Ctrl combos — Ctrl-V cycles back to Visual Block; Ctrl-d/u/f/b scroll.
     if k.modifiers.control {
         return match k.key.as_str() {
             "v" => EnterVisualBlock,
             "d" => ScrollHalfDown,
             "u" => ScrollHalfUp,
+            "f" => ScrollPageDown,
+            "b" => ScrollPageUp,
             _ => Noop,
         };
     }
@@ -1106,6 +1657,13 @@ fn key_visual(event: &KeyDownEvent) -> EditorCommand {
         // Switch between visual modes without leaving visual
         "v" => EnterVisualChar,
         "V" => EnterVisualLine,
+        // Paragraph navigation (extends selection)
+        "{" => MoveParagraphBack,
+        "}" => MoveParagraphForward,
+        // Select whole file
+        "%" => SelectWholeFile,
+        // Switch case of selection
+        "~" => SwitchCase,
         _ => Noop,
     }
 }
@@ -1164,8 +1722,13 @@ fn is_buffer_mutating(cmd: &EditorCommand) -> bool {
             | ChangeLine
             | ChangeToLineEnd
             | DeleteSelection
+            | ChangeSelection
             | ReplaceChar(_)
             | DeleteWordBefore
+            | IndentLines
+            | DedentLines
+            | SwitchCase
+            | RepeatLastChange
     )
 }
 
