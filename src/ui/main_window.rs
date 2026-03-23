@@ -33,7 +33,7 @@ use gpui::{
 };
 
 use crate::actions::{
-    BufferClose, BufferNext, BufferPrevious, ClosePane, FocusPaneDown, FocusPaneLeft,
+    BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
     OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile, SaveFileAndQuit,
@@ -49,6 +49,7 @@ use crate::ui::template_picker::{
     TemplatePicker, TemplatePickerEvent, heading_to_filename_stem, scan_templates,
 };
 use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
+use crate::editor::state::Pos;
 use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
 use crate::ui::preview::{PreviewEvent, PreviewPane};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
@@ -80,6 +81,10 @@ struct TabInfo {
     path: PathBuf,
     /// File stem shown in the tab label (e.g. `"my-note"`).
     title: String,
+    /// Cursor position saved when leaving this tab.
+    cursor: Pos,
+    /// Viewport top (first visible line) saved when leaving this tab.
+    viewport_top: usize,
 }
 
 // ── Pane entry ────────────────────────────────────────────────────────────────
@@ -147,6 +152,10 @@ pub struct MainWindow {
     vault_search: Option<Entity<VaultSearch>>,
     graph_view: Option<Entity<GraphView>>,
     recent_paths: Vec<PathBuf>,
+    /// Last successfully compiled paged document (used for PDF export).
+    last_paged_doc: Option<std::sync::Arc<typst::layout::PagedDocument>>,
+    /// Transient status message shown after export (cleared on next notify cycle).
+    export_status: Option<String>,
 }
 
 impl MainWindow {
@@ -210,6 +219,7 @@ impl MainWindow {
                         }
                         CompileResult::Ok(ref doc) => {
                             let doc = doc.clone();
+                            this.update(cx, |win, _cx| { win.last_paged_doc = Some(doc.clone()); }).ok();
                             preview.update(cx, |pane, cx| pane.set_document(doc, cx));
                         }
                         CompileResult::Err(ref diags) => {
@@ -289,6 +299,8 @@ impl MainWindow {
             vault_search: None,
             graph_view: None,
             recent_paths: Vec::new(),
+            last_paged_doc: None,
+            export_status: None,
             html_link_sender: link_tx,
         }
     }
@@ -499,6 +511,66 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn export_pdf(
+        &mut self,
+        _: &ExportPdf,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.last_paged_doc.clone() else {
+            self.export_status = Some("No compiled document to export".to_string());
+            cx.notify();
+            return;
+        };
+
+        // Determine output path: same stem as source file, but with .pdf extension.
+        let source_path = self.panes[self.active_idx]
+            .tabs
+            .get(self.panes[self.active_idx].active_tab)
+            .map(|t| t.path.clone());
+
+        let pdf_path = match source_path {
+            Some(p) => p.with_extension("pdf"),
+            None => {
+                self.export_status = Some("No file path — save first".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        let options = typst_pdf::PdfOptions {
+            ident: typst::foundations::Smart::Auto,
+            timestamp: None,
+            page_ranges: None,
+            standards: typst_pdf::PdfStandards::default(),
+            tagged: true,
+        };
+
+        match typst_pdf::pdf(&doc, &options) {
+            Ok(bytes) => {
+                match std::fs::write(&pdf_path, &bytes) {
+                    Ok(()) => {
+                        let name = pdf_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("output.pdf")
+                            .to_string();
+                        self.export_status = Some(format!("Exported → {name}"));
+                    }
+                    Err(e) => {
+                        self.export_status = Some(format!("Write failed: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = e.first()
+                    .map(|d| d.message.to_string())
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                self.export_status = Some(format!("PDF error: {msg}"));
+            }
+        }
+        cx.notify();
+    }
+
     fn open_daily_note(
         &mut self,
         _: &OpenDailyNote,
@@ -568,7 +640,7 @@ impl MainWindow {
         // Add or replace a tab entry.
         // Strategy: add after the currently active tab so new tabs feel adjacent.
         let insert_at = self.panes[pane_idx].active_tab + 1;
-        let new_tab = TabInfo { path: abs_path.clone(), title };
+        let new_tab = TabInfo { path: abs_path.clone(), title, cursor: Pos::new(0, 0), viewport_top: 0 };
         if insert_at >= self.panes[pane_idx].tabs.len() {
             self.panes[pane_idx].tabs.push(new_tab);
             self.panes[pane_idx].active_tab = self.panes[pane_idx].tabs.len() - 1;
@@ -588,9 +660,25 @@ impl MainWindow {
         let pane = &self.panes[pane_idx];
         if tab_idx >= pane.tabs.len() || tab_idx == pane.active_tab { return; }
 
+        // Save cursor / viewport of the departing tab.
+        let departing = pane.active_tab;
+        let editor = self.panes[pane_idx].editor.read(cx);
+        let saved_cursor = editor.cursor_pos();
+        let saved_vp = editor.viewport_top();
+        self.panes[pane_idx].tabs[departing].cursor = saved_cursor;
+        self.panes[pane_idx].tabs[departing].viewport_top = saved_vp;
+
         // Load the target file into the editor.
-        let path = pane.tabs[tab_idx].path.clone();
+        let path = self.panes[pane_idx].tabs[tab_idx].path.clone();
         open_file_in_editor(&path, &self.panes[pane_idx].editor, &self.vault, cx);
+
+        // Restore cursor / viewport of the arriving tab.
+        let arriving_cursor = self.panes[pane_idx].tabs[tab_idx].cursor;
+        let arriving_vp = self.panes[pane_idx].tabs[tab_idx].viewport_top;
+        self.panes[pane_idx].editor.update(cx, |pane, _| {
+            pane.restore_cursor_and_viewport(arriving_cursor, arriving_vp);
+        });
+
         self.panes[pane_idx].active_tab = tab_idx;
     }
 
@@ -980,6 +1068,7 @@ impl MainWindow {
             "buffer-previous" => cx.dispatch_action(&BufferPrevious),
             "buffer-close" => cx.dispatch_action(&BufferClose),
             "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
+            "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
             "vault-search" => cx.dispatch_action(&OpenVaultSearch),
             "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
@@ -1214,6 +1303,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_preview_mode))
+            .on_action(cx.listener(Self::export_pdf))
             .on_action(cx.listener(Self::open_daily_note))
             .on_action(cx.listener(Self::split_pane_vertical))
             .on_action(cx.listener(Self::split_pane_horizontal))
@@ -1385,9 +1475,36 @@ impl Render for MainWindow {
                 .into_any_element(),
         };
 
+        // ── Export status toast ───────────────────────────────────────────────
+        let export_toast = self.export_status.take().map(|msg| {
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .bottom(px(24.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .bg(gpui::rgb(t.bg_panel))
+                            .border_1()
+                            .border_color(gpui::rgb(t.border_subtle))
+                            .rounded(px(6.0))
+                            .text_xs()
+                            .text_color(gpui::rgb(t.text))
+                            .font_family("Menlo")
+                            .child(msg),
+                    )
+            ).with_priority(150)
+        });
+
         root.child(editor_area)
             .child(handle(DragTarget::Preview, true, cx))
             .child(preview_col)
+            .when_some(export_toast, |root, toast| root.child(toast))
             .when_some(self.palette.clone(), |root, p| {
                 root.child(gpui::deferred(p).with_priority(100))
             })

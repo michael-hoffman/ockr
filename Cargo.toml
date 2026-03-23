@@ -13,6 +13,7 @@ typst = "0.14"
 typst-assets = { version = "0.14", features = ["fonts"] }
 typst-render = "0.14"
 typst-html = "0.14"
+typst-pdf = "0.14"
 image = "0.25"
 time = { version = "0.3", features = ["local-offset"] }
 serde = { version = "1", features = ["derive"] }

@@ -22,6 +22,7 @@ hit-tests against stored regions.  A match emits `PreviewEvent::OpenLink(url)` w
 ## Unscoped / Future
 
 ### PDF export command
-No `export-pdf` command exists yet — only the in-pane paged preview.
-**Plan:** `ExportPdf` action → call `typst::export::pdf(doc)` → write `<stem>.pdf`
-next to the source file → flash "Exported → foo.pdf" in the status bar.
+**Status:** ✅ Done — `Cmd-Shift-E` / `export-pdf` in the command palette.
+**Implementation:** `ExportPdf` action → stores last `Arc<PagedDocument>` on each paged
+compile result → calls `typst_pdf::pdf(doc, options)` → writes `<stem>.pdf` beside the
+source file → shows a transient toast overlay ("Exported → foo.pdf").

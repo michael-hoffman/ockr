@@ -196,6 +196,7 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `Cmd-Shift-{` | Previous tab                        |
 | `Ctrl-H/L/K/J` | Focus pane left/right/up/down      |
 | `Cmd-Alt-H`   | Toggle HTML ↔ paged preview         |
+| `Cmd-Shift-E` | Export PDF                          |
 | `Cmd-Shift-G` | Graph view                          |
 | `Cmd-Q`       | Quit                                |
 
@@ -223,6 +224,7 @@ Open with `:` or `Cmd-P`. A `:<hint>` shows the Helix ex-command equivalent.
 | `buffer-close` | Close current tab | `Cmd-W` |
 | `open-graph-view` | Graph view | — |
 | `toggle-preview-mode` | HTML ↔ paged preview | — |
+| `export-pdf` | Export current document as PDF | `Cmd-Shift-E` |
 | `follow-link` | Follow wikilink under cursor | — |
 | `line-numbers-relative` | Relative line numbers | `:set nu rel` |
 | `line-numbers-absolute` | Absolute line numbers | `:set nu abs` |

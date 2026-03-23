@@ -38,8 +38,9 @@ actions!(
         BufferNext,
         BufferPrevious,
         BufferClose,
-        // Preview
+        // Preview / export
         TogglePreviewMode,
+        ExportPdf,
         // Graph view
         OpenGraphView,
         // Editor display

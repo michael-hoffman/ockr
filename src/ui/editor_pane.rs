@@ -284,6 +284,12 @@ impl EditorPane {
         self.viewport_top = top;
     }
 
+    /// Restore cursor position and viewport after switching back to a tab.
+    pub fn restore_cursor_and_viewport(&mut self, pos: Pos, viewport: usize) {
+        self.state.move_cursor_to(pos);
+        self.viewport_top = viewport;
+    }
+
     /// Whether the buffer has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.state.is_dirty
@@ -862,47 +868,50 @@ impl EditorPane {
             return;
         }
 
-        // Wikilink autocomplete navigation: intercept Up/Down/Tab/Enter while popup is open.
-        if self.wikilink_complete.is_some()
-            && !k.modifiers.platform
-            && !k.modifiers.control
-        {
-            match k.key.as_str() {
-                "up" | "ctrl-k" => {
-                    if let Some(ref mut s) = self.wikilink_complete {
-                        if s.selected > 0 {
-                            s.selected -= 1;
-                        } else {
-                            s.selected = s.candidates.len().saturating_sub(1);
-                        }
+        // Wikilink autocomplete navigation: intercept Up/Down/Ctrl-K/J/Tab/Enter while popup is open.
+        if self.wikilink_complete.is_some() && !k.modifiers.platform {
+            // Check ctrl-k / ctrl-j first (modifiers.control + base key).
+            let is_ctrl_k = k.modifiers.control && k.key == "k";
+            let is_ctrl_j = k.modifiers.control && k.key == "j";
+            if is_ctrl_k || k.key == "up" {
+                if let Some(ref mut s) = self.wikilink_complete {
+                    if s.selected > 0 {
+                        s.selected -= 1;
+                    } else {
+                        s.selected = s.candidates.len().saturating_sub(1);
                     }
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
                 }
-                "down" | "ctrl-j" => {
-                    if let Some(ref mut s) = self.wikilink_complete {
-                        s.selected = (s.selected + 1) % s.candidates.len().max(1);
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            if is_ctrl_j || k.key == "down" {
+                if let Some(ref mut s) = self.wikilink_complete {
+                    s.selected = (s.selected + 1) % s.candidates.len().max(1);
+                }
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            // Non-ctrl keys below (Tab/Enter/Escape don't fire with ctrl).
+            if !k.modifiers.control {
+                match k.key.as_str() {
+                    "tab" | "enter" => {
+                        self.apply_wikilink_completion(cx);
+                        cx.stop_propagation();
+                        return;
                     }
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
+                    "escape" => {
+                        // Dismiss popup but do NOT stop propagation or return —
+                        // let Escape continue through key_insert so it also
+                        // triggers EnterNormal.  Without this the user is trapped
+                        // in Insert mode after closing the popup.
+                        self.wikilink_complete = None;
+                        cx.notify();
+                        // fall through to normal key handling
+                    }
+                    _ => {}
                 }
-                "tab" | "enter" => {
-                    self.apply_wikilink_completion(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "escape" => {
-                    // Dismiss popup but do NOT stop propagation or return —
-                    // let Escape continue through key_insert so it also
-                    // triggers EnterNormal.  Without this the user is trapped
-                    // in Insert mode after closing the popup.
-                    self.wikilink_complete = None;
-                    cx.notify();
-                    // fall through to normal key handling
-                }
-                _ => {}
             }
         }
 
