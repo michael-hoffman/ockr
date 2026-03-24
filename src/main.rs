@@ -2,6 +2,7 @@ mod actions;
 mod command;
 mod compiler;
 mod editor;
+mod plugin;
 mod session;
 mod ui;
 mod vault;
@@ -19,6 +20,37 @@ use vault::VaultState;
 impl gpui::Global for PreviewMode {}
 
 fn main() {
+    // Handle CLI subcommands before launching the GUI.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 {
+        let vault_root = plugin::loader::detect_vault_root()
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+        match args[1].as_str() {
+            "install" => {
+                let url = match args.get(2) {
+                    Some(u) => u.as_str(),
+                    None => {
+                        eprintln!("Usage: ockr install <url>");
+                        std::process::exit(1);
+                    }
+                };
+                match plugin::loader::install_plugin(&vault_root, url) {
+                    Ok(entry) => println!("Installed: {} v{}", entry.id, entry.version),
+                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                }
+                return;
+            }
+            "update" => {
+                match plugin::loader::update_plugins(&vault_root) {
+                    Ok(()) => println!("Plugins updated."),
+                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
     Application::new().run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
         set_dock_icon();

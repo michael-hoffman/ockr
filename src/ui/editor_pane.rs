@@ -216,6 +216,8 @@ pub struct EditorPane {
     last_search_backward: bool,
     /// How line numbers are rendered in the gutter.
     line_number_mode: LineNumberMode,
+    /// Plugin-provided typst packages forwarded to each CompileRequest.
+    plugin_packages: Option<std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
     /// Monotonically-increasing compile sequence number.
     ///
     /// Incremented on every `trigger_compile` call.  The async debounce task
@@ -250,6 +252,7 @@ impl EditorPane {
             last_search: None,
             last_search_backward: false,
             line_number_mode: LineNumberMode::Relative,
+            plugin_packages: None,
             compile_sequence: 0,
             viewport_top: 0,
         }
@@ -257,6 +260,14 @@ impl EditorPane {
 
     pub fn set_vault(&mut self, vault: Entity<VaultState>) {
         self.vault = Some(vault);
+    }
+
+    /// Share the plugin packages map so every CompileRequest carries it.
+    pub fn set_plugin_packages(
+        &mut self,
+        packages: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+    ) {
+        self.plugin_packages = Some(packages);
     }
 
     /// Vault-relative path of the currently open file, if any.
@@ -373,6 +384,7 @@ impl EditorPane {
             vault_root: self.vault_root.clone(),
             file_path: self.file_rel_path.clone(),
             mode,
+            plugin_packages: self.plugin_packages.clone(),
         };
 
         cx.spawn(async move |this, cx| {

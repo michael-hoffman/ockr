@@ -19,7 +19,7 @@ pub enum PaletteEvent {
     /// User dismissed the palette without executing a command.
     Close,
     /// User selected a command; carries the command's `id`.
-    Execute(&'static str),
+    Execute(String),
 }
 
 impl EventEmitter<PaletteEvent> for CommandPalette {}
@@ -71,7 +71,7 @@ impl CommandPalette {
         // Execute on Enter.
         if k.key == "enter" {
             if let Some(&idx) = self.matches.get(self.selected) {
-                let id = cx.global::<CommandRegistry>().entries()[idx].id;
+                let id = cx.global::<CommandRegistry>().entries()[idx].id.clone();
                 cx.emit(PaletteEvent::Execute(id));
             } else {
                 cx.emit(PaletteEvent::Close);
@@ -120,7 +120,7 @@ impl CommandPalette {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = cx.global::<CommandRegistry>().entries()[idx].id;
+        let id = cx.global::<CommandRegistry>().entries()[idx].id.clone();
         cx.emit(PaletteEvent::Execute(id));
     }
 }
@@ -143,8 +143,8 @@ impl Render for CommandPalette {
         let mut rows = Vec::with_capacity(self.matches.len());
         for (row_idx, &entry_idx) in self.matches.iter().enumerate() {
             let entry = &entries[entry_idx];
-            let name = entry.name;
-            let hint = entry.keybinding_hint.unwrap_or("");
+            let name = entry.name.clone();
+            let hint = entry.keybinding_hint.as_deref().unwrap_or("").to_string();
             let is_selected = row_idx == self.selected;
             let bg = if is_selected {
                 gpui::rgb(t.bg_hover)

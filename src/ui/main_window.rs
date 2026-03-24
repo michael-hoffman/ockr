@@ -24,7 +24,10 @@
 //!
 //! Each handle is a 4 px strip.  Dragging updates the adjacent width.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
@@ -53,6 +56,12 @@ use crate::editor::state::Pos;
 use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
 use crate::ui::preview::{PreviewEvent, PreviewPane};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
+use crate::command::CommandEntry;
+use crate::plugin::loader::load_vault_plugins;
+use crate::plugin::registry::PluginRegistry;
+use crate::plugin::runtime::{CapabilitiesJson, PluginEvent, PluginInstance};
+use crate::plugin::thread_pool::{PluginJob, PluginThreadPool};
+use crate::ui::plugin_panel::{PluginPanel, PluginPanelEvent};
 use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
 
@@ -156,6 +165,16 @@ pub struct MainWindow {
     last_paged_doc: Option<std::sync::Arc<typst::layout::PagedDocument>>,
     /// Transient status message shown after export (cleared on next notify cycle).
     export_status: Option<String>,
+    /// Shared map of `"@plugin/<name>/lib.typ"` → source, passed to compiler.
+    plugin_packages: Arc<RwLock<HashMap<String, String>>>,
+    /// Live WASM plugin instances keyed by plugin_id.
+    plugin_instances: HashMap<String, Arc<Mutex<PluginInstance>>>,
+    /// Background thread pool for dispatching plugin commands.
+    plugin_pool: PluginThreadPool,
+    /// Currently visible plugin panel overlay, if any.
+    plugin_panel: Option<gpui::Entity<PluginPanel>>,
+    /// True when `plugin_panel` was just (re)created and needs focus on next render.
+    plugin_panel_focus_pending: bool,
 }
 
 impl MainWindow {
@@ -195,11 +214,64 @@ impl MainWindow {
             }).detach();
         }
 
+        // ── Plugin system ─────────────────────────────────────────────────────
+        let plugin_packages: Arc<RwLock<HashMap<String, String>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let plugin_pool = PluginThreadPool::new(4);
+
+        // Install the plugin registry as a GPUI global.
+        cx.set_global(PluginRegistry::new());
+
+        // Load plugins that are already installed in the vault.
+        let mut plugin_instances: HashMap<String, Arc<Mutex<PluginInstance>>> = HashMap::new();
+        {
+            let vault_root = vault.read(cx).root.clone();
+            if let Some(ref root) = vault_root {
+                let engine = wasmtime::Engine::default();
+                let entries = load_vault_plugins(root);
+                for (entry, wasm) in entries {
+                    let event_tx = cx.global::<PluginRegistry>().event_tx.clone();
+                    match PluginInstance::new(
+                        &engine,
+                        &wasm,
+                        &entry.id,
+                        &CapabilitiesJson::default(),
+                        root,
+                        event_tx,
+                    ) {
+                        Ok(mut inst) => {
+                            // Read actual capabilities via metadata, then re-init.
+                            // For now just call init() with default capabilities.
+                            let _ = inst.init();
+                            plugin_instances.insert(entry.id, Arc::new(Mutex::new(inst)));
+                        }
+                        Err(e) => eprintln!("[ockr] failed to load plugin '{}': {}", entry.id, e),
+                    }
+                }
+            }
+        }
+
+        // Spawn a 100ms polling task to drain plugin events onto the UI thread.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = this.update(cx, |win, cx| win.drain_plugin_events(cx));
+                });
+            }
+        })
+        .detach();
+
         // ── Initial pane ─────────────────────────────────────────────────────
         let editor = cx.new(|cx| EditorPane::new(cx));
         editor.update(cx, |pane, _cx| pane.set_vault(vault.clone()));
         editor.update(cx, |pane, _cx| {
             pane.set_compiler(compiler_handle.clone(), preview.clone());
+        });
+        editor.update(cx, |pane, _cx| {
+            pane.set_plugin_packages(Arc::clone(&plugin_packages));
         });
 
         // ── Compiler result → preview ────────────────────────────────────────
@@ -301,6 +373,11 @@ impl MainWindow {
             recent_paths: Vec::new(),
             last_paged_doc: None,
             export_status: None,
+            plugin_packages,
+            plugin_instances,
+            plugin_pool,
+            plugin_panel: None,
+            plugin_panel_focus_pending: false,
             html_link_sender: link_tx,
         }
     }
@@ -425,7 +502,7 @@ impl MainWindow {
         let active = self.panes[self.active_idx].editor.read(cx);
         let rel_path = active.current_rel_path().map(|s| s.to_string());
         let vault_root = self.vault.read(cx).root.clone();
-        drop(active);
+        let _ = active;
 
         if let (Some(rel), Some(root)) = (rel_path, vault_root) {
             let abs = root.join(&rel);
@@ -1055,7 +1132,7 @@ impl MainWindow {
     }
 
     /// Shared: execute a palette command ID dispatched by the user.
-    fn handle_palette_execute(&mut self, id: &'static str, cx: &mut Context<Self>) {
+    fn handle_palette_execute(&mut self, id: &str, cx: &mut Context<Self>) {
         match id {
             "write" | "save-file" => cx.dispatch_action(&SaveFile),
             "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
@@ -1079,8 +1156,104 @@ impl MainWindow {
             "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
             "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
             "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
-            _ => {}
+            _ => {
+                // Plugin command?
+                let plugin_id = cx
+                    .global::<PluginRegistry>()
+                    .command_to_plugin
+                    .get(id)
+                    .cloned();
+                if let Some(pid) = plugin_id {
+                    if let Some(inst) = self.plugin_instances.get(&pid) {
+                        let job = PluginJob {
+                            instance: Arc::clone(inst),
+                            command_id: id.to_string(),
+                        };
+                        let _ = self.plugin_pool.dispatch(job);
+                    }
+                    // If the plugin has a registered panel, show it.
+                    let panel = cx
+                        .global::<PluginRegistry>()
+                        .plugin_panels
+                        .get(&pid)
+                        .and_then(|v| v.first())
+                        .cloned();
+                    if let Some(p) = panel {
+                        self.open_plugin_panel(p, cx);
+                    }
+                }
+            }
         }
+    }
+
+    // ── Plugin event draining ─────────────────────────────────────────────────
+
+    /// Drain pending plugin events and apply them to the UI + registries.
+    fn drain_plugin_events(&mut self, cx: &mut Context<Self>) {
+        let events: Vec<PluginEvent> = {
+            let guard = cx.global::<PluginRegistry>().event_rx.lock().unwrap();
+            guard.try_iter().collect()
+        };
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            match event {
+                PluginEvent::CommandRegistered { plugin_id, id, name, hint } => {
+                    let entry = CommandEntry::new(id.clone(), name, hint, |_| {});
+                    cx.global_mut::<crate::command::CommandRegistry>().register(entry);
+                    let reg = cx.global_mut::<PluginRegistry>();
+                    reg.plugin_commands
+                        .entry(plugin_id.clone())
+                        .or_default()
+                        .push(id.clone());
+                    reg.command_to_plugin.insert(id, plugin_id);
+                    cx.notify();
+                }
+                PluginEvent::PanelRegistered { plugin_id, panel } => {
+                    cx.global_mut::<PluginRegistry>()
+                        .plugin_panels
+                        .entry(plugin_id)
+                        .or_default()
+                        .push(panel.clone());
+                    self.open_plugin_panel(panel, cx);
+                }
+                PluginEvent::LogLine { message, .. } => {
+                    self.export_status = Some(message);
+                    cx.notify();
+                }
+                PluginEvent::Panicked { plugin_id, message } => {
+                    self.export_status =
+                        Some(format!("[plugin error] {plugin_id}: {message}"));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Create and store a plugin panel overlay; focus is applied in render().
+    fn open_plugin_panel(
+        &mut self,
+        panel: crate::plugin::panel::RegisteredPanel,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.new(|cx| PluginPanel::new(panel, cx));
+        cx.subscribe(&entity, |this, _, event: &PluginPanelEvent, cx| {
+            match event {
+                PluginPanelEvent::Close => {
+                    this.plugin_panel = None;
+                    cx.notify();
+                }
+                PluginPanelEvent::ExecuteCommand(cmd_id) => {
+                    let id = cmd_id.clone();
+                    this.handle_palette_execute(&id, cx);
+                }
+            }
+        })
+        .detach();
+        self.plugin_panel = Some(entity);
+        self.plugin_panel_focus_pending = true;
+        cx.notify();
     }
 
     fn open_palette(
@@ -1245,6 +1418,14 @@ impl Render for MainWindow {
                 p.read(cx).focus_handle.clone().focus(window);
             }
             self.palette_focus_pending = false;
+        }
+
+        // Focus the plugin panel if it was just created.
+        if self.plugin_panel_focus_pending {
+            if let Some(ref pp) = self.plugin_panel {
+                pp.read(cx).focus_handle.clone().focus(window);
+            }
+            self.plugin_panel_focus_pending = false;
         }
 
         // ── Window dimensions ─────────────────────────────────────────────────
@@ -1522,6 +1703,9 @@ impl Render for MainWindow {
             })
             .when_some(self.graph_view.clone(), |root, gv| {
                 root.child(gpui::deferred(gv).with_priority(200))
+            })
+            .when_some(self.plugin_panel.clone(), |root, pp| {
+                root.child(gpui::deferred(pp).with_priority(150))
             })
     }
 }

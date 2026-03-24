@@ -15,25 +15,25 @@ impl gpui::Global for CommandRegistry {}
 /// A single registered command.
 pub struct CommandEntry {
     /// Kebab-case identifier, e.g. `"open-command-palette"`.
-    pub id: &'static str,
+    pub id: String,
     /// Human-readable display name shown in the palette.
-    pub name: &'static str,
+    pub name: String,
     /// Keybinding hint for display only (actual binding registered separately).
-    pub keybinding_hint: Option<&'static str>,
+    pub keybinding_hint: Option<String>,
     handler: Box<dyn Fn(&mut App) + 'static>,
 }
 
 impl CommandEntry {
     pub fn new(
-        id: &'static str,
-        name: &'static str,
-        keybinding_hint: Option<&'static str>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        keybinding_hint: Option<impl Into<String>>,
         handler: impl Fn(&mut App) + 'static,
     ) -> Self {
         Self {
-            id,
-            name,
-            keybinding_hint,
+            id: id.into(),
+            name: name.into(),
+            keybinding_hint: keybinding_hint.map(|h| h.into()),
             handler: Box::new(handler),
         }
     }
@@ -58,15 +58,17 @@ impl CommandRegistry {
         self.entries.push(entry);
     }
 
+    /// Remove all commands matching the predicate.
+    pub fn remove_where(&mut self, pred: impl Fn(&CommandEntry) -> bool) {
+        self.entries.retain(|e| !pred(e));
+    }
+
     pub fn entries(&self) -> &[CommandEntry] {
         &self.entries
     }
 
     /// Substring search over command names and ids.
     /// Returns indices into `entries()` in registration order.
-    ///
-    /// Story 08 replaces this with BM25-weighted fuzzy matching (Tantivy or
-    /// an in-memory equivalent) with typo tolerance and recency scoring.
     pub fn search(&self, query: &str) -> Vec<usize> {
         if query.is_empty() {
             return (0..self.entries.len()).collect();

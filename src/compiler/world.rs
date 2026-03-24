@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use typst::diag::{EcoString, FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
@@ -42,6 +42,8 @@ pub struct OckrWorld {
     vault_root: Option<PathBuf>,
     /// Binary file cache (vault-relative path → Bytes).
     file_cache: HashMap<PathBuf, Bytes>,
+    /// Plugin-provided typst packages: `"@plugin/<name>/lib.typ"` → source.
+    plugin_packages: Option<Arc<RwLock<HashMap<String, String>>>>,
 }
 
 impl OckrWorld {
@@ -71,6 +73,7 @@ impl OckrWorld {
             source: Arc::new(Mutex::new(source)),
             vault_root: None,
             file_cache: HashMap::new(),
+            plugin_packages: None,
         }
     }
 
@@ -78,6 +81,14 @@ impl OckrWorld {
     pub fn set_vault_root(&mut self, root: PathBuf) {
         self.vault_root = Some(root);
         self.file_cache.clear();
+    }
+
+    /// Update the plugin packages map (swapped each compile request).
+    pub fn set_plugin_packages(
+        &mut self,
+        packages: Option<Arc<RwLock<HashMap<String, String>>>>,
+    ) {
+        self.plugin_packages = packages;
     }
 
     /// Set the source text for the given vault-relative path.
@@ -123,6 +134,27 @@ impl World for OckrWorld {
         if id == self.main_id {
             return Ok(self.source.lock().unwrap().clone());
         }
+
+        // Check for `@plugin/<name>/...` packages contributed by plugins.
+        if let Some(pkg) = id.package() {
+            if pkg.namespace.as_str() == "plugin" {
+                if let Some(ref pkgs) = self.plugin_packages {
+                    let guard = pkgs.read().unwrap();
+                    let key = format!(
+                        "@plugin/{}/{}",
+                        pkg.name,
+                        id.vpath().as_rootless_path().display()
+                    );
+                    if let Some(src) = guard.get(&key) {
+                        return Ok(Source::new(id, src.clone()));
+                    }
+                }
+                return Err(FileError::NotFound(
+                    id.vpath().as_rootless_path().to_path_buf(),
+                ));
+            }
+        }
+
         // For imported files, read from disk relative to the vault root.
         let path = resolve_vault_path(&self.vault_root, id)?;
         let text = std::fs::read_to_string(&path)

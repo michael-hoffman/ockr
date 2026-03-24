@@ -55,6 +55,9 @@ pub struct CompileRequest {
     pub file_path: Option<String>,
     /// Output format requested.
     pub mode: PreviewMode,
+    /// Plugin-provided typst packages. Maps `"@plugin/<name>/lib.typ"` →
+    /// source text. Injected by plugins via `ockr_register_typst_package`.
+    pub plugin_packages: Option<Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
 }
 
 /// A diagnostic produced by the typst compiler.
@@ -158,6 +161,7 @@ fn compiler_loop(
         if let Some(root) = req.vault_root {
             world.set_vault_root(root);
         }
+        world.set_plugin_packages(req.plugin_packages);
         let path = req.file_path.as_deref().unwrap_or("main.typ");
         world.set_source(path, req.source);
         let mode = req.mode;

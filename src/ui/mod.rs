@@ -2,6 +2,7 @@ pub mod backlink_panel;
 pub mod command_palette;
 pub mod graph_view;
 pub mod html_preview;
+pub mod plugin_panel;
 pub mod quick_switch;
 pub mod template_picker;
 pub mod vault_search;
