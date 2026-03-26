@@ -103,15 +103,24 @@ pub fn update_plugins(vault_root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     for entry in &mut lock.plugins {
-        let bytes = fetch_bytes(&entry.url)?;
+        let bytes = match fetch_bytes(&entry.url) {
+            Ok(b) => b,
+            Err(e) => { eprintln!("Failed to fetch plugin '{}': {}", entry.id, e); continue; }
+        };
         let new_sha = sha256_hex(&bytes);
         if new_sha == entry.sha256 {
             println!("Plugin '{}' is up to date", entry.id);
             continue;
         }
-        let meta = read_wasm_metadata(&bytes)?;
+        let meta = match read_wasm_metadata(&bytes) {
+            Ok(m) => m,
+            Err(e) => { eprintln!("Failed to read metadata for '{}': {}", entry.id, e); continue; }
+        };
         let wasm_path = dir.join(format!("{}.wasm", entry.id));
-        std::fs::write(&wasm_path, &bytes).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::write(&wasm_path, &bytes) {
+            eprintln!("Failed to write plugin '{}': {}", entry.id, e);
+            continue;
+        }
         entry.sha256 = new_sha;
         entry.version = meta.version.clone();
         println!("Updated plugin '{}' → v{}", entry.id, meta.version);

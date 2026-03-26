@@ -22,7 +22,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct ThemeFile {
     pub name: String,
-    pub variant: String, // "dark" | "light"
+    #[allow(dead_code)] pub variant: String, // "dark" | "light"
 
     pub bg_base: String,
     pub bg_panel: String,
@@ -160,46 +160,11 @@ impl ThemePalette {
         }
     }
 
-    /// Return the appropriate bundled theme for the current macOS appearance.
-    pub fn for_system_appearance() -> Self {
-        if system_is_dark() {
-            Self::oxide()
-        } else {
-            Self::ochre()
-        }
-    }
-
     /// The bundled Oxide (dark) theme.
     pub fn oxide() -> Self {
         Self::from_toml(include_str!("../../themes/oxide.toml"))
             .expect("bundled Oxide theme must be valid")
     }
-
-    /// The bundled Ochre (light) theme.
-    pub fn ochre() -> Self {
-        Self::from_toml(include_str!("../../themes/ochre.toml"))
-            .expect("bundled Ochre theme must be valid")
-    }
-}
-
-// ── System appearance detection ───────────────────────────────────────────────
-
-/// Returns `true` if macOS is currently in Dark Mode.
-///
-/// Reads the `AppleInterfaceStyle` user default — present and equal to `"Dark"`
-/// in dark mode, absent in light mode.  Falls back to `true` (dark) on any
-/// error so the app looks correct on most developer machines.
-fn system_is_dark() -> bool {
-    // `defaults read -g AppleInterfaceStyle` prints "Dark\n" or exits non-zero.
-    std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .eq_ignore_ascii_case("dark")
-        })
-        .unwrap_or(true) // default dark
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────

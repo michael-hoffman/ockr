@@ -180,15 +180,6 @@ em { color: #d0d0d0; }
 ::-webkit-scrollbar-thumb:hover { background: #3A3A3A; }
 "#;
 
-/// Skeleton HTML loaded on warm-up.  Body is empty; the CSS is already parsed
-/// so the first real content load only pays for DOM construction.
-const PRELOAD_HTML: &str = concat!(
-    "<!DOCTYPE html><html><head><meta charset='utf-8'>",
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>",
-    "<style>", // OXIDE_CSS is not a const-concat — injected at runtime
-    "</style></head><body></body></html>"
-);
-
 /// JavaScript injected into every preview page to intercept `ockr://` link clicks.
 ///
 /// When the user clicks a `<a href="ockr://some/path.typ">` element the default
@@ -330,17 +321,15 @@ impl HtmlWebView {
     /// window's content-view coordinate system (AppKit: y=0 at bottom).
     pub fn update_frame(&self, x: f64, y: f64, width: f64, height: f64) {
         use objc2_foundation::{NSPoint, NSRect, NSSize};
-        unsafe {
-            self.webview.setFrame(NSRect {
-                origin: NSPoint { x, y },
-                size: NSSize { width, height },
-            });
-        }
+        self.webview.setFrame(NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize { width, height },
+        });
     }
 
     /// Show or hide the web view without removing it from the hierarchy.
     pub fn set_hidden(&self, hidden: bool) {
-        unsafe { self.webview.setHidden(hidden); }
+        self.webview.setHidden(hidden);
     }
 
     // ── Private helpers ────────────────────────────────────────────────────
@@ -355,7 +344,7 @@ impl HtmlWebView {
 
 impl Drop for HtmlWebView {
     fn drop(&mut self) {
-        unsafe { self.webview.removeFromSuperview(); }
+        self.webview.removeFromSuperview();
     }
 }
 

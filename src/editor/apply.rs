@@ -726,12 +726,10 @@ pub fn apply<B: Buffer>(
                     'fwd: loop {
                         let s = buf.line(start.line);
                         // Skip whitespace chars from start.col onwards.
-                        let mut col = start.col;
-                        for ch in s[col..].chars() {
+                        for ch in s[start.col..].chars() {
                             if !ch.is_whitespace() {
                                 break 'fwd;
                             }
-                            col += ch.len_utf8();
                         }
                         // Entire remainder of this line is whitespace; move to next.
                         if start.line >= end.line {

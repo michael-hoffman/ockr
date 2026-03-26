@@ -133,14 +133,6 @@ impl PreviewPane {
         cx.notify();
     }
 
-    /// Reset to the initial empty state (e.g. no file open).
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.image = None;
-        self.image_px = None;
-        self.link_regions.clear();
-        self.error = None;
-        cx.notify();
-    }
 
     // ── Click handling ────────────────────────────────────────────────────────
 

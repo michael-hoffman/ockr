@@ -423,9 +423,6 @@ impl Render for GraphView {
         let pan_x = self.pan_x;
         let pan_y = self.pan_y;
         let zoom = self.zoom;
-        let canvas_w = self.canvas_w;
-        let canvas_h = self.canvas_h;
-
         // Colors from theme.
         let bg_color           = rgba(((t.bg_base as u64) << 8 | 0xee) as u32);
         let edge_color         = rgba(((t.text_faint as u64) << 8 | 0xcc) as u32);
@@ -528,7 +525,7 @@ impl Render for GraphView {
                         // Draw node circles.
                         const BASE_R: f32 = 6.0;
                         const HUB_R:  f32 = 9.0;
-                        for (i, n) in node_snaps.iter().enumerate() {
+                        for n in node_snaps.iter() {
                             if !n.visible { continue; }
                             let (sx, sy) = to_screen(n.x, n.y);
                             let r = if n.degree >= 3 { HUB_R } else { BASE_R };

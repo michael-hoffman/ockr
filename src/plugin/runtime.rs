@@ -26,7 +26,7 @@ pub enum PluginEvent {
         panel: RegisteredPanel,
     },
     LogLine {
-        plugin_id: String,
+        #[allow(dead_code)] plugin_id: String,
         message: String,
     },
     Panicked {
@@ -44,7 +44,7 @@ pub struct CapabilitiesJson {
     #[serde(default)]
     pub vault_write: bool,
     #[serde(default)]
-    pub network: bool,
+    #[allow(dead_code)] pub network: bool,
     #[serde(default)]
     pub console: bool,
 }
@@ -52,7 +52,7 @@ pub struct CapabilitiesJson {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginMetadataJson {
     pub id: String,
-    pub name: String,
+    #[allow(dead_code)] pub name: String,
     pub version: String,
     #[serde(default)]
     pub capabilities: CapabilitiesJson,
@@ -68,7 +68,7 @@ pub struct PluginData {
     pub plugin_packages: Arc<RwLock<HashMap<String, String>>>,
 }
 
-// ── Memory helper ─────────────────────────────────────────────────────────────
+// ── Memory helpers ────────────────────────────────────────────────────────────
 
 fn wasm_str(mem: &Memory, store: &impl AsContext, ptr: i32, len: i32) -> Option<String> {
     if ptr < 0 || len < 0 {
@@ -77,6 +77,14 @@ fn wasm_str(mem: &Memory, store: &impl AsContext, ptr: i32, len: i32) -> Option<
     mem.data(store)
         .get(ptr as usize..(ptr as usize + len as usize))
         .and_then(|b| String::from_utf8(b.to_vec()).ok())
+}
+
+/// Retrieve the `memory` export from a caller, returning `None` if absent.
+fn caller_memory(caller: &mut Caller<PluginData>) -> Option<Memory> {
+    match caller.get_export("memory") {
+        Some(Extern::Memory(m)) => Some(m),
+        _ => None,
+    }
 }
 
 // ── PluginInstance ────────────────────────────────────────────────────────────
@@ -151,31 +159,21 @@ impl PluginInstance {
                 "env",
                 "ockr_register_command",
                 |mut caller: Caller<PluginData>,
-                 id_p: i32,
-                 id_l: i32,
-                 nm_p: i32,
-                 nm_l: i32,
-                 ht_p: i32,
-                 ht_l: i32|
+                 id_p: i32, id_l: i32,
+                 nm_p: i32, nm_l: i32,
+                 ht_p: i32, ht_l: i32|
                  -> i32 {
-                    let mem = match caller.get_export("memory") {
-                        Some(Extern::Memory(m)) => m,
-                        _ => return -1,
-                    };
-                    let id = match wasm_str(&mem, &caller, id_p, id_l) {
-                        Some(s) => s,
-                        None => return -1,
-                    };
+                    let Some(mem) = caller_memory(&mut caller) else { return -1; };
+                    let Some(id) = wasm_str(&mem, &caller, id_p, id_l) else { return -1; };
                     let name = wasm_str(&mem, &caller, nm_p, nm_l).unwrap_or_default();
                     let hint = if ht_l > 0 {
                         wasm_str(&mem, &caller, ht_p, ht_l).filter(|s| !s.is_empty())
                     } else {
                         None
                     };
-                    let pid = caller.data().plugin_id.clone();
-                    let tx = caller.data().event_tx.clone();
-                    let _ = tx.send(PluginEvent::CommandRegistered {
-                        plugin_id: pid,
+                    let data = caller.data();
+                    let _ = data.event_tx.send(PluginEvent::CommandRegistered {
+                        plugin_id: data.plugin_id.clone(),
                         id,
                         name,
                         hint,
@@ -191,15 +189,11 @@ impl PluginInstance {
                 "env",
                 "ockr_log",
                 |mut caller: Caller<PluginData>, ptr: i32, len: i32| {
-                    let mem = match caller.get_export("memory") {
-                        Some(Extern::Memory(m)) => m,
-                        _ => return,
-                    };
+                    let Some(mem) = caller_memory(&mut caller) else { return; };
                     let msg = wasm_str(&mem, &caller, ptr, len).unwrap_or_default();
-                    let pid = caller.data().plugin_id.clone();
-                    let tx = caller.data().event_tx.clone();
-                    let _ = tx.send(PluginEvent::LogLine {
-                        plugin_id: pid,
+                    let data = caller.data();
+                    let _ = data.event_tx.send(PluginEvent::LogLine {
+                        plugin_id: data.plugin_id.clone(),
                         message: msg,
                     });
                 },
@@ -212,46 +206,28 @@ impl PluginInstance {
                 "env",
                 "ockr_register_panel",
                 |mut caller: Caller<PluginData>,
-                 id_p: i32,
-                 id_l: i32,
-                 ti_p: i32,
-                 ti_l: i32,
-                 po_p: i32,
-                 po_l: i32,
-                 la_p: i32,
-                 la_l: i32|
+                 id_p: i32, id_l: i32,
+                 ti_p: i32, ti_l: i32,
+                 po_p: i32, po_l: i32,
+                 la_p: i32, la_l: i32|
                  -> i32 {
-                    let mem = match caller.get_export("memory") {
-                        Some(Extern::Memory(m)) => m,
-                        _ => return -1,
-                    };
-                    let panel_id = match wasm_str(&mem, &caller, id_p, id_l) {
-                        Some(s) => s,
-                        None => return -1,
-                    };
-                    let title = wasm_str(&mem, &caller, ti_p, ti_l).unwrap_or_default();
-                    let pos_str = wasm_str(&mem, &caller, po_p, po_l).unwrap_or_default();
-                    let layout_str = wasm_str(&mem, &caller, la_p, la_l).unwrap_or_default();
-
+                    let Some(mem) = caller_memory(&mut caller) else { return -1; };
+                    let Some(panel_id) = wasm_str(&mem, &caller, id_p, id_l) else { return -1; };
+                    let title    = wasm_str(&mem, &caller, ti_p, ti_l).unwrap_or_default();
+                    let pos_str  = wasm_str(&mem, &caller, po_p, po_l).unwrap_or_default();
+                    let lay_str  = wasm_str(&mem, &caller, la_p, la_l).unwrap_or_default();
                     let position = match pos_str.as_str() {
                         "bottom" => PanelPosition::Bottom,
-                        "float" => PanelPosition::Float,
-                        _ => PanelPosition::Sidebar,
+                        "float"  => PanelPosition::Float,
+                        _        => PanelPosition::Sidebar,
                     };
                     let layout: PluginLayout =
-                        serde_json::from_str(&layout_str).unwrap_or(PluginLayout { items: vec![] });
-
-                    let pid = caller.data().plugin_id.clone();
-                    let tx = caller.data().event_tx.clone();
-                    let _ = tx.send(PluginEvent::PanelRegistered {
+                        serde_json::from_str(&lay_str).unwrap_or(PluginLayout { items: vec![] });
+                    let data = caller.data();
+                    let pid  = data.plugin_id.clone();
+                    let _ = data.event_tx.send(PluginEvent::PanelRegistered {
                         plugin_id: pid.clone(),
-                        panel: RegisteredPanel {
-                            plugin_id: pid,
-                            panel_id,
-                            title,
-                            position,
-                            layout,
-                        },
+                        panel: RegisteredPanel { plugin_id: pid, panel_id, title, position, layout },
                     });
                     0
                 },
@@ -259,29 +235,20 @@ impl PluginInstance {
             .map_err(|e| e.to_string())?;
 
         // ockr_register_package(name_p, name_l, src_p, src_l) -> i32
-        // Registers a `@plugin/<plugin_id>/<name>` typst package.
         linker
             .func_wrap(
                 "env",
                 "ockr_register_package",
                 |mut caller: Caller<PluginData>,
-                 name_p: i32,
-                 name_l: i32,
-                 src_p: i32,
-                 src_l: i32|
+                 name_p: i32, name_l: i32,
+                 src_p: i32,  src_l: i32|
                  -> i32 {
-                    let mem = match caller.get_export("memory") {
-                        Some(Extern::Memory(m)) => m,
-                        _ => return -1,
-                    };
-                    let name = match wasm_str(&mem, &caller, name_p, name_l) {
-                        Some(s) => s,
-                        None => return -1,
-                    };
+                    let Some(mem) = caller_memory(&mut caller) else { return -1; };
+                    let Some(name) = wasm_str(&mem, &caller, name_p, name_l) else { return -1; };
                     let source = wasm_str(&mem, &caller, src_p, src_l).unwrap_or_default();
-                    let pid = caller.data().plugin_id.clone();
-                    let key = format!("@plugin/{}/{}", pid, name);
-                    if let Ok(mut guard) = caller.data().plugin_packages.write() {
+                    let data = caller.data();
+                    let key  = format!("@plugin/{}/{}", data.plugin_id, name);
+                    if let Ok(mut guard) = data.plugin_packages.write() {
                         guard.insert(key, source);
                     }
                     0

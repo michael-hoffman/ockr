@@ -1280,32 +1280,29 @@ impl MainWindow {
                     let entry = CommandEntry::new(id.clone(), name, hint, |_| {});
                     cx.global_mut::<crate::command::CommandRegistry>().register(entry);
                     let reg = cx.global_mut::<PluginRegistry>();
-                    reg.plugin_commands
-                        .entry(plugin_id.clone())
-                        .or_default()
-                        .push(id.clone());
+                    reg.plugin_commands.entry(plugin_id.clone()).or_default().push(id.clone());
                     reg.command_to_plugin.insert(id, plugin_id);
-                    cx.notify();
                 }
                 PluginEvent::PanelRegistered { plugin_id, panel } => {
-                    cx.global_mut::<PluginRegistry>()
+                    let panels = cx.global_mut::<PluginRegistry>()
                         .plugin_panels
                         .entry(plugin_id)
-                        .or_default()
-                        .push(panel.clone());
+                        .or_default();
+                    if !panels.iter().any(|p| p.panel_id == panel.panel_id) {
+                        panels.push(panel.clone());
+                    }
                     self.open_plugin_panel(panel, cx);
                 }
                 PluginEvent::LogLine { message, .. } => {
                     self.export_status = Some(message);
-                    cx.notify();
                 }
                 PluginEvent::Panicked { plugin_id, message } => {
-                    self.export_status =
-                        Some(format!("[plugin error] {plugin_id}: {message}"));
-                    cx.notify();
+                    self.export_status = Some(format!("[plugin error] {plugin_id}: {message}"));
                 }
             }
         }
+        // Single notify for the whole batch.
+        cx.notify();
     }
 
     /// Create and store a plugin panel overlay; focus is applied in render().
@@ -1396,7 +1393,6 @@ impl MainWindow {
     ) {
         let Some(ref drag) = self.drag else { return };
         let dx = f32::from(event.position.x) - drag.start_x;
-        let dy = f32::from(event.position.y) - drag.start_y;
         match drag.target {
             DragTarget::Sidebar => {
                 self.sidebar_width = (drag.start_width + dx).clamp(120.0, 480.0);

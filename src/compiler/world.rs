@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+
+use super::PluginPackages;
 
 use typst::diag::{EcoString, FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
@@ -43,7 +45,7 @@ pub struct OckrWorld {
     /// Binary file cache (vault-relative path → Bytes).
     file_cache: HashMap<PathBuf, Bytes>,
     /// Plugin-provided typst packages: `"@plugin/<name>/lib.typ"` → source.
-    plugin_packages: Option<Arc<RwLock<HashMap<String, String>>>>,
+    plugin_packages: Option<PluginPackages>,
 }
 
 impl OckrWorld {
@@ -84,10 +86,7 @@ impl OckrWorld {
     }
 
     /// Update the plugin packages map (swapped each compile request).
-    pub fn set_plugin_packages(
-        &mut self,
-        packages: Option<Arc<RwLock<HashMap<String, String>>>>,
-    ) {
+    pub fn set_plugin_packages(&mut self, packages: Option<PluginPackages>) {
         self.plugin_packages = packages;
     }
 

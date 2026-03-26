@@ -1,5 +1,4 @@
 // Compiler API — integrated into the editor in Story 06.
-#![allow(dead_code)]
 
 //! typst background compiler.
 //!
@@ -20,8 +19,9 @@
 pub mod preprocess;
 pub mod world;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use typst::layout::PagedDocument;
@@ -29,6 +29,9 @@ use typst::layout::PagedDocument;
 use self::world::OckrWorld;
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+/// Shared map of `"@plugin/<id>/<file>"` → typst source text, contributed by plugins.
+pub type PluginPackages = Arc<RwLock<HashMap<String, String>>>;
 
 /// Which output format the compiler should produce.
 ///
@@ -57,15 +60,15 @@ pub struct CompileRequest {
     pub mode: PreviewMode,
     /// Plugin-provided typst packages. Maps `"@plugin/<name>/lib.typ"` →
     /// source text. Injected by plugins via `ockr_register_typst_package`.
-    pub plugin_packages: Option<Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
+    pub plugin_packages: Option<PluginPackages>,
 }
 
 /// A diagnostic produced by the typst compiler.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
-    pub severity: DiagnosticSeverity,
+    #[allow(dead_code)] pub severity: DiagnosticSeverity,
     pub message: String,
-    pub span_file: Option<String>,
+    #[allow(dead_code)] pub span_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

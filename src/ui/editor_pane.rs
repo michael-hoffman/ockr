@@ -50,7 +50,7 @@ use gpui::{
 };
 
 use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, SaveFile};
-use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PreviewMode};
+use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PluginPackages, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -84,8 +84,6 @@ pub enum LineNumberMode {
 
 /// State for the `[[` wikilink autocomplete popup.
 struct WikilinkState {
-    /// Text typed after `[[` and before the cursor.
-    fragment: String,
     /// Byte offset of the opening `[` on the current line.
     open_col: usize,
     /// Vault file titles that match `fragment` (prefix-insensitive).
@@ -217,7 +215,7 @@ pub struct EditorPane {
     /// How line numbers are rendered in the gutter.
     line_number_mode: LineNumberMode,
     /// Plugin-provided typst packages forwarded to each CompileRequest.
-    plugin_packages: Option<std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
+    plugin_packages: Option<PluginPackages>,
     /// Monotonically-increasing compile sequence number.
     ///
     /// Incremented on every `trigger_compile` call.  The async debounce task
@@ -263,10 +261,7 @@ impl EditorPane {
     }
 
     /// Share the plugin packages map so every CompileRequest carries it.
-    pub fn set_plugin_packages(
-        &mut self,
-        packages: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
-    ) {
+    pub fn set_plugin_packages(&mut self, packages: PluginPackages) {
         self.plugin_packages = Some(packages);
     }
 
@@ -275,10 +270,6 @@ impl EditorPane {
         self.file_rel_path.as_deref()
     }
 
-    /// Absolute path of the currently open file, if any.
-    pub fn current_path(&self) -> Option<&std::path::PathBuf> {
-        self.state.path.as_ref()
-    }
 
     /// Current cursor position.
     pub fn cursor_pos(&self) -> Pos {
@@ -290,10 +281,6 @@ impl EditorPane {
         self.viewport_top
     }
 
-    /// Restore the viewport top (used when switching tabs).
-    pub fn set_viewport_top(&mut self, top: usize) {
-        self.viewport_top = top;
-    }
 
     /// Restore cursor position and viewport after switching back to a tab.
     pub fn restore_cursor_and_viewport(&mut self, pos: Pos, viewport: usize) {
@@ -311,16 +298,6 @@ impl EditorPane {
         self.preview = Some(preview);
     }
 
-    pub fn open_file(
-        &mut self,
-        file: &VaultFile,
-        vault_root: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_file_no_focus(file, vault_root, cx);
-        self.focus_handle.focus(window);
-    }
 
     pub fn open_file_no_focus(
         &mut self,
@@ -737,7 +714,6 @@ impl EditorPane {
 
             if !candidates.is_empty() {
                 self.wikilink_complete = Some(WikilinkState {
-                    fragment: fragment.to_string(),
                     open_col: open,
                     candidates,
                     selected,
@@ -802,7 +778,7 @@ impl EditorPane {
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let k = &event.keystroke;
