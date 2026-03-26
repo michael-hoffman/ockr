@@ -59,7 +59,7 @@ use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::command::CommandEntry;
 use crate::plugin::loader::load_vault_plugins;
 use crate::plugin::registry::PluginRegistry;
-use crate::plugin::runtime::{CapabilitiesJson, PluginEvent, PluginInstance};
+use crate::plugin::runtime::{PluginEvent, PluginInstance};
 use crate::plugin::thread_pool::{PluginJob, PluginThreadPool};
 use crate::ui::plugin_panel::{PluginPanel, PluginPanelEvent};
 use crate::ui::theme::ThemePalette;
@@ -171,6 +171,8 @@ pub struct MainWindow {
     plugin_instances: HashMap<String, Arc<Mutex<PluginInstance>>>,
     /// Background thread pool for dispatching plugin commands.
     plugin_pool: PluginThreadPool,
+    /// Reused Wasmtime engine (creating one per instantiation is expensive).
+    wasmtime_engine: wasmtime::Engine,
     /// Currently visible plugin panel overlay, if any.
     plugin_panel: Option<gpui::Entity<PluginPanel>>,
     /// True when `plugin_panel` was just (re)created and needs focus on next render.
@@ -218,38 +220,18 @@ impl MainWindow {
         let plugin_packages: Arc<RwLock<HashMap<String, String>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let plugin_pool = PluginThreadPool::new(4);
+        let wasmtime_engine = wasmtime::Engine::default();
 
         // Install the plugin registry as a GPUI global.
         cx.set_global(PluginRegistry::new());
 
-        // Load plugins that are already installed in the vault.
-        let mut plugin_instances: HashMap<String, Arc<Mutex<PluginInstance>>> = HashMap::new();
-        {
-            let vault_root = vault.read(cx).root.clone();
-            if let Some(ref root) = vault_root {
-                let engine = wasmtime::Engine::default();
-                let entries = load_vault_plugins(root);
-                for (entry, wasm) in entries {
-                    let event_tx = cx.global::<PluginRegistry>().event_tx.clone();
-                    match PluginInstance::new(
-                        &engine,
-                        &wasm,
-                        &entry.id,
-                        &CapabilitiesJson::default(),
-                        root,
-                        event_tx,
-                    ) {
-                        Ok(mut inst) => {
-                            // Read actual capabilities via metadata, then re-init.
-                            // For now just call init() with default capabilities.
-                            let _ = inst.init();
-                            plugin_instances.insert(entry.id, Arc::new(Mutex::new(inst)));
-                        }
-                        Err(e) => eprintln!("[ockr] failed to load plugin '{}': {}", entry.id, e),
-                    }
-                }
-            }
-        }
+        // Load plugins already installed in the vault (probe caps, then real instance).
+        let plugin_instances = Self::instantiate_vault_plugins(
+            &wasmtime_engine,
+            vault.read(cx).root.as_deref(),
+            cx.global::<PluginRegistry>().event_tx.clone(),
+            Arc::clone(&plugin_packages),
+        );
 
         // Spawn a 100ms polling task to drain plugin events onto the UI thread.
         cx.spawn(async move |this, cx| {
@@ -343,6 +325,15 @@ impl MainWindow {
             }
         }).detach();
 
+        // ── Vault change → reload plugins ─────────────────────────────────────
+        cx.observe(&vault, |this, vault_entity, cx| {
+            let new_root = vault_entity.read(cx).root.clone();
+            let old_root = this.vault.read(cx).root.clone();
+            if new_root != old_root {
+                this.reload_vault_plugins(cx);
+            }
+        }).detach();
+
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
 
@@ -376,6 +367,7 @@ impl MainWindow {
             plugin_packages,
             plugin_instances,
             plugin_pool,
+            wasmtime_engine,
             plugin_panel: None,
             plugin_panel_focus_pending: false,
             html_link_sender: link_tx,
@@ -1184,6 +1176,91 @@ impl MainWindow {
                 }
             }
         }
+    }
+
+    // ── Plugin helpers ────────────────────────────────────────────────────────
+
+    /// Probe capabilities from WASM metadata, then instantiate with real caps.
+    fn instantiate_vault_plugins(
+        engine: &wasmtime::Engine,
+        vault_root: Option<&std::path::Path>,
+        event_tx: std::sync::mpsc::Sender<PluginEvent>,
+        plugin_packages: Arc<RwLock<HashMap<String, String>>>,
+    ) -> HashMap<String, Arc<Mutex<PluginInstance>>> {
+        let mut instances = HashMap::new();
+        let Some(root) = vault_root else { return instances; };
+        for (entry, wasm) in load_vault_plugins(root) {
+            // 1. Probe metadata to learn actual capabilities.
+            let caps = PluginInstance::probe_metadata(engine, &wasm)
+                .map(|m| m.capabilities)
+                .unwrap_or_default();
+            // 2. Create real instance with proper WASI capabilities.
+            match PluginInstance::new(
+                engine,
+                &wasm,
+                &entry.id,
+                &caps,
+                root,
+                event_tx.clone(),
+                Arc::clone(&plugin_packages),
+            ) {
+                Ok(mut inst) => {
+                    let _ = inst.init();
+                    instances.insert(entry.id, Arc::new(Mutex::new(inst)));
+                }
+                Err(e) => eprintln!("[ockr] failed to load plugin '{}': {}", entry.id, e),
+            }
+        }
+        instances
+    }
+
+    /// Unload all plugins from the old vault and load from the new vault root.
+    fn reload_vault_plugins(&mut self, cx: &mut Context<Self>) {
+        // Collect command IDs owned by plugins being unloaded.
+        let old_ids: Vec<String> = self.plugin_instances.keys().cloned().collect();
+        let commands_to_remove: std::collections::HashSet<String> = {
+            let reg = cx.global::<PluginRegistry>();
+            reg.command_to_plugin
+                .iter()
+                .filter(|(_, pid)| old_ids.contains(pid))
+                .map(|(cmd_id, _)| cmd_id.clone())
+                .collect()
+        };
+        cx.global_mut::<crate::command::CommandRegistry>()
+            .remove_where(|e| commands_to_remove.contains(&e.id));
+        // Clear registry maps.
+        {
+            let reg = cx.global_mut::<PluginRegistry>();
+            for pid in &old_ids {
+                reg.plugin_commands.remove(pid);
+                reg.plugin_panels.remove(pid);
+            }
+            reg.command_to_plugin.retain(|_, v| !old_ids.contains(v));
+        }
+        // Clear plugin_packages contributed by old plugins.
+        if let Ok(mut guard) = self.plugin_packages.write() {
+            guard.clear();
+        }
+        // Drop old instances.
+        self.plugin_instances.clear();
+
+        // Load from new vault.
+        let vault_root = self.vault.read(cx).root.clone();
+        let event_tx = cx.global::<PluginRegistry>().event_tx.clone();
+        self.plugin_instances = Self::instantiate_vault_plugins(
+            &self.wasmtime_engine,
+            vault_root.as_deref(),
+            event_tx,
+            Arc::clone(&self.plugin_packages),
+        );
+
+        // Push plugin_packages to all open editors.
+        for pane in &self.panes {
+            pane.editor.update(cx, |p, _| {
+                p.set_plugin_packages(Arc::clone(&self.plugin_packages));
+            });
+        }
+        cx.notify();
     }
 
     // ── Plugin event draining ─────────────────────────────────────────────────

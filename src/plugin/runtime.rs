@@ -1,7 +1,8 @@
 //! Wasmtime-based plugin runtime.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, RwLock, mpsc};
 
 use serde::Deserialize;
 use wasmtime::*;
@@ -63,6 +64,8 @@ pub struct PluginData {
     pub wasi: WasiP1Ctx,
     pub plugin_id: String,
     pub event_tx: mpsc::Sender<PluginEvent>,
+    /// Shared map written by `ockr_register_package`; keyed by `"@plugin/<name>/..."`.
+    pub plugin_packages: Arc<RwLock<HashMap<String, String>>>,
 }
 
 // ── Memory helper ─────────────────────────────────────────────────────────────
@@ -85,6 +88,23 @@ pub struct PluginInstance {
 }
 
 impl PluginInstance {
+    /// Instantiate with no WASI and a temporary event channel, just to read metadata.
+    pub fn probe_metadata(engine: &Engine, wasm: &[u8]) -> Result<PluginMetadataJson, String> {
+        let (tx, _rx) = mpsc::channel();
+        let tmp = std::env::temp_dir();
+        let empty_packages = Arc::new(RwLock::new(HashMap::new()));
+        let mut inst = Self::new(
+            engine,
+            wasm,
+            "probe",
+            &CapabilitiesJson::default(),
+            &tmp,
+            tx,
+            Arc::clone(&empty_packages),
+        )?;
+        inst.read_metadata()
+    }
+
     pub fn new(
         engine: &Engine,
         wasm: &[u8],
@@ -92,6 +112,7 @@ impl PluginInstance {
         capabilities: &CapabilitiesJson,
         vault_root: &Path,
         event_tx: mpsc::Sender<PluginEvent>,
+        plugin_packages: Arc<RwLock<HashMap<String, String>>>,
     ) -> Result<Self, String> {
         let module = Module::new(engine, wasm).map_err(|e| e.to_string())?;
 
@@ -115,6 +136,7 @@ impl PluginInstance {
             wasi,
             plugin_id: plugin_id.to_string(),
             event_tx: event_tx.clone(),
+            plugin_packages,
         };
         let mut store = Store::new(engine, plugin_data);
 
@@ -231,6 +253,37 @@ impl PluginInstance {
                             layout,
                         },
                     });
+                    0
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        // ockr_register_package(name_p, name_l, src_p, src_l) -> i32
+        // Registers a `@plugin/<plugin_id>/<name>` typst package.
+        linker
+            .func_wrap(
+                "env",
+                "ockr_register_package",
+                |mut caller: Caller<PluginData>,
+                 name_p: i32,
+                 name_l: i32,
+                 src_p: i32,
+                 src_l: i32|
+                 -> i32 {
+                    let mem = match caller.get_export("memory") {
+                        Some(Extern::Memory(m)) => m,
+                        _ => return -1,
+                    };
+                    let name = match wasm_str(&mem, &caller, name_p, name_l) {
+                        Some(s) => s,
+                        None => return -1,
+                    };
+                    let source = wasm_str(&mem, &caller, src_p, src_l).unwrap_or_default();
+                    let pid = caller.data().plugin_id.clone();
+                    let key = format!("@plugin/{}/{}", pid, name);
+                    if let Ok(mut guard) = caller.data().plugin_packages.write() {
+                        guard.insert(key, source);
+                    }
                     0
                 },
             )

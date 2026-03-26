@@ -19,6 +19,7 @@ extern "C" {
         po_p: i32, po_l: i32,
         la_p: i32, la_l: i32,
     ) -> i32;
+    fn ockr_register_package(name_p: i32, name_l: i32, src_p: i32, src_l: i32) -> i32;
 }
 
 // ── Safe wrappers ─────────────────────────────────────────────────────────────
@@ -38,6 +39,19 @@ pub fn register_command(id: &str, name: &str, hint: Option<&str>) {
 /// Write a log line visible in ockr's notification toast.
 pub fn log(msg: &str) {
     unsafe { ockr_log(msg.as_ptr() as i32, msg.len() as i32); }
+}
+
+/// Register a typst package accessible as `#import "@plugin/<plugin_id>/<name>"`.
+///
+/// `name` should be a filename like `"lib.typ"`.
+/// `source` is the full typst source text of the package.
+pub fn register_typst_package(name: &str, source: &str) {
+    unsafe {
+        ockr_register_package(
+            name.as_ptr() as i32,   name.len() as i32,
+            source.as_ptr() as i32, source.len() as i32,
+        );
+    }
 }
 
 /// Register a UI panel. `position` must be `"sidebar"`, `"bottom"`, or `"float"`.

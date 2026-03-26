@@ -178,11 +178,5 @@ fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 fn read_wasm_metadata(wasm: &[u8]) -> Result<super::runtime::PluginMetadataJson, String> {
     let engine = wasmtime::Engine::default();
-    let caps = super::runtime::CapabilitiesJson::default();
-    // Use a temp dir as vault root for metadata-only instantiation.
-    let tmp = std::env::temp_dir();
-    let (tx, _rx) = std::sync::mpsc::channel();
-    let mut instance = super::runtime::PluginInstance::new(&engine, wasm, "probe", &caps, &tmp, tx)
-        .map_err(|e| e.to_string())?;
-    instance.read_metadata()
+    super::runtime::PluginInstance::probe_metadata(&engine, wasm)
 }

@@ -33,8 +33,8 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render,
-    ScrollWheelEvent, Window, canvas, div, fill, point, prelude::*, px, quad, rgba, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render,
+    ScrollWheelEvent, Window, canvas, div, point, prelude::*, px, quad, rgba, size,
 };
 
 use crate::ui::theme::ThemePalette;
