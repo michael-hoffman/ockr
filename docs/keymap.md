@@ -110,7 +110,7 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `ge`          | Go to next word end                 |
 | `gv`          | Reselect last visual selection      |
 
-### Search
+### Search & Replace
 
 | Key           | Action                              |
 |---------------|-------------------------------------|
@@ -120,6 +120,17 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `N`           | Jump to previous match              |
 | `Enter`       | Confirm search, close bar           |
 | `Escape`      | Cancel search, restore cursor       |
+| `Cmd-F`       | Open forward search (any mode)      |
+| `Cmd-H`       | Open find-and-replace bar           |
+
+**Find-and-replace bar** (opened with `Cmd-H`):
+
+| Key           | Action                              |
+|---------------|-------------------------------------|
+| `Tab`         | Switch focus: query ↔ replace row   |
+| `Enter` _(replace row)_ | Replace current match, advance |
+| `Ctrl-A` _(replace row)_ | Replace all matches        |
+| `Escape`      | Cancel, restore cursor              |
 
 ### Command Palette
 
@@ -152,6 +163,18 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `mi` / `ma`  | Select inner / around text object   |
 | `Escape`      | Return to Normal                    |
 
+### Surround selection
+
+With text selected, pressing an opening delimiter **wraps** the selection instead of replacing it.
+
+| Key  | Wraps selection with |
+|------|----------------------|
+| `(`  | `( … )`              |
+| `[`  | `[ … ]`              |
+| `{`  | `{ … }`              |
+| `"`  | `" … "`              |
+| `$`  | `$ … $`              |
+
 ---
 
 ## Insert Mode
@@ -170,6 +193,22 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `Ctrl-j`      | Insert newline                      |
 | `Escape`      | Return to Normal                    |
 
+### Auto-close pairs
+
+Typing an opening delimiter automatically inserts the closing pair and places the cursor between them.
+
+| Typed         | Result       |
+|---------------|--------------|
+| `(`           | `(\|)`       |
+| `[`           | `[\|]`       |
+| `{`           | `{\|}`       |
+| `"`           | `"\|"`       |
+| `$`           | `$\|$`       |
+
+If the cursor is already directly before the matching closer, the closer is **skipped over** rather than doubled.
+
+**Smart backspace** — when the cursor sits between an empty pair (e.g. `(|)`), `Backspace` removes both delimiters in one keystroke.
+
 ---
 
 ## App / macOS
@@ -177,6 +216,8 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | Key           | Action                              |
 |---------------|-------------------------------------|
 | `Cmd-S`       | Save file                           |
+| `Cmd-F`       | In-buffer search                    |
+| `Cmd-H`       | Find and replace                    |
 | `Cmd-P` / `Cmd-Shift-P` | Command palette           |
 | `Cmd-V`       | Paste from system clipboard         |
 | `Cmd-C`       | Copy selection / line to clipboard  |
@@ -229,3 +270,6 @@ Open with `:` or `Cmd-P`. A `:<hint>` shows the Helix ex-command equivalent.
 | `line-numbers-relative` | Relative line numbers | `:set nu rel` |
 | `line-numbers-absolute` | Absolute line numbers | `:set nu abs` |
 | `line-numbers-off` | No line numbers | `:set nonu` |
+| `reload` | Reload current file from disk | `:e` |
+| `open-search` | Open forward search bar | `Cmd-F` |
+| `open-replace` | Open find-and-replace bar | `Cmd-H` |

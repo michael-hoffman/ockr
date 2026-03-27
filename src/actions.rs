@@ -47,7 +47,8 @@ actions!(
         LineNumbersRelative,
         LineNumbersAbsolute,
         LineNumbersOff,
-        // In-buffer search
+        // In-buffer search / replace
         OpenSearch,
+        OpenReplace,
     ]
 );

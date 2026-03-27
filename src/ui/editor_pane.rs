@@ -49,7 +49,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px, rgba,
 };
 
-use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenSearch, SaveFile};
+use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenReplace, OpenSearch, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PluginPackages, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -92,7 +92,7 @@ struct WikilinkState {
     selected: usize,
 }
 
-/// State for the in-buffer `/` or `?` search bar.
+/// State for the in-buffer `/` or `?` search bar (and optional replace row).
 struct SearchState {
     /// Text typed so far.
     query: String,
@@ -104,6 +104,10 @@ struct SearchState {
     saved_cursor: Pos,
     /// `true` = `?` backward search; `false` = `/` forward search.
     backward: bool,
+    /// Replacement string. `None` = search-only mode; `Some` = find-and-replace mode.
+    replace: Option<String>,
+    /// Which row has keyboard focus: `false` = query, `true` = replace.
+    replace_focused: bool,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -316,7 +320,10 @@ impl EditorPane {
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
         self.vault_root = Some(vault_root);
-        self.undo_history.clear();
+        // Restore persisted undo/redo history for this file (empty if never saved).
+        let (undo, redo) = crate::undo_store::load_undo_history(&file.abs_path);
+        self.undo_history = undo;
+        self.redo_history = redo;
         self.trigger_compile(cx);
         cx.notify();
     }
@@ -458,6 +465,9 @@ impl EditorPane {
             compiler.invalidate_import(path.clone());
         }
 
+        // Persist the undo/redo stacks so they survive a close-and-reopen.
+        crate::undo_store::save_undo_history(&path, &self.undo_history, &self.redo_history);
+
         // Incrementally update the backlink index for this file.
         if let Some(vault) = &self.vault {
             if let Some(rel) = &self.file_rel_path {
@@ -515,11 +525,31 @@ impl EditorPane {
             current_idx: 0,
             saved_cursor: saved,
             backward,
+            replace: None,
+            replace_focused: false,
         });
     }
 
-    /// Route a keystroke to the search bar while it is open.
+    /// Open the search+replace bar (Cmd-H), focused on the query row.
+    fn open_replace(&mut self) {
+        let saved = self.state.cursor();
+        self.search = Some(SearchState {
+            query: String::new(),
+            matches: Vec::new(),
+            current_idx: 0,
+            saved_cursor: saved,
+            backward: false,
+            replace: Some(String::new()),
+            replace_focused: false,
+        });
+    }
+
+    /// Route a keystroke to the search bar (or its replace row) while it is open.
     fn handle_search_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let in_replace = self.search.as_ref()
+            .map(|s| s.replace.is_some() && s.replace_focused)
+            .unwrap_or(false);
+
         match k.key.as_str() {
             "escape" => {
                 // Cancel: restore cursor to pre-search position.
@@ -530,29 +560,54 @@ impl EditorPane {
                     self.update_viewport();
                 }
             }
-            "enter" => {
-                // Confirm: persist query and direction for n/N, close bar.
-                if let Some(ref s) = self.search {
-                    if !s.query.is_empty() {
-                        self.last_search = Some(s.query.clone());
-                        self.last_search_backward = s.backward;
+            "tab" => {
+                // Toggle focus between query and replace rows.
+                if let Some(ref mut s) = self.search {
+                    if s.replace.is_some() {
+                        s.replace_focused = !s.replace_focused;
                     }
                 }
-                self.search = None;
+            }
+            "enter" => {
+                if in_replace {
+                    // Enter in replace row: replace current match and advance.
+                    self.replace_current(cx);
+                } else {
+                    // Enter in query row: close bar, persist for n/N.
+                    if let Some(ref s) = self.search {
+                        if !s.query.is_empty() {
+                            self.last_search = Some(s.query.clone());
+                            self.last_search_backward = s.backward;
+                        }
+                    }
+                    self.search = None;
+                }
             }
             "backspace" => {
                 if let Some(ref mut s) = self.search {
-                    s.query.pop();
+                    if in_replace {
+                        if let Some(ref mut r) = s.replace { r.pop(); }
+                    } else {
+                        s.query.pop();
+                    }
                 }
-                self.update_search_matches(cx);
+                if !in_replace { self.update_search_matches(cx); }
+            }
+            "a" if k.modifiers.control && in_replace => {
+                // Ctrl-A in replace row: replace all matches.
+                self.replace_all(cx);
             }
             _ => {
                 if !k.modifiers.platform && !k.modifiers.control {
                     if let Some(ch) = &k.key_char {
                         if let Some(ref mut s) = self.search {
-                            s.query.push_str(ch);
+                            if in_replace {
+                                if let Some(ref mut r) = s.replace { r.push_str(ch); }
+                            } else {
+                                s.query.push_str(ch);
+                            }
                         }
-                        self.update_search_matches(cx);
+                        if !in_replace { self.update_search_matches(cx); }
                     }
                 }
             }
@@ -663,6 +718,56 @@ impl EditorPane {
         };
         self.state.move_cursor_to(matches[idx]);
         self.update_viewport();
+        cx.notify();
+    }
+
+    // ── Replace ───────────────────────────────────────────────────────────────
+
+    /// Replace the current search match with the replacement string, then advance.
+    fn replace_current(&mut self, cx: &mut Context<Self>) {
+        let (query, replace_str, match_pos) = {
+            let Some(ref s) = self.search else { return };
+            let Some(ref r) = s.replace else { return };
+            if s.matches.is_empty() || s.query.is_empty() { return; }
+            (s.query.clone(), r.clone(), s.matches[s.current_idx])
+        };
+
+        self.push_undo();
+        let qlen = query.len();
+        self.buffer.delete_range(match_pos.line, match_pos.col, match_pos.col + qlen);
+        self.buffer.insert(match_pos.line, match_pos.col, &replace_str);
+        self.state.is_dirty = true;
+
+        // Recompute matches after the edit; advance to next.
+        self.update_search_matches(cx);
+        self.search_next(cx);
+        self.trigger_compile(cx);
+    }
+
+    /// Replace every occurrence of the search query with the replacement string.
+    fn replace_all(&mut self, cx: &mut Context<Self>) {
+        let (query, replace_str, matches) = {
+            let Some(ref s) = self.search else { return };
+            let Some(ref r) = s.replace else { return };
+            if s.query.is_empty() || s.matches.is_empty() { return; }
+            (s.query.clone(), r.clone(), s.matches.clone())
+        };
+
+        self.push_undo();
+        let qlen = query.len();
+        // Iterate in reverse so earlier positions stay valid after each deletion.
+        for m in matches.iter().rev() {
+            self.buffer.delete_range(m.line, m.col, m.col + qlen);
+            self.buffer.insert(m.line, m.col, &replace_str);
+        }
+        self.state.is_dirty = true;
+
+        // Clear matches (they're all gone) and close the bar.
+        if let Some(ref mut s) = self.search {
+            s.matches.clear();
+            s.current_idx = 0;
+        }
+        self.trigger_compile(cx);
         cx.notify();
     }
 
@@ -1424,13 +1529,13 @@ impl Render for EditorPane {
                 div().into_any_element()
             });
 
-        // ── Search bar (shown at top when `/` or `?` is active) ──────────────
+        // ── Search bar (shown at top when `/`, `?`, or Cmd-H is active) ────────
         let search_bar = self.search.as_ref().map(|s| {
             let match_info: gpui::AnyElement = if s.query.is_empty() {
                 div().into_any_element()
             } else if s.matches.is_empty() {
                 div()
-                    .text_color(gpui::rgb(0xF87171)) // soft red — no matches
+                    .text_color(gpui::rgb(0xF87171))
                     .child("  no matches")
                     .into_any_element()
             } else {
@@ -1441,8 +1546,11 @@ impl Render for EditorPane {
             };
 
             let prompt = if s.backward { "?" } else { "/" };
+            // Cursor blink indicator appears on whichever row is focused.
+            let cursor_el = div().text_color(gpui::rgb(t.mode_insert)).child("▌");
 
-            div()
+            // Query row — always shown.
+            let query_row = div()
                 .w_full()
                 .flex()
                 .flex_row()
@@ -1450,14 +1558,49 @@ impl Render for EditorPane {
                 .px_4()
                 .py_1()
                 .bg(gpui::rgb(t.bg_base))
-                .border_b_1()
-                .border_color(gpui::rgb(t.border_subtle))
                 .text_sm()
                 .font_family("Menlo")
                 .child(div().text_color(gpui::rgb(t.ochre)).child(prompt))
                 .child(div().text_color(gpui::rgb(t.text)).child(s.query.clone()))
-                .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
-                .child(match_info)
+                .when(!s.replace_focused, |r| r.child(cursor_el))
+                .child(match_info);
+
+            let mut bar = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(gpui::rgb(t.bg_base))
+                .border_b_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .child(query_row);
+
+            // Replace row — only shown in find-and-replace mode.
+            if let Some(ref replace_text) = s.replace {
+                let hint = div()
+                    .text_color(gpui::rgb(t.text_faint))
+                    .text_xs()
+                    .child("  ↵ replace  ^A all  Tab switch");
+                let replace_row = div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_4()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(gpui::rgb(t.border_subtle))
+                    .text_sm()
+                    .font_family("Menlo")
+                    .child(div().text_color(gpui::rgb(t.text_subtle)).child("→"))
+                    .child(div().text_color(gpui::rgb(t.text)).child(replace_text.clone()))
+                    .when(s.replace_focused, |r| {
+                        r.child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
+                    })
+                    .child(hint);
+                bar = bar.child(replace_row);
+            }
+
+            bar
         });
 
         // ── Wikilink autocomplete popup ───────────────────────────────────────
@@ -1527,6 +1670,10 @@ impl Render for EditorPane {
             }))
             .on_action(cx.listener(|this, _: &OpenSearch, _window, cx| {
                 this.open_search(false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
+                this.open_replace();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| {

@@ -5,6 +5,7 @@ mod editor;
 mod plugin;
 mod session;
 mod ui;
+mod undo_store;
 mod vault;
 
 use actions::*;
@@ -105,6 +106,7 @@ fn main() {
             KeyBinding::new("cmd-shift-e", ExportPdf, None),
             KeyBinding::new("cmd-shift-g", OpenGraphView, None),
             KeyBinding::new("cmd-f", OpenSearch, None),
+            KeyBinding::new("cmd-h", OpenReplace, None),
         ]);
 
         // App-level action handlers.
