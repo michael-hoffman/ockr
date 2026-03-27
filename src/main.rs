@@ -4,6 +4,7 @@ mod compiler;
 mod editor;
 mod plugin;
 mod session;
+mod settings;
 mod ui;
 mod undo_store;
 mod vault;
@@ -12,8 +13,8 @@ use actions::*;
 use command::{CommandEntry, CommandRegistry};
 use compiler::PreviewMode;
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, PathPromptOptions, SharedString,
-    TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction,
+    PathPromptOptions, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 use ui::theme::ThemePalette;
 use vault::VaultState;
@@ -56,19 +57,6 @@ fn main() {
         #[cfg(target_os = "macos")]
         set_dock_icon();
 
-        // Load the Oxide theme (dark, ochre accent).
-        // Ochre (light) is available via ThemePalette::ochre() when wanted.
-        cx.set_global(ThemePalette::oxide());
-
-        // Default to HTML preview (faster; no page layout step).
-        // Cmd-Opt-H toggles to paged/PDF mode.
-        cx.set_global(PreviewMode::Html);
-
-        // Initialize the command registry as a GPUI global.
-        let mut registry = CommandRegistry::new();
-        register_builtin_commands(&mut registry);
-        cx.set_global(registry);
-
         // Create the reactive vault entity (empty until a vault is opened).
         let vault = cx.new(|_| VaultState::empty());
 
@@ -78,6 +66,29 @@ fn main() {
                 *state = VaultState::open(last_path);
             });
         }
+
+        // Load settings: defaults ← global file ← vault file.
+        let vault_root = vault.read(cx).root.clone();
+        let user_settings = settings::load_settings(vault_root.as_deref());
+
+        // Apply theme from settings.
+        let theme = load_theme_by_name(&user_settings.theme);
+        cx.set_global(theme);
+
+        // Apply preview mode from settings.
+        let preview = match user_settings.preview_mode.as_str() {
+            "paged" => PreviewMode::Paged,
+            _ => PreviewMode::Html,
+        };
+        cx.set_global(preview);
+
+        // Store resolved settings as a GPUI global.
+        cx.set_global(user_settings);
+
+        // Initialize the command registry as a GPUI global.
+        let mut registry = CommandRegistry::new();
+        register_builtin_commands(&mut registry);
+        cx.set_global(registry);
 
         // Keybindings.
         cx.bind_keys([
@@ -107,6 +118,92 @@ fn main() {
             KeyBinding::new("cmd-shift-g", OpenGraphView, None),
             KeyBinding::new("cmd-f", OpenSearch, None),
             KeyBinding::new("cmd-h", OpenReplace, None),
+        ]);
+
+        // macOS menu bar.
+        cx.set_menus(vec![
+            Menu {
+                name: "ockr".into(),
+                items: vec![
+                    MenuItem::action("About ockr", Quit), // placeholder
+                    MenuItem::separator(),
+                    MenuItem::action("Quit ockr", Quit),
+                ],
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("New Note", NewNote),
+                    MenuItem::action("Open Vault…", OpenVault),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Save", SaveFile, OsAction::Undo), // Cmd-S handled by keybinding
+                    MenuItem::action("Export PDF", ExportPdf),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Tab", BufferClose),
+                ],
+            },
+            Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::os_action("Undo", Quit, OsAction::Undo),
+                    MenuItem::os_action("Redo", Quit, OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", Quit, OsAction::Cut),
+                    MenuItem::os_action("Copy", Quit, OsAction::Copy),
+                    MenuItem::os_action("Paste", Quit, OsAction::Paste),
+                    MenuItem::os_action("Select All", Quit, OsAction::SelectAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Find…", OpenSearch),
+                    MenuItem::action("Find & Replace…", OpenReplace),
+                ],
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::action("Toggle Preview Mode", TogglePreviewMode),
+                    MenuItem::separator(),
+                    MenuItem::submenu(Menu {
+                        name: "Line Numbers".into(),
+                        items: vec![
+                            MenuItem::action("Relative", LineNumbersRelative),
+                            MenuItem::action("Absolute", LineNumbersAbsolute),
+                            MenuItem::action("Off", LineNumbersOff),
+                        ],
+                    }),
+                    MenuItem::separator(),
+                    MenuItem::action("Command Palette", OpenCommandPalette),
+                ],
+            },
+            Menu {
+                name: "Go".into(),
+                items: vec![
+                    MenuItem::action("Quick Switch", OpenQuickSwitch),
+                    MenuItem::action("Daily Note", OpenDailyNote),
+                    MenuItem::separator(),
+                    MenuItem::action("Graph View", OpenGraphView),
+                    MenuItem::action("Backlinks", OpenBacklinks),
+                    MenuItem::action("Vault Search", OpenVaultSearch),
+                ],
+            },
+            Menu {
+                name: "Window".into(),
+                items: vec![
+                    MenuItem::action("Split Vertical", SplitPaneVertical),
+                    MenuItem::action("Split Horizontal", SplitPaneHorizontal),
+                    MenuItem::separator(),
+                    MenuItem::action("Focus Left", FocusPaneLeft),
+                    MenuItem::action("Focus Right", FocusPaneRight),
+                    MenuItem::action("Focus Up", FocusPaneUp),
+                    MenuItem::action("Focus Down", FocusPaneDown),
+                ],
+            },
+            Menu {
+                name: "Plugins".into(),
+                items: vec![
+                    MenuItem::action("Plugin Manager", OpenPluginManager),
+                ],
+            },
         ]);
 
         // App-level action handlers.
@@ -225,6 +322,30 @@ fn set_dock_icon() {
     }
 }
 
+/// Load a theme by name, checking bundled themes and `~/.config/ockr/themes/`.
+fn load_theme_by_name(name: &str) -> ThemePalette {
+    // Check user themes directory first.
+    let user_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+        .join("ockr")
+        .join("themes");
+    let user_path = user_dir.join(format!("{name}.toml"));
+    if user_path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&user_path) {
+            if let Ok(theme) = ThemePalette::from_toml(&text) {
+                return theme;
+            }
+        }
+    }
+
+    // Bundled themes.
+    match name {
+        "ochre" => ThemePalette::from_toml(include_str!("../themes/ochre.toml"))
+            .unwrap_or_else(|_| ThemePalette::oxide()),
+        _ => ThemePalette::oxide(),
+    }
+}
+
 fn register_builtin_commands(registry: &mut CommandRegistry) {
     // Each entry: (id, display name, keybinding hint shown in the picker).
     // Helix `:command` names are listed first so they appear when typing
@@ -269,6 +390,9 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("line-numbers-relative", "Line Numbers: Relative",          Some(":set nu rel")),
         ("line-numbers-absolute", "Line Numbers: Absolute",          Some(":set nu abs")),
         ("line-numbers-off",      "Line Numbers: Off",               Some(":set nonu")),
+        // Settings
+        ("reload-settings",       "Reload Settings",                  None),
+        ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));

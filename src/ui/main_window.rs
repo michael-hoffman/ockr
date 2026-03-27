@@ -1219,6 +1219,15 @@ impl MainWindow {
             "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
             "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
             "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
+            "reload-settings" => {
+                let vault_root = self.vault.read(cx).root.clone();
+                let new_settings = crate::settings::load_settings(vault_root.as_deref());
+                *cx.global_mut::<crate::settings::Settings>() = new_settings;
+            }
+            "switch-keyboard-mode" => {
+                let editor = self.panes[self.active_idx].editor.clone();
+                editor.update(cx, |pane, _cx| pane.switch_keyboard_mode());
+            }
             _ => {
                 // Plugin command?
                 let plugin_id = cx

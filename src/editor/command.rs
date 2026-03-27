@@ -166,6 +166,8 @@ pub enum EditorCommand {
     ScrollPageUp,
     /// Repeat the last buffer-mutating change — `.`.
     RepeatLastChange,
+    /// Toggle `// ` comment prefix on the current line or selection.
+    ToggleComment,
 
     // ── Text object selection (Helix `mi` / `ma`) ─────────────────────────
     /// Select a text object, entering Visual Char mode.

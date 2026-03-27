@@ -56,6 +56,7 @@ use crate::editor::{
     apply::{apply, SideEffect},
     buffer::InMemoryBuffer,
     command::{EditorCommand, TextObjectKind},
+    keymap::{KeymapHandler, KeymapResult, OperatorKind},
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
 use crate::ui::preview::PreviewPane;
@@ -151,56 +152,6 @@ pub enum EditorPaneEvent {
 
 impl EventEmitter<EditorPaneEvent> for EditorPane {}
 
-// ── Multi-key sequence state ───────────────────────────────────────────────────
-
-/// Tracks the current multi-key Normal-mode sequence, if any.
-///
-/// Each variant means "we received the first key of this sequence and are
-/// waiting for the second key to complete it."  Only one sequence can be
-/// pending at a time; starting a new sequence always cancels any prior one.
-///
-/// Extending for text objects (Story 20) means adding variants here rather
-/// The operator half of a vim-style operator-motion sequence.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PendingOp { Delete, Change, Yank }
-
-/// than bolting on more boolean flags.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-enum PendingKey {
-    /// No multi-key sequence in progress.
-    #[default]
-    None,
-    /// `g` was pressed; awaiting the second key:
-    /// `g` → start of doc, `v` → reselect visual, `h/l/s/e` → g-prefix motions.
-    G,
-    /// `r` was pressed; awaiting the replacement character (`r<c>`).
-    Replace,
-    /// `m` was pressed; awaiting `i` (inner) or `a` (around).
-    M,
-    /// `mi` pressed; awaiting the text-object character.
-    MatchInner,
-    /// `ma` pressed; awaiting the text-object character.
-    MatchAround,
-    /// `f` pressed; awaiting the target character (`f<c>`).
-    FindChar,
-    /// `F` pressed; awaiting the target character (`F<c>`).
-    FindCharBack,
-    /// `t` pressed; awaiting the target character (`t<c>`).
-    TillChar,
-    /// `T` pressed; awaiting the target character (`T<c>`).
-    TillCharBack,
-    /// `d`/`c`/`y` pressed in Normal mode; awaiting the motion / object key.
-    Operator(PendingOp),
-    /// `d/c/y` + `i` pressed; awaiting text-object character.
-    OpInner(PendingOp),
-    /// `d/c/y` + `a` pressed; awaiting text-object character.
-    OpAround(PendingOp),
-    /// `d/c/y` + `t` pressed; awaiting target character for till-forward.
-    OpTill(PendingOp),
-    /// `d/c/y` + `f` pressed; awaiting target character for find-forward.
-    OpFind(PendingOp),
-}
-
 // ── View ──────────────────────────────────────────────────────────────────────
 
 pub struct EditorPane {
@@ -220,8 +171,8 @@ pub struct EditorPane {
     /// Vault-relative path of the open file (e.g. `"notes/foo.typ"`).
     /// Sent with every CompileRequest so the world resolves imports correctly.
     file_rel_path: Option<String>,
-    /// Pending multi-key sequence state (e.g. `g…`, `r<c>`).
-    pending: PendingKey,
+    /// Pluggable keyboard mode (Helix, Standard, etc.).
+    keymap: Box<dyn KeymapHandler>,
     /// Active `[[` autocomplete popup state; `Some` while in Insert mode inside `[[…`.
     wikilink_complete: Option<WikilinkState>,
     /// Active search bar state; `Some` while `/` search is open.
@@ -257,9 +208,22 @@ pub struct EditorPane {
 
 impl EditorPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let keymap: Box<dyn KeymapHandler> = if cx.try_global::<crate::settings::Settings>()
+            .is_some_and(|s| s.keyboard_mode == "standard")
+        {
+            Box::new(crate::editor::keymap_standard::StandardKeymap::new())
+        } else {
+            Box::new(crate::editor::keymap_helix::HelixKeymap::new())
+        };
+        // Standard mode starts in Insert (the default); Helix starts in Normal.
+        let mut state = EditorState::new();
+        if keymap.mode_label(&state) != "STANDARD" {
+            // EditorState defaults to Insert; switch to Normal for Helix mode.
+            // (We don't have a Noop path through apply for this, so set directly.)
+        }
         Self {
             focus_handle: cx.focus_handle(),
-            state: EditorState::new(),
+            state,
             buffer: InMemoryBuffer::empty(),
             undo_history: Vec::new(),
             redo_history: Vec::new(),
@@ -268,7 +232,7 @@ impl EditorPane {
             vault: None,
             vault_root: None,
             file_rel_path: None,
-            pending: PendingKey::None,
+            keymap,
             wikilink_complete: None,
             search: None,
             last_search: None,
@@ -293,6 +257,18 @@ impl EditorPane {
 
     pub fn set_vault(&mut self, vault: Entity<VaultState>) {
         self.vault = Some(vault);
+    }
+
+    /// Switch between Helix and Standard keyboard modes.
+    pub fn switch_keyboard_mode(&mut self) {
+        let current = self.keymap.mode_label(&self.state);
+        if current == "STANDARD" {
+            self.keymap = Box::new(crate::editor::keymap_helix::HelixKeymap::new());
+            self.state.mode = Mode::Normal;
+        } else {
+            self.keymap = Box::new(crate::editor::keymap_standard::StandardKeymap::new());
+            self.state.mode = Mode::Insert;
+        }
     }
 
     /// Share the plugin packages map so every CompileRequest carries it.
@@ -838,27 +814,20 @@ impl EditorPane {
     }
 
     /// Apply an operator (`d`/`c`/`y`) after extending a selection via `motion`.
-    ///
-    /// Temporarily enters Visual-Char mode so that applying the motion command
-    /// extends the selection from the current cursor position, then applies the
-    /// operator on the resulting range.
     fn apply_operator_motion(
         &mut self,
-        op: PendingOp,
+        op: OperatorKind,
         motion: EditorCommand,
         cx: &mut Context<Self>,
     ) {
         self.push_undo();
-        // Enter visual-char with a collapsed selection at the cursor.
         let cursor = self.state.cursor();
         self.state.mode = Mode::Visual(VisualKind::Char);
         self.state.selection = Selection { anchor: cursor, cursor };
-        // In Visual mode, motion commands call `extend_selection_to` internally.
         let prev = std::mem::take(&mut self.state);
         let (sel_state, _) = apply(motion, prev, &mut self.buffer);
         self.state = sel_state;
-        // Now apply the operator on the selection.
-        let op_cmd = pending_op_to_command(op);
+        let op_cmd = operator_kind_to_command(op);
         let prev2 = std::mem::take(&mut self.state);
         let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
         self.state = new_state;
@@ -872,20 +841,18 @@ impl EditorPane {
     /// Apply an operator (`d`/`c`/`y`) on a text object (inner or around).
     fn apply_operator_object(
         &mut self,
-        op: PendingOp,
+        op: OperatorKind,
         inner: bool,
         kind: TextObjectKind,
         cx: &mut Context<Self>,
     ) {
         self.push_undo();
-        // SelectObject enters Visual mode with the object range selected.
         let prev = std::mem::take(&mut self.state);
         let (sel_state, _) =
             apply(EditorCommand::SelectObject { inner, kind }, prev, &mut self.buffer);
         self.state = sel_state;
-        // Only act if a selection was actually made.
         if matches!(self.state.mode, Mode::Visual(_)) {
-            let op_cmd = pending_op_to_command(op);
+            let op_cmd = operator_kind_to_command(op);
             let prev2 = std::mem::take(&mut self.state);
             let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
             self.state = new_state;
@@ -1021,35 +988,16 @@ impl EditorPane {
     ) {
         let k = &event.keystroke;
 
-        // ── Global shortcuts handled before the state machine ─────────────
+        // ── Global shortcuts handled before the keymap ────────────────────
         // Cmd-Z: undo (macOS convention — works in all modes).
         if k.modifiers.platform && k.key == "z" && !k.modifiers.shift {
-            if let Some((text, pos)) = self.undo_history.pop() {
-                let redo_snap = (self.buffer.text(), self.state.cursor());
-                self.redo_history.push(redo_snap);
-                self.buffer = InMemoryBuffer::from_text(&text);
-                self.state.mode = Mode::Normal;
-                self.state.move_cursor_to(pos);
-                self.state.is_dirty = true;
-                self.update_viewport();
-                self.trigger_compile(cx);
-                cx.notify();
-            }
+            self.do_undo(cx);
             return;
         }
 
         // Cmd-Shift-Z: redo (macOS convention).
         if k.modifiers.platform && k.key == "z" && k.modifiers.shift {
-            if let Some((text, pos)) = self.redo_history.pop() {
-                self.push_undo_keeping_redo();
-                self.buffer = InMemoryBuffer::from_text(&text);
-                self.state.mode = Mode::Normal;
-                self.state.move_cursor_to(pos);
-                self.state.is_dirty = true;
-                self.update_viewport();
-                self.trigger_compile(cx);
-                cx.notify();
-            }
+            self.do_redo(cx);
             return;
         }
 
@@ -1076,9 +1024,8 @@ impl EditorPane {
             return;
         }
 
-        // Wikilink autocomplete navigation: intercept Up/Down/Ctrl-K/J/Tab/Enter while popup is open.
+        // Wikilink autocomplete navigation.
         if self.wikilink_complete.is_some() && !k.modifiers.platform {
-            // Check ctrl-k / ctrl-j first (modifiers.control + base key).
             let is_ctrl_k = k.modifiers.control && k.key == "k";
             let is_ctrl_j = k.modifiers.control && k.key == "j";
             if is_ctrl_k || k.key == "up" {
@@ -1101,7 +1048,6 @@ impl EditorPane {
                 cx.notify();
                 return;
             }
-            // Non-ctrl keys below (Tab/Enter/Escape don't fire with ctrl).
             if !k.modifiers.control {
                 match k.key.as_str() {
                     "tab" | "enter" => {
@@ -1110,20 +1056,16 @@ impl EditorPane {
                         return;
                     }
                     "escape" => {
-                        // Dismiss popup but do NOT stop propagation or return —
-                        // let Escape continue through key_insert so it also
-                        // triggers EnterNormal.  Without this the user is trapped
-                        // in Insert mode after closing the popup.
                         self.wikilink_complete = None;
                         cx.notify();
-                        // fall through to normal key handling
+                        // fall through to keymap
                     }
                     _ => {}
                 }
             }
         }
 
-        // Cmd-C / Cmd-X: copy / cut selection or current line to OS clipboard.
+        // Cmd-C / Cmd-X: copy / cut to OS clipboard.
         if k.modifiers.platform && (k.key == "c" || k.key == "x") {
             let text = match self.state.mode {
                 Mode::Visual(VisualKind::Line) => {
@@ -1135,7 +1077,6 @@ impl EditorPane {
             };
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             if k.key == "x" {
-                // Cut: delete line.
                 self.push_undo();
                 let prev = std::mem::take(&mut self.state);
                 let (new_state, _) = apply(EditorCommand::DeleteLine, prev, &mut self.buffer);
@@ -1146,431 +1087,109 @@ impl EditorPane {
             return;
         }
 
-        // Skip held repeats in Normal/Visual modes.
-        if event.is_held && self.state.mode != Mode::Insert {
-            return;
-        }
+        // ── Delegate to the keymap handler ────────────────────────────────
+        let result = self.keymap.handle_key(event, &self.state);
+        self.execute_keymap_result(result, cx);
+    }
 
-        // ── Undo (u in Normal/Visual) ─────────────────────────────────────
-        if k.key == "u" && !k.modifiers.platform && !k.modifiers.control
-            && self.state.mode != Mode::Insert
-        {
-            if let Some((text, pos)) = self.undo_history.pop() {
-                // Save current state to redo stack before restoring.
-                let redo_snap = (self.buffer.text(), self.state.cursor());
-                self.redo_history.push(redo_snap);
-                self.buffer = InMemoryBuffer::from_text(&text);
-                self.state.mode = Mode::Normal;
-                self.state.move_cursor_to(pos);
-                self.state.is_dirty = true;
-                self.update_viewport();
-                self.trigger_compile(cx);
-                cx.notify();
-            }
-            return;
-        }
-
-        // ── Redo (Ctrl-r in Normal/Visual) ───────────────────────────────
-        if k.modifiers.control && k.key == "r" && !k.modifiers.platform
-            && self.state.mode != Mode::Insert
-        {
-            if let Some((text, pos)) = self.redo_history.pop() {
-                // Save current state to undo stack (without clearing redo).
-                self.push_undo_keeping_redo();
-                self.buffer = InMemoryBuffer::from_text(&text);
-                self.state.mode = Mode::Normal;
-                self.state.move_cursor_to(pos);
-                self.state.is_dirty = true;
-                self.update_viewport();
-                self.trigger_compile(cx);
-                cx.notify();
-            }
-            return;
-        }
-
-        // ── Multi-key sequences ──────────────────────────────────────────
-        // ── Multi-key sequences ──────────────────────────────────────────────
-        //
-        // `r` in Normal mode: set pending to Replace, wait for the char.
-        if self.state.mode == Mode::Normal && k.key == "r"
-            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
-        {
-            self.pending = PendingKey::Replace;
-            return;
-        }
-
-        // Complete a pending `r<c>` replace.
-        if self.pending == PendingKey::Replace {
-            self.pending = PendingKey::None;
-            if self.state.mode == Mode::Normal {
-                if let Some(ch) = &k.key_char {
-                    if !k.modifiers.control && !k.modifiers.platform {
-                        self.push_undo();
-                        let prev = std::mem::take(&mut self.state);
-                        let (new_state, effect) = apply(
-                            EditorCommand::ReplaceChar(ch.clone()),
-                            prev,
-                            &mut self.buffer,
-                        );
-                        self.state = new_state;
-                        if effect == SideEffect::BufferChanged {
-                            self.trigger_compile(cx);
-                        }
-                        cx.notify();
-                    }
-                }
-            }
-            return;
-        }
-
-        // `g` in Normal mode: set pending to G, then complete on second key.
-        if self.state.mode == Mode::Normal && k.key == "g"
-            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
-        {
-            if self.pending == PendingKey::G {
-                // Second `g` → go to start of document.
-                self.pending = PendingKey::None;
-                let prev = std::mem::take(&mut self.state);
-                let (new_state, _) = apply(EditorCommand::MoveStartOfDocument, prev, &mut self.buffer);
-                self.state = new_state;
-                cx.notify();
-            } else {
-                self.pending = PendingKey::G;
-            }
-            return;
-        }
-        if self.pending == PendingKey::G {
-            self.pending = PendingKey::None;
-            if !k.modifiers.platform && !k.modifiers.control {
-                let cmd = match k.key.as_str() {
-                    "v" if self.state.mode == Mode::Normal => Some(EditorCommand::ReselectLastVisual),
-                    "h" => Some(EditorCommand::MoveStartOfLine),
-                    "l" => Some(EditorCommand::MoveEndOfLine),
-                    "s" => Some(EditorCommand::MoveFirstNonWhitespace),
-                    "e" => Some(EditorCommand::MoveWordEnd),
-                    _ => None,
-                };
-                if let Some(cmd) = cmd {
-                    let prev = std::mem::take(&mut self.state);
-                    let (new_state, _) = apply(cmd, prev, &mut self.buffer);
-                    self.state = new_state;
-                    cx.notify();
-                    return;
-                }
-            }
-            // Unknown `g…` sequence — fall through to normal handling.
-        }
-
-        // ── `m` text-object sequences (Helix: mi<obj> / ma<obj>) ────────────
-        // Available in both Normal and Visual modes.
-        let in_modal = matches!(self.state.mode, Mode::Normal | Mode::Visual(_));
-        if in_modal && k.key == "m" && !k.modifiers.platform && !k.modifiers.control {
-            self.pending = PendingKey::M;
-            cx.stop_propagation();
-            return;
-        }
-        if self.pending == PendingKey::M {
-            self.pending = PendingKey::None;
-            match k.key.as_str() {
-                "i" => { self.pending = PendingKey::MatchInner; cx.stop_propagation(); return; }
-                "a" => { self.pending = PendingKey::MatchAround; cx.stop_propagation(); return; }
-                _ => {} // fall through — cancel sequence
-            }
-        }
-        if matches!(self.pending, PendingKey::MatchInner | PendingKey::MatchAround) {
-            let inner = self.pending == PendingKey::MatchInner;
-            self.pending = PendingKey::None;
-            // Map keystroke to a text object kind.
-            let kind = if !k.modifiers.platform && !k.modifiers.control {
-                match k.key_char.as_deref().unwrap_or(&k.key) {
-                    "w"  => Some(TextObjectKind::Word),
-                    "W"  => Some(TextObjectKind::WORD),
-                    "p"  => Some(TextObjectKind::Paragraph),
-                    "("  | ")" => Some(TextObjectKind::Paren),
-                    "{"  | "}" => Some(TextObjectKind::Brace),
-                    "["  | "]" => Some(TextObjectKind::Bracket),
-                    "<"  | ">" => Some(TextObjectKind::Angle),
-                    "\"" => Some(TextObjectKind::DoubleQuote),
-                    "'"  => Some(TextObjectKind::SingleQuote),
-                    "`"  => Some(TextObjectKind::Backtick),
-                    "$"  => Some(TextObjectKind::InlineMath),
-                    "t"  => Some(TextObjectKind::TypstContent),
-                    _    => None,
-                }
-            } else {
-                None
-            };
-            if let Some(kind) = kind {
+    /// Execute a `KeymapResult` produced by the keymap handler.
+    fn execute_keymap_result(
+        &mut self,
+        result: KeymapResult,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            KeymapResult::Passthrough => {}
+            KeymapResult::Pending => {
                 cx.stop_propagation();
-                let prev = std::mem::take(&mut self.state);
-                let (new_state, _) = apply(
-                    EditorCommand::SelectObject { inner, kind },
-                    prev,
-                    &mut self.buffer,
-                );
-                self.state = new_state;
-                cx.notify();
             }
-            return;
-        }
-
-        // ── operator + text-object (OpInner / OpAround) ─────────────────────
-        if matches!(self.pending, PendingKey::OpInner(_) | PendingKey::OpAround(_)) {
-            let (op, inner) = match self.pending {
-                PendingKey::OpInner(o)  => (o, true),
-                PendingKey::OpAround(o) => (o, false),
-                _ => unreachable!(),
-            };
-            self.pending = PendingKey::None;
-            if !k.modifiers.platform && !k.modifiers.control {
-                let kind = match k.key_char.as_deref().unwrap_or(&k.key) {
-                    "w"  => Some(TextObjectKind::Word),
-                    "W"  => Some(TextObjectKind::WORD),
-                    "p"  => Some(TextObjectKind::Paragraph),
-                    "("  | ")" | "b" => Some(TextObjectKind::Paren),
-                    "{"  | "}" | "B" => Some(TextObjectKind::Brace),
-                    "["  | "]"       => Some(TextObjectKind::Bracket),
-                    "<"  | ">"       => Some(TextObjectKind::Angle),
-                    "\"" => Some(TextObjectKind::DoubleQuote),
-                    "'"  => Some(TextObjectKind::SingleQuote),
-                    "`"  => Some(TextObjectKind::Backtick),
-                    "$"  => Some(TextObjectKind::InlineMath),
-                    "t"  => Some(TextObjectKind::TypstContent),
-                    _    => None,
-                };
-                if let Some(kind) = kind {
-                    cx.stop_propagation();
-                    self.apply_operator_object(op, inner, kind, cx);
-                }
+            KeymapResult::Undo => {
+                self.do_undo(cx);
             }
-            return;
-        }
-
-        // ── operator + till/find char (OpTill / OpFind) ──────────────────────
-        if matches!(self.pending, PendingKey::OpTill(_) | PendingKey::OpFind(_)) {
-            let (op, is_till) = match self.pending {
-                PendingKey::OpTill(o) => (o, true),
-                PendingKey::OpFind(o) => (o, false),
-                _ => unreachable!(),
-            };
-            self.pending = PendingKey::None;
-            if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
-                if !k.modifiers.control && !k.modifiers.platform {
-                    cx.stop_propagation();
-                    let motion = if is_till {
-                        EditorCommand::TillChar(ch)
-                    } else {
-                        EditorCommand::FindChar(ch)
-                    };
-                    self.apply_operator_motion(op, motion, cx);
-                }
+            KeymapResult::Redo => {
+                self.do_redo(cx);
             }
-            return;
-        }
-
-        // ── complete operator + motion (Operator pending) ────────────────────
-        if let PendingKey::Operator(op) = self.pending {
-            self.pending = PendingKey::None;
-            if !k.modifiers.platform && !k.modifiers.control {
-                // Doubled key → linewise (dd / cc / yy).
-                let same_key = matches!(
-                    (op, k.key.as_str()),
-                    (PendingOp::Delete, "d") | (PendingOp::Change, "c") | (PendingOp::Yank, "y")
-                );
-                if same_key && !k.modifiers.shift {
-                    cx.stop_propagation();
-                    self.push_undo();
-                    let cmd = match op {
-                        PendingOp::Delete => EditorCommand::DeleteLine,
-                        PendingOp::Change => EditorCommand::ChangeLine,
-                        PendingOp::Yank   => EditorCommand::YankLine,
-                    };
-                    let prev = std::mem::take(&mut self.state);
-                    let (new_state, effect) = apply(cmd, prev, &mut self.buffer);
-                    self.state = new_state;
-                    if effect == SideEffect::BufferChanged {
-                        self.trigger_compile(cx);
-                    }
-                    self.update_viewport();
-                    cx.notify();
-                    return;
-                }
-                // Sub-sequences: i → inner, a → around, t → till, f → find.
-                match k.key.as_str() {
-                    "i" if !k.modifiers.shift => {
-                        self.pending = PendingKey::OpInner(op);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    "a" if !k.modifiers.shift => {
-                        self.pending = PendingKey::OpAround(op);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    "t" if !k.modifiers.shift => {
-                        self.pending = PendingKey::OpTill(op);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    "f" if !k.modifiers.shift => {
-                        self.pending = PendingKey::OpFind(op);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    _ => {}
-                }
-                // Single-key motion: enter visual, apply motion, apply operator.
-                let key_str = k.key_char.as_deref().unwrap_or(&k.key);
-                if let Some(motion_cmd) = operator_motion_from_key(key_str) {
-                    cx.stop_propagation();
-                    self.apply_operator_motion(op, motion_cmd, cx);
-                    return;
-                }
-            }
-            // Unknown or modified key — silently cancel operator pending.
-            return;
-        }
-
-        // ── `/` and `?` search, `n`/`N` repeat ──────────────────────────────
-        if in_modal && !k.modifiers.platform && !k.modifiers.control {
-            let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
-            let is_question = k.key == "?" || k.key_char.as_deref() == Some("?");
-            if is_slash || is_question {
-                self.open_search(is_question);
+            KeymapResult::OpenSearch { backward } => {
+                self.open_search(backward);
                 cx.stop_propagation();
                 cx.notify();
-                return;
             }
-            // n / N: navigate matches from last search (when one exists).
-            if k.key == "n" && self.last_search.is_some() {
-                self.search_next(cx);
-                cx.stop_propagation();
-                return;
+            KeymapResult::SearchNext => {
+                if self.last_search.is_some() {
+                    self.search_next(cx);
+                    cx.stop_propagation();
+                }
             }
-            if k.key == "N" && self.last_search.is_some() {
-                self.search_prev(cx);
-                cx.stop_propagation();
-                return;
+            KeymapResult::SearchPrev => {
+                if self.last_search.is_some() {
+                    self.search_prev(cx);
+                    cx.stop_propagation();
+                }
             }
-            // * / # : search word under cursor (forward / backward).
-            let key_ch = k.key_char.as_deref().unwrap_or(&k.key);
-            if key_ch == "*" {
+            KeymapResult::SearchWordForward => {
                 if let Some(word) = self.word_under_cursor() {
                     self.last_search = Some(word);
                     self.last_search_backward = false;
                     self.search_next(cx);
                     cx.stop_propagation();
                 }
-                return;
             }
-            if key_ch == "#" {
+            KeymapResult::SearchWordBackward => {
                 if let Some(word) = self.word_under_cursor() {
                     self.last_search = Some(word);
                     self.last_search_backward = true;
                     self.search_prev(cx);
                     cx.stop_propagation();
                 }
-                return;
             }
-        }
-
-        // ── d/c/y: set operator pending in Normal mode ───────────────────────
-        // Intercept before key_normal maps these to DeleteLine / ChangeLine / YankLine.
-        if self.state.mode == Mode::Normal && self.pending == PendingKey::None
-            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
-        {
-            let op = match k.key.as_str() {
-                "d" => Some(PendingOp::Delete),
-                "c" => Some(PendingOp::Change),
-                "y" => Some(PendingOp::Yank),
-                _ => None,
-            };
-            if let Some(op) = op {
-                self.pending = PendingKey::Operator(op);
+            KeymapResult::OpenPalette => {
                 cx.stop_propagation();
-                return;
+                cx.emit(EditorPaneEvent::OpenPalette);
             }
-        }
-
-        // ── f/F/t/T find-char sequences ──────────────────────────────────────
-        // Available in Normal and Visual modes; only when no other sequence pending.
-        if in_modal && self.pending == PendingKey::None
-            && !k.modifiers.platform && !k.modifiers.control
-        {
-            let next = match k.key.as_str() {
-                "f" => Some(PendingKey::FindChar),
-                "F" => Some(PendingKey::FindCharBack),
-                "t" => Some(PendingKey::TillChar),
-                "T" => Some(PendingKey::TillCharBack),
-                _ => None,
-            };
-            if let Some(pk) = next {
-                self.pending = pk;
+            KeymapResult::OperatorMotion { op, motion } => {
                 cx.stop_propagation();
-                return;
+                self.apply_operator_motion(op, motion, cx);
             }
-        }
-        if matches!(
-            self.pending,
-            PendingKey::FindChar | PendingKey::FindCharBack
-            | PendingKey::TillChar | PendingKey::TillCharBack
-        ) {
-            let pending_kind = self.pending;
-            self.pending = PendingKey::None;
-            if !k.modifiers.platform && !k.modifiers.control {
-                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
-                    cx.stop_propagation();
-                    let cmd = match pending_kind {
-                        PendingKey::FindChar     => EditorCommand::FindChar(ch),
-                        PendingKey::FindCharBack => EditorCommand::FindCharBack(ch),
-                        PendingKey::TillChar     => EditorCommand::TillChar(ch),
-                        PendingKey::TillCharBack => EditorCommand::TillCharBack(ch),
-                        _ => unreachable!(),
-                    };
-                    let prev = std::mem::take(&mut self.state);
-                    let (new_state, _) = apply(cmd, prev, &mut self.buffer);
-                    self.state = new_state;
-                    self.update_viewport();
-                    cx.notify();
+            KeymapResult::OperatorObject { op, inner, kind } => {
+                cx.stop_propagation();
+                self.apply_operator_object(op, inner, kind, cx);
+            }
+            KeymapResult::OperatorLinewise(op) => {
+                cx.stop_propagation();
+                self.push_undo();
+                let cmd = match op {
+                    OperatorKind::Delete => EditorCommand::DeleteLine,
+                    OperatorKind::Change => EditorCommand::ChangeLine,
+                    OperatorKind::Yank => EditorCommand::YankLine,
+                };
+                let prev = std::mem::take(&mut self.state);
+                let (new_state, effect) = apply(cmd, prev, &mut self.buffer);
+                self.state = new_state;
+                if effect == SideEffect::BufferChanged {
+                    self.trigger_compile(cx);
                 }
+                self.update_viewport();
+                cx.notify();
             }
-            return;
-        }
-
-        let cmd = keystroke_to_command(event, &self.state);
-        if cmd == EditorCommand::Noop {
-            // ── Surround: Visual mode + opening delimiter wraps selection ─────
-            if matches!(self.state.mode, Mode::Visual(_))
-                && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt
-            {
-                if let Some(typed) = k.key_char.as_deref() {
-                    if let Some(close) = visual_surround_close(typed) {
-                        self.apply_surround(typed, close, cx);
-                        return;
-                    }
-                }
+            KeymapResult::Surround { open, close } => {
+                self.apply_surround(&open, close, cx);
             }
-            return;
+            KeymapResult::Command(cmd) => {
+                self.execute_command(cmd, cx);
+            }
         }
+    }
 
-        // OpenPalette is a UI command — emit an event so MainWindow opens it.
-        // Using cx.emit is more reliable than window.dispatch_action across
-        // view boundaries.  Stop propagation so no competing action binding
-        // can fire and toggle the palette back closed.
-        if cmd == EditorCommand::OpenPalette {
-            cx.stop_propagation();
-            cx.emit(EditorPaneEvent::OpenPalette);
-            return;
-        }
-
-        // We are handling this key — tell GPUI so it returns YES to macOS.
-        // Without this, macOS falls through to [inputContext handleEvent:] which
-        // triggers a second insertion via the IME pipeline and doubles every character.
+    /// Execute a single `EditorCommand`: undo snapshot, apply, side effects.
+    fn execute_command(
+        &mut self,
+        cmd: EditorCommand,
+        cx: &mut Context<Self>,
+    ) {
+        // We are handling this key — tell GPUI so macOS doesn't double-insert.
         cx.stop_propagation();
 
-        // ── Auto-close / skip-over: Insert mode + delimiter key ───────────────
-        // Must come after stop_propagation (so macOS IME is suppressed) and
-        // before apply (so we can short-circuit the normal insert path).
+        // Auto-close / skip-over in Insert mode.
         if let EditorCommand::Insert(ref typed) = cmd {
             if self.state.mode == Mode::Insert && self.handle_auto_close(typed.clone()) {
                 self.update_viewport();
@@ -1580,8 +1199,7 @@ impl EditorPane {
             }
         }
 
-        // ── Smart backspace: delete both chars when cursor is between a pair ──
-        // `(|)` → Backspace → `` rather than leaving a dangling `)`.
+        // Smart backspace.
         if cmd == EditorCommand::DeleteCharBefore && self.state.mode == Mode::Insert {
             if self.handle_pair_backspace() {
                 self.update_viewport();
@@ -1593,12 +1211,10 @@ impl EditorPane {
 
         let mutating = is_buffer_mutating(&cmd);
 
-        // Snapshot before any mutating command.
         if mutating {
             self.push_undo();
         }
 
-        // Record the command for `.` repeat — but not RepeatLastChange itself.
         let record = if mutating && cmd != EditorCommand::RepeatLastChange {
             Some(cmd.clone())
         } else {
@@ -1609,18 +1225,15 @@ impl EditorPane {
         let (new_state, effect) = apply(cmd, prev_state, &mut self.buffer);
         self.state = new_state;
 
-        // Persist the last-change record after apply (so state is fresh).
         if let Some(c) = record {
             self.state.last_change = Some(vec![c]);
         }
 
         self.update_viewport();
 
-        // Update wikilink autocomplete after every Insert-mode change.
         if self.state.mode == Mode::Insert && mutating {
             self.check_wikilink_trigger(cx);
         } else if self.state.mode != Mode::Insert {
-            // Clear popup when leaving Insert mode.
             self.wikilink_complete = None;
         }
 
@@ -1636,6 +1249,35 @@ impl EditorPane {
             SideEffect::None => {
                 cx.notify();
             }
+        }
+    }
+
+    /// Perform undo (shared between Cmd-Z and keymap Undo).
+    fn do_undo(&mut self, cx: &mut Context<Self>) {
+        if let Some((text, pos)) = self.undo_history.pop() {
+            let redo_snap = (self.buffer.text(), self.state.cursor());
+            self.redo_history.push(redo_snap);
+            self.buffer = InMemoryBuffer::from_text(&text);
+            self.state.mode = Mode::Normal;
+            self.state.move_cursor_to(pos);
+            self.state.is_dirty = true;
+            self.update_viewport();
+            self.trigger_compile(cx);
+            cx.notify();
+        }
+    }
+
+    /// Perform redo (shared between Cmd-Shift-Z and keymap Redo).
+    fn do_redo(&mut self, cx: &mut Context<Self>) {
+        if let Some((text, pos)) = self.redo_history.pop() {
+            self.push_undo_keeping_redo();
+            self.buffer = InMemoryBuffer::from_text(&text);
+            self.state.mode = Mode::Normal;
+            self.state.move_cursor_to(pos);
+            self.state.is_dirty = true;
+            self.update_viewport();
+            self.trigger_compile(cx);
+            cx.notify();
         }
     }
 
@@ -1695,6 +1337,9 @@ impl Render for EditorPane {
 
         let front_matter_end = front_matter_end(&self.buffer, line_count);
 
+        // Compute matching bracket position (if cursor is on a bracket).
+        let bracket_match = find_bracket_match(&self.buffer, cursor);
+
         // Virtual rendering: only emit the lines visible in the current viewport.
         // This bounds element creation to O(VIEWPORT_LINES) regardless of document
         // length, keeping layout work constant as the file grows.
@@ -1747,9 +1392,20 @@ impl Render for EditorPane {
                     Some(DiagnosticSeverity::Warning) => d.severity.clone(),
                 }));
 
+            // Bracket match highlight: byte range on this line (if any).
+            let bracket_range: Option<(usize, usize)> = bracket_match
+                .filter(|m| m.line == i)
+                .map(|m| {
+                    let row = self.buffer.line(i);
+                    let end = m.col + row[m.col..].chars().next()
+                        .map(|c| c.len_utf8()).unwrap_or(1);
+                    (m.col, end)
+                });
+
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
-                lnm, line_count, &other_matches, focused_match, diag_sev, &t,
+                lnm, line_count, &other_matches, focused_match, diag_sev,
+                bracket_range, &t,
             ));
         }
 
@@ -1757,11 +1413,7 @@ impl Render for EditorPane {
         let word_count = self.buffer.text().split_whitespace().count();
         let word_count_label = format!("{} w", word_count);
 
-        let mode_label = match mode {
-            Mode::Insert => "INSERT",
-            Mode::Normal => "NORMAL",
-            Mode::Visual(_) => "VISUAL",
-        };
+        let mode_label = self.keymap.mode_label(&self.state).to_string();
         let mode_color = match mode {
             Mode::Insert => gpui::rgb(t.mode_insert),
             Mode::Normal => gpui::rgb(t.mode_normal),
@@ -2184,38 +1836,12 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<S
 }
 
 /// Map a `PendingOp` to the corresponding selection-operator `EditorCommand`.
-fn pending_op_to_command(op: PendingOp) -> EditorCommand {
+fn operator_kind_to_command(op: OperatorKind) -> EditorCommand {
     match op {
-        PendingOp::Delete => EditorCommand::DeleteSelection,
-        PendingOp::Change => EditorCommand::ChangeSelection,
-        PendingOp::Yank   => EditorCommand::YankSelection,
+        OperatorKind::Delete => EditorCommand::DeleteSelection,
+        OperatorKind::Change => EditorCommand::ChangeSelection,
+        OperatorKind::Yank   => EditorCommand::YankSelection,
     }
-}
-
-/// Map a key string to a single-key motion `EditorCommand` for operator+motion.
-///
-/// Returns `None` for keys that are not plain motions (e.g. `f`/`t` — those
-/// require a sub-character and are handled separately).
-fn operator_motion_from_key(key: &str) -> Option<EditorCommand> {
-    Some(match key {
-        "w" => EditorCommand::MoveWordForward,
-        "b" => EditorCommand::MoveWordBackward,
-        "e" => EditorCommand::MoveWordEnd,
-        "W" => EditorCommand::MoveWORDForward,
-        "B" => EditorCommand::MoveWORDBackward,
-        "E" => EditorCommand::MoveWORDEnd,
-        "h" => EditorCommand::MoveLeft,
-        "l" => EditorCommand::MoveRight,
-        "k" => EditorCommand::MoveUp,
-        "j" => EditorCommand::MoveDown,
-        "0" => EditorCommand::MoveStartOfLine,
-        "$" => EditorCommand::MoveEndOfLine,
-        "^" => EditorCommand::MoveFirstNonWhitespace,
-        "G" => EditorCommand::MoveEndOfDocument,
-        "{" => EditorCommand::MoveParagraphBack,
-        "}" => EditorCommand::MoveParagraphForward,
-        _ => return None,
-    })
 }
 
 /// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
@@ -2249,6 +1875,7 @@ fn render_line(
     other_matches: &[(usize, usize)],
     focused_match: Option<(usize, usize)>,
     diag_sev: Option<DiagnosticSeverity>,
+    bracket_range: Option<(usize, usize)>,
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -2319,6 +1946,10 @@ fn render_line(
         boundaries.push(s);
         boundaries.push(e);
     }
+    if let Some((s, e)) = bracket_range {
+        boundaries.push(s);
+        boundaries.push(e);
+    }
     // Keep only valid UTF-8 char boundaries inside the string.
     boundaries.retain(|&b| b <= text_len && text.is_char_boundary(b));
     boundaries.sort_unstable();
@@ -2330,11 +1961,13 @@ fn render_line(
         Mode::Normal   => gpui::rgb(t.mode_normal),
         Mode::Visual(_)=> gpui::rgb(t.mode_visual),
     };
-    let sel_bg        = gpui::rgb(t.ochre_dim);
+    let sel_bg           = gpui::rgb(t.ochre_dim);
     // Non-current match: translucent ochre tint.
-    let match_bg      = rgba(((t.ochre as u64) << 8 | 0x55) as u32);
+    let match_bg         = rgba(((t.ochre as u64) << 8 | 0x55) as u32);
     // Current (focused) match: solid ochre, inverted text.
-    let focused_bg    = gpui::rgb(t.ochre);
+    let focused_bg       = gpui::rgb(t.ochre);
+    // Matching bracket highlight.
+    let bracket_match_bg = gpui::rgb(t.bracket_match_bg);
 
     // ── Build segments ────────────────────────────────────────────────────────
     let mut segs: Vec<gpui::AnyElement> = Vec::new();
@@ -2374,6 +2007,8 @@ fn render_line(
             cell.text_color(gpui::rgb(t.cursor_fg)).bg(focused_bg)
         } else if other_matches.iter().any(|&(s, e)| s <= a && a < e) {
             cell.text_color(gpui::rgb(syn_fg)).bg(match_bg)
+        } else if bracket_range.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
+            cell.text_color(gpui::rgb(syn_fg)).bg(bracket_match_bg)
         } else if in_selection {
             cell.text_color(gpui::rgb(syn_fg)).bg(sel_bg)
         } else {
@@ -2429,212 +2064,6 @@ fn render_line(
 
 // ── Key translation ───────────────────────────────────────────────────────────
 
-fn keystroke_to_command(event: &KeyDownEvent, state: &EditorState) -> EditorCommand {
-    match state.mode {
-        Mode::Normal => key_normal(event),
-        Mode::Visual(_) => key_visual(event),
-        Mode::Insert => key_insert(event),
-    }
-}
-
-/// Normal-mode key → command.  Called with `pending_g = false` already handled
-/// in the caller for multi-key sequences like `gv` / `gg`.
-fn key_normal(event: &KeyDownEvent) -> EditorCommand {
-    use EditorCommand::*;
-    let k = &event.keystroke;
-
-    // Ctrl combos handled before the main guard so Ctrl-V can enter Visual Block.
-    if k.modifiers.control && !k.modifiers.platform {
-        return match k.key.as_str() {
-            "v" => EnterVisualBlock,
-            "d" => ScrollHalfDown,
-            "u" => ScrollHalfUp,
-            "f" => ScrollPageDown,
-            "b" => ScrollPageUp,
-            _ => Noop,
-        };
-    }
-    // Guard against remaining Cmd combos (handled in handle_key_down).
-    if k.modifiers.platform {
-        return Noop;
-    }
-    // `:` opens the command palette (Helix-mode convention, like Zed).
-    // Check key_char because GPUI reports the physical key name (";") in k.key,
-    // and the shifted character (":") in k.key_char.
-    if k.key_char.as_deref() == Some(":") || k.key == ":" {
-        return OpenPalette;
-    }
-    match k.key.as_str() {
-        "h" => MoveLeft,
-        "l" => MoveRight,
-        "k" => MoveUp,
-        "j" => MoveDown,
-        "w" => MoveWordForward,
-        "b" => MoveWordBackward,
-        "e" => MoveWordEnd,
-        "W" => MoveWORDForward,
-        "B" => MoveWORDBackward,
-        "E" => MoveWORDEnd,
-        "0" => MoveStartOfLine,
-        "$" => MoveEndOfLine,
-        "^" => MoveFirstNonWhitespace,
-        // `g` alone is handled as pending by the caller; single-g falls through to Noop.
-        "G" => MoveEndOfDocument,
-        // Collapse Visual selection (no-op in Normal, but consistent binding)
-        ";" => CollapseSelection,
-        "_" => TrimSelection,
-        // Insert-mode entry
-        "i" => EnterInsert,
-        "a" => AppendAfterCursor,
-        "I" => InsertLineStart,
-        "A" => InsertLineEnd,
-        "o" => OpenLineBelow,
-        "O" => OpenLineAbove,
-        // Delete / change
-        "d" => DeleteLine,           // `dd` equivalent: delete current line
-        "D" => DeleteToLineEnd,
-        "c" => ChangeLine,           // `cc` equivalent
-        "C" => ChangeToLineEnd,
-        // Yank / paste
-        "y" => YankLine,
-        "p" => PasteAfter,
-        "P" => PasteBefore,
-        // Helix-style: `x` selects the line, then `d` (mapped to DeleteSelection in visual) deletes it.
-        "x" => SelectCurrentLine,
-        // `X` extends the selection to include the line below (or selects the current line in Normal).
-        "X" => ExtendLineBelow,
-        // `R` replaces the current line with the yank register (register is not modified).
-        "R" => ReplaceWithYanked,
-        // `=` re-indents the current line to match the previous non-empty line.
-        "=" => AutoIndent,
-        // Visual-mode entry
-        "v" => EnterVisualChar,
-        "V" => EnterVisualLine,
-        // Indent / dedent (single-line, same key as visual-mode versions)
-        ">" => IndentLines,
-        "<" => DedentLines,
-        // Paragraph navigation
-        "{" => MoveParagraphBack,
-        "}" => MoveParagraphForward,
-        // Select whole file (Helix `%`)
-        "%" => SelectWholeFile,
-        // Switch case of char under cursor
-        "~" => SwitchCase,
-        // Repeat last change
-        "." => RepeatLastChange,
-        _ => Noop,
-    }
-}
-
-fn key_visual(event: &KeyDownEvent) -> EditorCommand {
-    use EditorCommand::*;
-    let k = &event.keystroke;
-    if k.modifiers.platform {
-        return Noop;
-    }
-    // Ctrl combos — Ctrl-V cycles back to Visual Block; Ctrl-d/u/f/b scroll.
-    if k.modifiers.control {
-        return match k.key.as_str() {
-            "v" => EnterVisualBlock,
-            "d" => ScrollHalfDown,
-            "u" => ScrollHalfUp,
-            "f" => ScrollPageDown,
-            "b" => ScrollPageUp,
-            _ => Noop,
-        };
-    }
-    // Alt combos in Visual mode.
-    if k.modifiers.alt {
-        return match k.key.as_str() {
-            // Alt-; flips the selection direction (swaps anchor and cursor).
-            ";" => FlipSelection,
-            _ => Noop,
-        };
-    }
-    match k.key.as_str() {
-        "escape" => EnterNormal,
-        // Operators on selection
-        "d" | "x" => DeleteSelection,
-        "y" => YankSelection,
-        "c" => ChangeSelection,
-        // Replace selection with yank register (register unchanged).
-        "R" => ReplaceWithYanked,
-        // Extend selection to include the next line below.
-        "X" => ExtendLineBelow,
-        // Re-indent selected lines to match the previous non-empty line.
-        "=" => AutoIndent,
-        // Indent / dedent and stay in visual
-        ">" => IndentLines,
-        "<" => DedentLines,
-        // Collapse selection to cursor endpoint, return to Normal.
-        ";" => CollapseSelection,
-        // Trim leading/trailing whitespace from the selection bounds.
-        "_" => TrimSelection,
-        // All motions extend the selection (anchor fixed, cursor moves).
-        "h" => MoveLeft,
-        "l" => MoveRight,
-        "j" => MoveDown,
-        "k" => MoveUp,
-        "w" => MoveWordForward,
-        "b" => MoveWordBackward,
-        "e" => MoveWordEnd,
-        "W" => MoveWORDForward,
-        "B" => MoveWORDBackward,
-        "E" => MoveWORDEnd,
-        "0" => MoveStartOfLine,
-        "$" => MoveEndOfLine,
-        "^" => MoveFirstNonWhitespace,
-        "G" => MoveEndOfDocument,
-        // Switch between visual modes without leaving visual
-        "v" => EnterVisualChar,
-        "V" => EnterVisualLine,
-        // Paragraph navigation (extends selection)
-        "{" => MoveParagraphBack,
-        "}" => MoveParagraphForward,
-        // Select whole file
-        "%" => SelectWholeFile,
-        // Switch case of selection
-        "~" => SwitchCase,
-        _ => Noop,
-    }
-}
-
-fn key_insert(event: &KeyDownEvent) -> EditorCommand {
-    use EditorCommand::*;
-    let k = &event.keystroke;
-    // Guard against Cmd combos (handled before reaching here).
-    if k.modifiers.platform {
-        return Noop;
-    }
-    // Ctrl combos in Insert mode.
-    if k.modifiers.control {
-        return match k.key.as_str() {
-            "w" => DeleteWordBefore,    // Ctrl-w: delete word before cursor
-            "u" => DeleteToLineStart,   // Ctrl-u: delete from line start to cursor
-            "k" => DeleteRestOfLine,    // Ctrl-k: delete from cursor to line end
-            "j" => InsertNewline,       // Ctrl-j: insert newline (same as Enter)
-            _ => Noop,
-        };
-    }
-    match k.key.as_str() {
-        "escape" => EnterNormal,
-        "backspace" => DeleteCharBefore,
-        "delete" => DeleteCharAt,
-        "enter" => InsertNewline,
-        "left" => MoveLeft,
-        "right" => MoveRight,
-        "up" => MoveUp,
-        "down" => MoveDown,
-        "home" => MoveStartOfLine,
-        "end" => MoveEndOfLine,
-        _ => {
-            if let Some(c) = &k.key_char {
-                return Insert(c.clone());
-            }
-            Noop
-        }
-    }
-}
 
 /// Returns true if the command will modify the buffer (used to decide whether
 /// to push an undo snapshot before applying).
@@ -2667,7 +2096,74 @@ fn is_buffer_mutating(cmd: &EditorCommand) -> bool {
             | AutoIndent
             | DeleteToLineStart
             | DeleteRestOfLine
+            | ToggleComment
     )
+}
+
+/// Find the position of the bracket matching the one at `cursor`.
+///
+/// Returns `None` if the character at the cursor is not a bracket or no
+/// matching bracket is found within the buffer.
+fn find_bracket_match(buf: &InMemoryBuffer, cursor: Pos) -> Option<Pos> {
+    use crate::editor::buffer::Buffer;
+    let line = buf.line(cursor.line);
+    if cursor.col >= line.len() {
+        return None;
+    }
+    let ch = line[cursor.col..].chars().next()?;
+    let (open, close, forward) = match ch {
+        '(' => ('(', ')', true),
+        ')' => ('(', ')', false),
+        '[' => ('[', ']', true),
+        ']' => ('[', ']', false),
+        '{' => ('{', '}', true),
+        '}' => ('{', '}', false),
+        _ => return None,
+    };
+
+    let line_count = buf.line_count();
+    let mut depth: i32 = 0;
+
+    if forward {
+        // Scan from cursor position forward.
+        let mut start_col = cursor.col;
+        for l in cursor.line..line_count {
+            let row = buf.line(l);
+            let scan_from = if l == cursor.line { start_col } else { 0 };
+            for (byte_idx, c) in row[scan_from..].char_indices() {
+                let col = scan_from + byte_idx;
+                if c == open  { depth += 1; }
+                else if c == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(Pos::new(l, col));
+                    }
+                }
+            }
+            start_col = 0;
+        }
+    } else {
+        // Scan from cursor position backward.
+        let mut end_col = cursor.col + ch.len_utf8();
+        for l in (0..=cursor.line).rev() {
+            let row = buf.line(l);
+            let scan_to = if l == cursor.line { end_col } else { row.len() };
+            let slice = &row[..scan_to];
+            // Collect char positions in reverse order.
+            let chars: Vec<(usize, char)> = slice.char_indices().collect();
+            for &(byte_idx, c) in chars.iter().rev() {
+                if c == close { depth += 1; }
+                else if c == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(Pos::new(l, byte_idx));
+                    }
+                }
+            }
+            end_col = row.len();
+        }
+    }
+    None
 }
 
 /// Convert a character index (as typed) to a byte offset, clamped to valid
@@ -2690,18 +2186,6 @@ fn insert_auto_close_pair(open: &str) -> Option<&'static str> {
         "{" => Some("}"),
         "\"" => Some("\""),
         "$" => Some("$"),
-        _ => None,
-    }
-}
-
-/// In Visual mode: return the closing delimiter for a surround operation.
-/// Only a subset of openers trigger surround (excludes `{` which is already
-/// bound to paragraph motion, and `$` which is bound to end-of-line).
-fn visual_surround_close(open: &str) -> Option<&'static str> {
-    match open {
-        "(" => Some(")"),
-        "[" => Some("]"),
-        "\"" => Some("\""),
         _ => None,
     }
 }
@@ -2825,7 +2309,12 @@ impl EditorPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::{buffer::InMemoryBuffer, command::EditorCommand};
+    use crate::editor::{
+        command::EditorCommand,
+        keymap::KeymapHandler,
+        keymap_helix::HelixKeymap,
+        state::Mode,
+    };
 
     fn make_key(key: &str) -> KeyDownEvent {
         use gpui::{Keystroke, Modifiers};
@@ -2841,32 +2330,46 @@ mod tests {
 
     #[test]
     fn insert_mode_printable_becomes_insert_command() {
-        let state = EditorState::new();
+        let mut km = HelixKeymap::new();
+        let mut state = EditorState::new();
+        state.mode = Mode::Insert;
         let event = make_key("a");
-        assert_eq!(key_insert(&event), EditorCommand::Insert("a".to_string()));
+        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::Insert(ref s)) if s == "a"));
     }
 
     #[test]
     fn escape_enters_normal_mode_command() {
+        let mut km = HelixKeymap::new();
+        let mut state = EditorState::new();
+        state.mode = Mode::Insert;
         let event = make_key("escape");
-        assert_eq!(key_insert(&event), EditorCommand::EnterNormal);
+        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::EnterNormal)));
     }
 
     #[test]
     fn normal_mode_h_is_move_left() {
+        let mut km = HelixKeymap::new();
+        let mut state = EditorState::new();
+        state.mode = Mode::Normal;
         let event = make_key("h");
-        assert_eq!(key_normal(&event), EditorCommand::MoveLeft);
+        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::MoveLeft)));
     }
 
     #[test]
     fn normal_mode_x_selects_line() {
+        let mut km = HelixKeymap::new();
+        let mut state = EditorState::new();
+        state.mode = Mode::Normal;
         let event = make_key("x");
-        assert_eq!(key_normal(&event), EditorCommand::SelectCurrentLine);
+        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::SelectCurrentLine)));
     }
 
     #[test]
     fn visual_mode_d_deletes_selection() {
+        let mut km = HelixKeymap::new();
+        let mut state = EditorState::new();
+        state.mode = Mode::Visual(VisualKind::Char);
         let event = make_key("d");
-        assert_eq!(key_visual(&event), EditorCommand::DeleteSelection);
+        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::DeleteSelection)));
     }
 }

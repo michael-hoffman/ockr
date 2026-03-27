@@ -49,8 +49,26 @@ pub fn apply<B: Buffer>(
 
         InsertNewline => {
             let pos = state.cursor();
+            // Smart indent: match previous line's leading whitespace.
+            let current_line = buf.line(pos.line).to_string();
+            let leading_ws: String = current_line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            // Extra indent if previous text (up to cursor) ends with an opener.
+            let before_cursor = &current_line[..pos.col.min(current_line.len())];
+            let extra = if before_cursor.trim_end().ends_with('{')
+                || before_cursor.trim_end().ends_with('[')
+                || before_cursor.trim_end().ends_with('(')
+            {
+                "  " // 2-space indent
+            } else {
+                ""
+            };
             buf.split_line(pos.line, pos.col);
-            state.move_cursor_to(Pos::new(pos.line + 1, 0));
+            let indent = format!("{}{}", leading_ws, extra);
+            let indent_len = indent.len();
+            if !indent.is_empty() {
+                buf.insert(pos.line + 1, 0, &indent);
+            }
+            state.move_cursor_to(Pos::new(pos.line + 1, indent_len));
             state.is_dirty = true;
             (state, BufferChanged)
         }
@@ -1095,6 +1113,34 @@ pub fn apply<B: Buffer>(
                 state.move_cursor_to(Pos::new(pos.line, prev));
             }
             (state, None)
+        }
+
+        // ── Toggle comment ─────────────────────────────────────────────────
+        ToggleComment => {
+            let (start_line, end_line) = visual_line_range(&state);
+            // Check if ALL non-empty lines in range are already commented.
+            let all_commented = (start_line..=end_line).all(|l| {
+                let s = buf.line(l);
+                s.trim().is_empty() || s.starts_with("// ")
+            });
+            for l in start_line..=end_line {
+                let s = buf.line(l).to_owned();
+                if s.trim().is_empty() {
+                    continue;
+                }
+                if all_commented {
+                    // Remove "// " prefix.
+                    if s.starts_with("// ") {
+                        buf.delete_range(l, 0, 3);
+                    }
+                } else {
+                    // Add "// " prefix.
+                    buf.insert(l, 0, "// ");
+                }
+            }
+            state.mode = Mode::Normal;
+            state.is_dirty = true;
+            (state, BufferChanged)
         }
 
         // OpenPalette is handled in the UI layer before reaching apply().

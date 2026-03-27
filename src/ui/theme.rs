@@ -53,6 +53,9 @@ pub struct ThemeFile {
     pub syntax_link: String,
     pub syntax_code: String,
     pub syntax_comment: String,
+
+    #[serde(default)]
+    pub bracket_match_bg: Option<String>,
 }
 
 // ── Runtime palette ───────────────────────────────────────────────────────────
@@ -96,6 +99,8 @@ pub struct ThemePalette {
     pub syntax_link: u32,
     pub syntax_code: u32,
     pub syntax_comment: u32,
+
+    pub bracket_match_bg: u32,
 }
 
 impl gpui::Global for ThemePalette {}
@@ -138,6 +143,10 @@ impl ThemePalette {
             syntax_link: hex(&f.syntax_link),
             syntax_code: hex(&f.syntax_code),
             syntax_comment: hex(&f.syntax_comment),
+            bracket_match_bg: f.bracket_match_bg
+                .as_deref()
+                .map(hex)
+                .unwrap_or(0x2A3B2A), // fallback: subtle dark-green
         }
     }
 
@@ -164,6 +173,12 @@ impl ThemePalette {
     pub fn oxide() -> Self {
         Self::from_toml(include_str!("../../themes/oxide.toml"))
             .expect("bundled Oxide theme must be valid")
+    }
+
+    /// The bundled Ochre (light) theme.
+    pub fn ochre() -> Self {
+        Self::from_toml(include_str!("../../themes/ochre.toml"))
+            .expect("bundled Ochre theme must be valid")
     }
 }
 

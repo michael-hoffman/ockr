@@ -42,3 +42,6 @@ syntax_math     = "#1D5EBF"   # deep blue — $inline$ and $block$ math
 syntax_link     = "#7C3AED"   # deep purple — [[wikilinks]]
 syntax_code     = "#0F766E"   # dark teal — `inline code`
 syntax_comment  = "#A09890"   # text_faint — // comments
+
+# ── Bracket match ──────────────────────────────────────────────────────────────
+bracket_match_bg = "#D8EDD8"   # subtle light-green highlight for matching bracket
