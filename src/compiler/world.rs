@@ -95,6 +95,14 @@ impl OckrWorld {
         self.source_cache.lock().unwrap().clear();
     }
 
+    /// Remove a single entry from the source import cache.
+    ///
+    /// Called before each compilation for any file that was saved to disk since
+    /// the last compile, so the compiler re-reads the updated content.
+    pub fn invalidate_source(&mut self, path: &Path) {
+        self.source_cache.lock().unwrap().remove(path);
+    }
+
     /// Update the plugin packages map (swapped each compile request).
     pub fn set_plugin_packages(&mut self, packages: Option<PluginPackages>) {
         self.plugin_packages = packages;

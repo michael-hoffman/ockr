@@ -47,5 +47,7 @@ actions!(
         LineNumbersRelative,
         LineNumbersAbsolute,
         LineNumbersOff,
+        // In-buffer search
+        OpenSearch,
     ]
 );

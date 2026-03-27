@@ -94,10 +94,20 @@ pub enum CompileResult {
 }
 
 /// A handle to the background compiler thread.
-/// Clone-able; all clones share the same underlying channel.
+///
+/// Clone-able; all clones share the same underlying channel and the same
+/// import-invalidation list.
 #[derive(Clone)]
 pub struct CompilerHandle {
     tx: std::sync::mpsc::SyncSender<CompileRequest>,
+    /// Paths whose source cache entry should be dropped before the next compile.
+    ///
+    /// Shared with the compiler thread. Populated by `invalidate_import` (called
+    /// on every file save) and drained by the compiler loop before each compile.
+    /// Using a shared list rather than embedding paths in `CompileRequest` means
+    /// the invalidation is always applied even when the triggering request loses
+    /// the debounce race to a newer one.
+    pending_invalidations: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl CompilerHandle {
@@ -108,6 +118,12 @@ impl CompilerHandle {
         // busy — the caller can retry or the debounce loop will pick up the
         // next change.
         let _ = self.tx.try_send(req);
+    }
+
+    /// Mark a vault file as saved so the compiler re-reads it on the next
+    /// compilation instead of serving the stale cached version.
+    pub fn invalidate_import(&self, path: PathBuf) {
+        self.pending_invalidations.lock().unwrap().push(path);
     }
 }
 
@@ -123,15 +139,17 @@ pub fn spawn_compiler_thread(
 ) -> CompilerHandle {
     // Bounded channel with capacity 1 — we only need the latest request.
     let (tx, rx) = std::sync::mpsc::sync_channel::<CompileRequest>(1);
+    let pending_invalidations = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+    let invalidations_for_thread = Arc::clone(&pending_invalidations);
 
     std::thread::Builder::new()
         .name("ockr-compiler".into())
         .spawn(move || {
-            compiler_loop(rx, on_result);
+            compiler_loop(rx, on_result, invalidations_for_thread);
         })
         .expect("failed to spawn compiler thread");
 
-    CompilerHandle { tx }
+    CompilerHandle { tx, pending_invalidations }
 }
 
 // ── Compiler loop ─────────────────────────────────────────────────────────────
@@ -139,6 +157,7 @@ pub fn spawn_compiler_thread(
 fn compiler_loop(
     rx: std::sync::mpsc::Receiver<CompileRequest>,
     on_result: impl Fn(CompileResult),
+    pending_invalidations: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 ) {
     let mut world = OckrWorld::new();
     let mut pending: Option<CompileRequest> = None;
@@ -162,6 +181,15 @@ fn compiler_loop(
         }
 
         let Some(req) = pending.take() else { continue };
+
+        // Drain any import invalidations accumulated since the last compile
+        // (e.g. the user saved a shared template in another tab).
+        {
+            let mut list = pending_invalidations.lock().unwrap();
+            for path in list.drain(..) {
+                world.invalidate_source(&path);
+            }
+        }
 
         // Apply request to the world.
         if let Some(root) = req.vault_root {

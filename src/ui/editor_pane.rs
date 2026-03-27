@@ -49,7 +49,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px, rgba,
 };
 
-use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, SaveFile};
+use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenSearch, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PluginPackages, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
@@ -451,6 +451,13 @@ impl EditorPane {
         let _ = std::fs::write(&path, &content);
         self.state.is_dirty = false;
 
+        // Tell the compiler to drop this file's source cache entry so any
+        // other file that imports it will pick up the updated content on the
+        // next compilation rather than serving the stale cached version.
+        if let Some(ref compiler) = self.compiler {
+            compiler.invalidate_import(path.clone());
+        }
+
         // Incrementally update the backlink index for this file.
         if let Some(vault) = &self.vault {
             if let Some(rel) = &self.file_rel_path {
@@ -784,13 +791,6 @@ impl EditorPane {
         let k = &event.keystroke;
 
         // ── Global shortcuts handled before the state machine ─────────────
-        // Cmd-S: save (also bound as GPUI action but catching here for robustness).
-        if k.modifiers.platform && k.key == "s" {
-            self.save(cx);
-            cx.notify();
-            return;
-        }
-
         // Cmd-Z: undo (macOS convention — works in all modes).
         if k.modifiers.platform && k.key == "z" && !k.modifiers.shift {
             if let Some((text, pos)) = self.undo_history.pop() {
@@ -1153,6 +1153,17 @@ impl EditorPane {
 
         let cmd = keystroke_to_command(event, &self.state);
         if cmd == EditorCommand::Noop {
+            // ── Surround: Visual mode + opening delimiter wraps selection ─────
+            if matches!(self.state.mode, Mode::Visual(_))
+                && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt
+            {
+                if let Some(typed) = k.key_char.as_deref() {
+                    if let Some(close) = visual_surround_close(typed) {
+                        self.apply_surround(typed, close, cx);
+                        return;
+                    }
+                }
+            }
             return;
         }
 
@@ -1170,6 +1181,29 @@ impl EditorPane {
         // Without this, macOS falls through to [inputContext handleEvent:] which
         // triggers a second insertion via the IME pipeline and doubles every character.
         cx.stop_propagation();
+
+        // ── Auto-close / skip-over: Insert mode + delimiter key ───────────────
+        // Must come after stop_propagation (so macOS IME is suppressed) and
+        // before apply (so we can short-circuit the normal insert path).
+        if let EditorCommand::Insert(ref typed) = cmd {
+            if self.state.mode == Mode::Insert && self.handle_auto_close(typed.clone()) {
+                self.update_viewport();
+                self.trigger_compile(cx);
+                cx.notify();
+                return;
+            }
+        }
+
+        // ── Smart backspace: delete both chars when cursor is between a pair ──
+        // `(|)` → Backspace → `` rather than leaving a dangling `)`.
+        if cmd == EditorCommand::DeleteCharBefore && self.state.mode == Mode::Insert {
+            if self.handle_pair_backspace() {
+                self.update_viewport();
+                self.trigger_compile(cx);
+                cx.notify();
+                return;
+            }
+        }
 
         let mutating = is_buffer_mutating(&cmd);
 
@@ -1489,6 +1523,10 @@ impl Render for EditorPane {
             .bg(gpui::rgb(t.bg_panel))
             .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
                 this.save(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenSearch, _window, cx| {
+                this.open_search(false);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| {
@@ -2147,6 +2185,149 @@ fn byte_offset_for_char(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+// ── Delimiter helpers ─────────────────────────────────────────────────────────
+
+/// In Insert mode: return the closing delimiter to auto-insert after `open`.
+/// Returns `None` if no auto-close should apply for this character.
+fn insert_auto_close_pair(open: &str) -> Option<&'static str> {
+    match open {
+        "(" => Some(")"),
+        "[" => Some("]"),
+        "{" => Some("}"),
+        "\"" => Some("\""),
+        "$" => Some("$"),
+        _ => None,
+    }
+}
+
+/// In Visual mode: return the closing delimiter for a surround operation.
+/// Only a subset of openers trigger surround (excludes `{` which is already
+/// bound to paragraph motion, and `$` which is bound to end-of-line).
+fn visual_surround_close(open: &str) -> Option<&'static str> {
+    match open {
+        "(" => Some(")"),
+        "[" => Some("]"),
+        "\"" => Some("\""),
+        _ => None,
+    }
+}
+
+impl EditorPane {
+    /// Smart backspace: when the cursor is directly between an auto-inserted
+    /// pair with nothing in between (e.g. `(|)`), delete both delimiters.
+    ///
+    /// Returns `true` if the pair was deleted (caller should skip normal apply).
+    /// Returns `false` if the cursor is not between a matching pair — the
+    /// caller then falls through to the regular `DeleteCharBefore` path.
+    fn handle_pair_backspace(&mut self) -> bool {
+        let cursor = self.state.cursor();
+        if cursor.col == 0 { return false; }
+
+        let line = self.buffer.line(cursor.line).to_string();
+
+        // Character immediately before the cursor (the potential opener).
+        let before = line.get(..cursor.col)
+            .and_then(|s| s.chars().last())
+            .map(|c| c.to_string());
+        // Character at the cursor (the potential closer).
+        let at = line.get(cursor.col..)
+            .and_then(|s| s.chars().next())
+            .map(|c| c.to_string());
+
+        let Some(open) = before else { return false };
+        let Some(close_at_cursor) = at else { return false };
+
+        // Only fire when open + close form a recognised pair.
+        if insert_auto_close_pair(&open) != Some(close_at_cursor.as_str()) {
+            return false;
+        }
+
+        self.push_undo();
+        // Delete open and close in one range: [cursor.col-open.len(), cursor.col+close.len())
+        let del_start = cursor.col - open.len();
+        let del_end   = cursor.col + close_at_cursor.len();
+        self.buffer.delete_range(cursor.line, del_start, del_end);
+        self.state.move_cursor_to(Pos::new(cursor.line, del_start));
+        self.state.is_dirty = true;
+        true
+    }
+
+    /// Auto-close or skip-over a delimiter in Insert mode.
+    ///
+    /// Returns `true` if the keystroke was handled (caller should skip the
+    /// normal `apply` path and call `trigger_compile` + `notify` instead).
+    ///
+    /// **Skip-over:** if the cursor is sitting on the exact character that was
+    /// typed (e.g. the auto-inserted `)`) and that character is a closing
+    /// delimiter, move the cursor past it without inserting.
+    ///
+    /// **Auto-close:** for opening delimiters, insert the pair and place the
+    /// cursor between them.
+    fn handle_auto_close(&mut self, typed: String) -> bool {
+        let cursor = self.state.cursor();
+        let line_text = self.buffer.line(cursor.line).to_string();
+
+        // Check the character currently at the cursor position.
+        let char_at_cursor = line_text.get(cursor.col..)
+            .and_then(|s| s.get(..typed.len()))
+            .map(str::to_string);
+
+        // Skip-over: close delimiters (and symmetric delimiters like " and $)
+        // when the auto-inserted closing char is already there.
+        let is_close = matches!(typed.as_str(), ")" | "]" | "}" | "\"" | "$");
+        if is_close && char_at_cursor.as_deref() == Some(typed.as_str()) {
+            self.state.move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
+            return true; // no buffer change, no undo snapshot needed
+        }
+
+        // Auto-close: insert the pair and place cursor between them.
+        if let Some(close) = insert_auto_close_pair(&typed) {
+            self.push_undo();
+            self.buffer.insert(cursor.line, cursor.col, &format!("{}{}", typed, close));
+            self.state.move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
+            self.state.is_dirty = true;
+            return true;
+        }
+
+        false
+    }
+
+    /// Wrap the current Visual selection in `open` + `close` delimiters.
+    ///
+    /// Inserts `close` after the selection end first, then `open` before the
+    /// start, so the end-position byte offset isn't perturbed by the first
+    /// insertion when both are on the same line.  Exits Visual mode and
+    /// positions the cursor on the closing delimiter.
+    fn apply_surround(&mut self, open: &str, close: &str, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.push_undo();
+
+        let start = self.state.selection.start();
+        let end   = self.state.selection.end();
+
+        // Insert close first (at the character after the selection end).
+        self.buffer.insert(end.line, end.col + 1, close);
+        // Insert open at the selection start (offsets only shift on the same line).
+        self.buffer.insert(start.line, start.col, open);
+
+        // The closing delimiter's final column accounts for the open insertion
+        // shifting everything on the same line.
+        let close_col = if end.line == start.line {
+            end.col + 1 + open.len()
+        } else {
+            end.col + 1
+        };
+
+        self.state.mode = Mode::Normal;
+        self.state.move_cursor_to(Pos::new(end.line, close_col));
+        self.state.is_dirty = true;
+
+        self.update_viewport();
+        self.trigger_compile(cx);
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

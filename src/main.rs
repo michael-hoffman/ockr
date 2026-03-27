@@ -104,6 +104,7 @@ fn main() {
             KeyBinding::new("cmd-alt-h", TogglePreviewMode, None),
             KeyBinding::new("cmd-shift-e", ExportPdf, None),
             KeyBinding::new("cmd-shift-g", OpenGraphView, None),
+            KeyBinding::new("cmd-f", OpenSearch, None),
         ]);
 
         // App-level action handlers.
