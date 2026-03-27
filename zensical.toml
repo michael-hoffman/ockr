@@ -1,0 +1,6 @@
+[project]
+name = "ockr"
+description = "A fast, modal Typst note editor."
+
+[docs]
+docs_dir = "docs"
