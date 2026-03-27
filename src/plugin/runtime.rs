@@ -52,7 +52,7 @@ pub struct CapabilitiesJson {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginMetadataJson {
     pub id: String,
-    #[allow(dead_code)] pub name: String,
+    pub name: String,
     pub version: String,
     #[serde(default)]
     pub capabilities: CapabilitiesJson,
@@ -66,6 +66,8 @@ pub struct PluginData {
     pub event_tx: mpsc::Sender<PluginEvent>,
     /// Shared map written by `ockr_register_package`; keyed by `"@plugin/<name>/..."`.
     pub plugin_packages: Arc<RwLock<HashMap<String, String>>>,
+    /// Whether this plugin may make outbound HTTP requests.
+    pub network_enabled: bool,
 }
 
 // ── Memory helpers ────────────────────────────────────────────────────────────
@@ -145,6 +147,7 @@ impl PluginInstance {
             plugin_id: plugin_id.to_string(),
             event_tx: event_tx.clone(),
             plugin_packages,
+            network_enabled: capabilities.network,
         };
         let mut store = Store::new(engine, plugin_data);
 
@@ -252,6 +255,60 @@ impl PluginInstance {
                         guard.insert(key, source);
                     }
                     0
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        // ockr_http_get(url_p, url_l) -> i32
+        // Returns number of bytes written into the plugin's HTTP_BUF, or -1 on error.
+        // Only performs actual network I/O if the plugin declared the `network` capability.
+        linker
+            .func_wrap(
+                "env",
+                "ockr_http_get",
+                |mut caller: Caller<PluginData>, url_p: i32, url_l: i32| -> i32 {
+                    if !caller.data().network_enabled {
+                        return -1;
+                    }
+                    // Read URL out of WASM memory (borrow released after block).
+                    let url = {
+                        let Some(mem) = caller_memory(&mut caller) else { return -1; };
+                        match wasm_str(&mem, &caller, url_p, url_l) {
+                            Some(u) => u,
+                            None => return -1,
+                        }
+                    };
+                    // Blocking HTTP GET — acceptable because plugins run on the thread pool.
+                    let body_bytes = match reqwest::blocking::get(&url)
+                        .and_then(|r| r.bytes())
+                    {
+                        Ok(b) => b,
+                        Err(_) => return -1,
+                    };
+                    let write_len = body_bytes.len().min(65535);
+                    // Ask the plugin where its HTTP response buffer lives.
+                    let buf_ptr: i32 = {
+                        let export = caller.get_export("ockr_http_buf_ptr");
+                        let func = match export {
+                            Some(Extern::Func(f)) => f,
+                            _ => return -1,
+                        };
+                        let typed = match func.typed::<(), i32>(&caller) {
+                            Ok(tf) => tf,
+                            Err(_) => return -1,
+                        };
+                        match typed.call(&mut caller, ()) {
+                            Ok(p) => p,
+                            Err(_) => return -1,
+                        }
+                    };
+                    if buf_ptr < 0 { return -1; }
+                    // Write response body into WASM linear memory.
+                    let Some(mem) = caller_memory(&mut caller) else { return -1; };
+                    if mem.write(&mut caller, buf_ptr as usize, &body_bytes[..write_len]).is_err() {
+                        return -1;
+                    }
+                    write_len as i32
                 },
             )
             .map_err(|e| e.to_string())?;

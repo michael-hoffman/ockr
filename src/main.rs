@@ -261,6 +261,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
         ("export-pdf",           "Export PDF",                       Some("Cmd-Shift-E")),
         ("open-graph-view",      "Graph View",                       Some("Cmd-Shift-G")),
+        ("open-plugin-manager",  "Plugin Manager",                   None),
         // Editor display
         ("line-numbers-relative", "Line Numbers: Relative",          Some(":set nu rel")),
         ("line-numbers-absolute", "Line Numbers: Absolute",          Some(":set nu abs")),

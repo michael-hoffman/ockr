@@ -20,6 +20,10 @@ extern "C" {
         la_p: i32, la_l: i32,
     ) -> i32;
     fn ockr_register_package(name_p: i32, name_l: i32, src_p: i32, src_l: i32) -> i32;
+    /// Fetch `url` via HTTP GET. Response body is written into `HTTP_BUF`.
+    /// Returns the number of bytes written, or -1 if the request failed or
+    /// the plugin does not have the `network` capability.
+    fn ockr_http_get(url_p: i32, url_l: i32) -> i32;
 }
 
 // ── Safe wrappers ─────────────────────────────────────────────────────────────
@@ -65,6 +69,31 @@ pub fn register_panel(id: &str, title: &str, position: &str, layout_json: &str) 
             layout_json.as_ptr() as i32,  layout_json.len() as i32,
         );
     }
+}
+
+/// Perform an HTTP GET request for `url`.
+///
+/// Requires the `network` capability. Returns the response body as a `String`
+/// on success, or `None` if the request failed or the capability is not granted.
+pub fn http_get(url: &str) -> Option<String> {
+    let len = unsafe { ockr_http_get(url.as_ptr() as i32, url.len() as i32) };
+    if len < 0 {
+        return None;
+    }
+    let bytes = unsafe { &HTTP_BUF[..len as usize] };
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+// ── HTTP response buffer ──────────────────────────────────────────────────────
+// The host writes HTTP response bytes here; sdk wrapper reads them back.
+
+static mut HTTP_BUF: [u8; 65536] = [0u8; 65536];
+
+/// Returns the pointer to the HTTP response buffer.
+/// Called by the host after `ockr_http_get` to locate where it should write.
+#[no_mangle]
+pub extern "C" fn ockr_http_buf_ptr() -> i32 {
+    unsafe { HTTP_BUF.as_ptr() as i32 }
 }
 
 // ── Memory allocation export ──────────────────────────────────────────────────

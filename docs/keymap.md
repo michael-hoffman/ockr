@@ -273,3 +273,4 @@ Open with `:` or `Cmd-P`. A `:<hint>` shows the Helix ex-command equivalent.
 | `reload` | Reload current file from disk | `:e` |
 | `open-search` | Open forward search bar | `Cmd-F` |
 | `open-replace` | Open find-and-replace bar | `Cmd-H` |
+| `open-plugin-manager` | Plugin manager (installed plugins + status) | — |

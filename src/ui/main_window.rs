@@ -39,8 +39,8 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile, SaveFileAndQuit,
-    SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
+    OpenPluginManager, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
@@ -58,10 +58,11 @@ use crate::ui::preview::{PreviewEvent, PreviewPane};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::command::CommandEntry;
 use crate::plugin::loader::load_vault_plugins;
-use crate::plugin::registry::PluginRegistry;
-use crate::plugin::runtime::{PluginEvent, PluginInstance};
+use crate::plugin::registry::{PluginInfo, PluginRegistry, PluginStatus};
+use crate::plugin::runtime::{PluginEvent, PluginInstance, PluginMetadataJson};
 use crate::plugin::thread_pool::{PluginJob, PluginThreadPool};
 use crate::ui::plugin_panel::{PluginPanel, PluginPanelEvent};
+use crate::ui::plugin_manager::{PluginManager, PluginManagerEvent};
 use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
 
@@ -177,6 +178,10 @@ pub struct MainWindow {
     plugin_panel: Option<gpui::Entity<PluginPanel>>,
     /// True when `plugin_panel` was just (re)created and needs focus on next render.
     plugin_panel_focus_pending: bool,
+    /// Currently visible plugin manager overlay, if any.
+    plugin_manager: Option<gpui::Entity<PluginManager>>,
+    /// True when `plugin_manager` was just created and needs focus on next render.
+    plugin_manager_focus_pending: bool,
 }
 
 impl MainWindow {
@@ -226,12 +231,20 @@ impl MainWindow {
         cx.set_global(PluginRegistry::new());
 
         // Load plugins already installed in the vault (probe caps, then real instance).
-        let plugin_instances = Self::instantiate_vault_plugins(
+        let (plugin_instances, plugin_info) = Self::instantiate_vault_plugins(
             &wasmtime_engine,
             vault.read(cx).root.as_deref(),
             cx.global::<PluginRegistry>().event_tx.clone(),
             Arc::clone(&plugin_packages),
         );
+        // Persist metadata and status in the registry for the plugin manager.
+        {
+            let reg = cx.global_mut::<PluginRegistry>();
+            for (meta, status) in plugin_info {
+                reg.mark_loaded(PluginInfo::from(&meta));
+                reg.plugin_statuses.insert(meta.id, status);
+            }
+        }
 
         // Spawn a 100ms polling task to drain plugin events onto the UI thread.
         cx.spawn(async move |this, cx| {
@@ -371,6 +384,8 @@ impl MainWindow {
             wasmtime_engine,
             plugin_panel: None,
             plugin_panel_focus_pending: false,
+            plugin_manager: None,
+            plugin_manager_focus_pending: false,
             html_link_sender: link_tx,
         }
     }
@@ -1173,6 +1188,7 @@ impl MainWindow {
             "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
             "close-pane" => cx.dispatch_action(&ClosePane),
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
+            "open-plugin-manager" => cx.dispatch_action(&OpenPluginManager),
             "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
             "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
             "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
@@ -1209,37 +1225,56 @@ impl MainWindow {
     // ── Plugin helpers ────────────────────────────────────────────────────────
 
     /// Probe capabilities from WASM metadata, then instantiate with real caps.
+    ///
+    /// Returns both the live instances and a list of `(metadata, status)` pairs
+    /// so the caller can update `PluginRegistry` on the UI thread.
     fn instantiate_vault_plugins(
         engine: &wasmtime::Engine,
         vault_root: Option<&std::path::Path>,
         event_tx: std::sync::mpsc::Sender<PluginEvent>,
         plugin_packages: Arc<RwLock<HashMap<String, String>>>,
-    ) -> HashMap<String, Arc<Mutex<PluginInstance>>> {
+    ) -> (
+        HashMap<String, Arc<Mutex<PluginInstance>>>,
+        Vec<(PluginMetadataJson, PluginStatus)>,
+    ) {
         let mut instances = HashMap::new();
-        let Some(root) = vault_root else { return instances; };
+        let mut info_out: Vec<(PluginMetadataJson, PluginStatus)> = Vec::new();
+        let Some(root) = vault_root else { return (instances, info_out); };
         for (entry, wasm) in load_vault_plugins(root) {
             // 1. Probe metadata to learn actual capabilities.
-            let caps = PluginInstance::probe_metadata(engine, &wasm)
-                .map(|m| m.capabilities)
-                .unwrap_or_default();
+            let meta = match PluginInstance::probe_metadata(engine, &wasm) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[ockr] failed to read metadata for '{}': {}", entry.id, e);
+                    continue;
+                }
+            };
+            let caps = meta.capabilities.clone();
             // 2. Create real instance with proper WASI capabilities.
             match PluginInstance::new(
                 engine,
                 &wasm,
-                &entry.id,
+                &meta.id,
                 &caps,
                 root,
                 event_tx.clone(),
                 Arc::clone(&plugin_packages),
             ) {
                 Ok(mut inst) => {
-                    let _ = inst.init();
-                    instances.insert(entry.id, Arc::new(Mutex::new(inst)));
+                    let status = match inst.init() {
+                        Ok(_) => PluginStatus::Loaded,
+                        Err(e) => PluginStatus::Failed(format!("init failed: {e}")),
+                    };
+                    info_out.push((meta.clone(), status));
+                    instances.insert(meta.id, Arc::new(Mutex::new(inst)));
                 }
-                Err(e) => eprintln!("[ockr] failed to load plugin '{}': {}", entry.id, e),
+                Err(e) => {
+                    eprintln!("[ockr] failed to load plugin '{}': {}", meta.id, e);
+                    info_out.push((meta, PluginStatus::Failed(e)));
+                }
             }
         }
-        instances
+        (instances, info_out)
     }
 
     /// Unload all plugins from the old vault and load from the new vault root.
@@ -1256,15 +1291,8 @@ impl MainWindow {
         };
         cx.global_mut::<crate::command::CommandRegistry>()
             .remove_where(|e| commands_to_remove.contains(&e.id));
-        // Clear registry maps.
-        {
-            let reg = cx.global_mut::<PluginRegistry>();
-            for pid in &old_ids {
-                reg.plugin_commands.remove(pid);
-                reg.plugin_panels.remove(pid);
-            }
-            reg.command_to_plugin.retain(|_, v| !old_ids.contains(v));
-        }
+        // Clear registry maps (including metadata / status).
+        cx.global_mut::<PluginRegistry>().remove_plugins(&old_ids);
         // Clear plugin_packages contributed by old plugins.
         if let Ok(mut guard) = self.plugin_packages.write() {
             guard.clear();
@@ -1275,12 +1303,20 @@ impl MainWindow {
         // Load from new vault.
         let vault_root = self.vault.read(cx).root.clone();
         let event_tx = cx.global::<PluginRegistry>().event_tx.clone();
-        self.plugin_instances = Self::instantiate_vault_plugins(
+        let (new_instances, plugin_info) = Self::instantiate_vault_plugins(
             &self.wasmtime_engine,
             vault_root.as_deref(),
             event_tx,
             Arc::clone(&self.plugin_packages),
         );
+        self.plugin_instances = new_instances;
+        {
+            let reg = cx.global_mut::<PluginRegistry>();
+            for (meta, status) in plugin_info {
+                reg.mark_loaded(PluginInfo::from(&meta));
+                reg.plugin_statuses.insert(meta.id, status);
+            }
+        }
 
         // Push plugin_packages to all open editors.
         for pane in &self.panes {
@@ -1326,6 +1362,7 @@ impl MainWindow {
                 }
                 PluginEvent::Panicked { plugin_id, message } => {
                     self.export_status = Some(format!("[plugin error] {plugin_id}: {message}"));
+                    cx.global_mut::<PluginRegistry>().mark_failed(&plugin_id, message);
                 }
             }
         }
@@ -1355,6 +1392,47 @@ impl MainWindow {
         .detach();
         self.plugin_panel = Some(entity);
         self.plugin_panel_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Open (or close) the plugin manager overlay.
+    fn open_plugin_manager(
+        &mut self,
+        _: &OpenPluginManager,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.plugin_manager.is_some() {
+            self.plugin_manager = None;
+            cx.notify();
+            return;
+        }
+        // Build a snapshot of current plugin info + status.
+        let reg = cx.global::<PluginRegistry>();
+        let plugins: Vec<(PluginInfo, PluginStatus)> = reg.plugin_info
+            .values()
+            .map(|info| {
+                let status = reg.plugin_statuses
+                    .get(&info.id)
+                    .cloned()
+                    .unwrap_or(PluginStatus::Loaded);
+                (info.clone(), status)
+            })
+            .collect();
+        let _ = reg;
+
+        let entity = cx.new(|cx| PluginManager::new(plugins, cx));
+        cx.subscribe(&entity, |this, _, event: &PluginManagerEvent, cx| {
+            match event {
+                PluginManagerEvent::Close => {
+                    this.plugin_manager = None;
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        self.plugin_manager = Some(entity);
+        self.plugin_manager_focus_pending = true;
         cx.notify();
     }
 
@@ -1529,6 +1607,14 @@ impl Render for MainWindow {
             self.plugin_panel_focus_pending = false;
         }
 
+        // Focus the plugin manager if it was just created.
+        if self.plugin_manager_focus_pending {
+            if let Some(ref pm) = self.plugin_manager {
+                pm.read(cx).focus_handle.clone().focus(window);
+            }
+            self.plugin_manager_focus_pending = false;
+        }
+
         // ── Window dimensions ─────────────────────────────────────────────────
         // Use GPUI's viewport_size — always current, never stale, no AppKit query needed.
         let vp = window.viewport_size();
@@ -1597,6 +1683,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::buffer_next))
             .on_action(cx.listener(Self::buffer_prev))
             .on_action(cx.listener(Self::buffer_close_tab))
+            .on_action(cx.listener(Self::open_plugin_manager))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 
@@ -1807,6 +1894,9 @@ impl Render for MainWindow {
             })
             .when_some(self.plugin_panel.clone(), |root, pp| {
                 root.child(gpui::deferred(pp).with_priority(150))
+            })
+            .when_some(self.plugin_manager.clone(), |root, pm| {
+                root.child(gpui::deferred(pm).with_priority(160))
             })
     }
 }

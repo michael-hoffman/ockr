@@ -50,5 +50,7 @@ actions!(
         // In-buffer search / replace
         OpenSearch,
         OpenReplace,
+        // Plugin management
+        OpenPluginManager,
     ]
 );
