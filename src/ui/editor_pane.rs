@@ -50,7 +50,7 @@ use gpui::{
 };
 
 use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenReplace, OpenSearch, SaveFile};
-use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, PluginPackages, PreviewMode};
+use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -160,6 +160,10 @@ impl EventEmitter<EditorPaneEvent> for EditorPane {}
 /// pending at a time; starting a new sequence always cancels any prior one.
 ///
 /// Extending for text objects (Story 20) means adding variants here rather
+/// The operator half of a vim-style operator-motion sequence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PendingOp { Delete, Change, Yank }
+
 /// than bolting on more boolean flags.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum PendingKey {
@@ -185,6 +189,16 @@ enum PendingKey {
     TillChar,
     /// `T` pressed; awaiting the target character (`T<c>`).
     TillCharBack,
+    /// `d`/`c`/`y` pressed in Normal mode; awaiting the motion / object key.
+    Operator(PendingOp),
+    /// `d/c/y` + `i` pressed; awaiting text-object character.
+    OpInner(PendingOp),
+    /// `d/c/y` + `a` pressed; awaiting text-object character.
+    OpAround(PendingOp),
+    /// `d/c/y` + `t` pressed; awaiting target character for till-forward.
+    OpTill(PendingOp),
+    /// `d/c/y` + `f` pressed; awaiting target character for find-forward.
+    OpFind(PendingOp),
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
@@ -233,6 +247,12 @@ pub struct EditorPane {
     /// `viewport_top .. viewport_top + VIEWPORT_LINES`, keeping the element
     /// tree small for large files.
     viewport_top: usize,
+    /// Diagnostics from the most recent typst compilation.
+    ///
+    /// Cleared on a successful compile; updated with `set_diagnostics` when
+    /// the compiler returns errors or warnings.  Used to render per-line
+    /// indicator gutter marks.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl EditorPane {
@@ -257,7 +277,18 @@ impl EditorPane {
             plugin_packages: None,
             compile_sequence: 0,
             viewport_top: 0,
+            diagnostics: Vec::new(),
         }
+    }
+
+    /// Update the per-line diagnostic underlines after a compile error.
+    pub fn set_diagnostics(&mut self, diags: Vec<Diagnostic>) {
+        self.diagnostics = diags;
+    }
+
+    /// Clear diagnostics (called after a successful compile).
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics.clear();
     }
 
     pub fn set_vault(&mut self, vault: Entity<VaultState>) {
@@ -771,6 +802,101 @@ impl EditorPane {
         cx.notify();
     }
 
+    // ── Operator-motion helpers ───────────────────────────────────────────────
+
+    /// Extract the word under the cursor for `*` / `#` search.
+    ///
+    /// Expands from the cursor position left and right along the same character
+    /// class (alphanumeric+underscore = word; anything else = symbolic).
+    /// Returns `None` when the cursor is on whitespace.
+    fn word_under_cursor(&self) -> Option<String> {
+        let cursor = self.state.cursor();
+        let line = self.buffer.line(cursor.line);
+        if line.is_empty() {
+            return None;
+        }
+        let col = cursor.col.min(line.len().saturating_sub(1));
+        let chars: Vec<char> = line.chars().collect();
+        // Convert byte offset to char index.
+        let char_idx = line[..col].chars().count();
+        let char_idx = char_idx.min(chars.len().saturating_sub(1));
+        let ch = chars[char_idx];
+        if ch.is_whitespace() {
+            return None;
+        }
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+        let same_class = |c: char| is_word_char(c) == is_word_char(ch);
+        let mut start = char_idx;
+        while start > 0 && same_class(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = char_idx;
+        while end + 1 < chars.len() && same_class(chars[end + 1]) {
+            end += 1;
+        }
+        Some(chars[start..=end].iter().collect())
+    }
+
+    /// Apply an operator (`d`/`c`/`y`) after extending a selection via `motion`.
+    ///
+    /// Temporarily enters Visual-Char mode so that applying the motion command
+    /// extends the selection from the current cursor position, then applies the
+    /// operator on the resulting range.
+    fn apply_operator_motion(
+        &mut self,
+        op: PendingOp,
+        motion: EditorCommand,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo();
+        // Enter visual-char with a collapsed selection at the cursor.
+        let cursor = self.state.cursor();
+        self.state.mode = Mode::Visual(VisualKind::Char);
+        self.state.selection = Selection { anchor: cursor, cursor };
+        // In Visual mode, motion commands call `extend_selection_to` internally.
+        let prev = std::mem::take(&mut self.state);
+        let (sel_state, _) = apply(motion, prev, &mut self.buffer);
+        self.state = sel_state;
+        // Now apply the operator on the selection.
+        let op_cmd = pending_op_to_command(op);
+        let prev2 = std::mem::take(&mut self.state);
+        let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
+        self.state = new_state;
+        if effect == SideEffect::BufferChanged {
+            self.trigger_compile(cx);
+        }
+        self.update_viewport();
+        cx.notify();
+    }
+
+    /// Apply an operator (`d`/`c`/`y`) on a text object (inner or around).
+    fn apply_operator_object(
+        &mut self,
+        op: PendingOp,
+        inner: bool,
+        kind: TextObjectKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo();
+        // SelectObject enters Visual mode with the object range selected.
+        let prev = std::mem::take(&mut self.state);
+        let (sel_state, _) =
+            apply(EditorCommand::SelectObject { inner, kind }, prev, &mut self.buffer);
+        self.state = sel_state;
+        // Only act if a selection was actually made.
+        if matches!(self.state.mode, Mode::Visual(_)) {
+            let op_cmd = pending_op_to_command(op);
+            let prev2 = std::mem::take(&mut self.state);
+            let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
+            self.state = new_state;
+            if effect == SideEffect::BufferChanged {
+                self.trigger_compile(cx);
+            }
+        }
+        self.update_viewport();
+        cx.notify();
+    }
+
     // ── Wikilink autocomplete ─────────────────────────────────────────────────
 
     /// Check if the cursor is inside an open `[[…` span and update the popup.
@@ -1188,6 +1314,123 @@ impl EditorPane {
             return;
         }
 
+        // ── operator + text-object (OpInner / OpAround) ─────────────────────
+        if matches!(self.pending, PendingKey::OpInner(_) | PendingKey::OpAround(_)) {
+            let (op, inner) = match self.pending {
+                PendingKey::OpInner(o)  => (o, true),
+                PendingKey::OpAround(o) => (o, false),
+                _ => unreachable!(),
+            };
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                let kind = match k.key_char.as_deref().unwrap_or(&k.key) {
+                    "w"  => Some(TextObjectKind::Word),
+                    "W"  => Some(TextObjectKind::WORD),
+                    "p"  => Some(TextObjectKind::Paragraph),
+                    "("  | ")" | "b" => Some(TextObjectKind::Paren),
+                    "{"  | "}" | "B" => Some(TextObjectKind::Brace),
+                    "["  | "]"       => Some(TextObjectKind::Bracket),
+                    "<"  | ">"       => Some(TextObjectKind::Angle),
+                    "\"" => Some(TextObjectKind::DoubleQuote),
+                    "'"  => Some(TextObjectKind::SingleQuote),
+                    "`"  => Some(TextObjectKind::Backtick),
+                    "$"  => Some(TextObjectKind::InlineMath),
+                    "t"  => Some(TextObjectKind::TypstContent),
+                    _    => None,
+                };
+                if let Some(kind) = kind {
+                    cx.stop_propagation();
+                    self.apply_operator_object(op, inner, kind, cx);
+                }
+            }
+            return;
+        }
+
+        // ── operator + till/find char (OpTill / OpFind) ──────────────────────
+        if matches!(self.pending, PendingKey::OpTill(_) | PendingKey::OpFind(_)) {
+            let (op, is_till) = match self.pending {
+                PendingKey::OpTill(o) => (o, true),
+                PendingKey::OpFind(o) => (o, false),
+                _ => unreachable!(),
+            };
+            self.pending = PendingKey::None;
+            if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                if !k.modifiers.control && !k.modifiers.platform {
+                    cx.stop_propagation();
+                    let motion = if is_till {
+                        EditorCommand::TillChar(ch)
+                    } else {
+                        EditorCommand::FindChar(ch)
+                    };
+                    self.apply_operator_motion(op, motion, cx);
+                }
+            }
+            return;
+        }
+
+        // ── complete operator + motion (Operator pending) ────────────────────
+        if let PendingKey::Operator(op) = self.pending {
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                // Doubled key → linewise (dd / cc / yy).
+                let same_key = matches!(
+                    (op, k.key.as_str()),
+                    (PendingOp::Delete, "d") | (PendingOp::Change, "c") | (PendingOp::Yank, "y")
+                );
+                if same_key && !k.modifiers.shift {
+                    cx.stop_propagation();
+                    self.push_undo();
+                    let cmd = match op {
+                        PendingOp::Delete => EditorCommand::DeleteLine,
+                        PendingOp::Change => EditorCommand::ChangeLine,
+                        PendingOp::Yank   => EditorCommand::YankLine,
+                    };
+                    let prev = std::mem::take(&mut self.state);
+                    let (new_state, effect) = apply(cmd, prev, &mut self.buffer);
+                    self.state = new_state;
+                    if effect == SideEffect::BufferChanged {
+                        self.trigger_compile(cx);
+                    }
+                    self.update_viewport();
+                    cx.notify();
+                    return;
+                }
+                // Sub-sequences: i → inner, a → around, t → till, f → find.
+                match k.key.as_str() {
+                    "i" if !k.modifiers.shift => {
+                        self.pending = PendingKey::OpInner(op);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "a" if !k.modifiers.shift => {
+                        self.pending = PendingKey::OpAround(op);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "t" if !k.modifiers.shift => {
+                        self.pending = PendingKey::OpTill(op);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "f" if !k.modifiers.shift => {
+                        self.pending = PendingKey::OpFind(op);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    _ => {}
+                }
+                // Single-key motion: enter visual, apply motion, apply operator.
+                let key_str = k.key_char.as_deref().unwrap_or(&k.key);
+                if let Some(motion_cmd) = operator_motion_from_key(key_str) {
+                    cx.stop_propagation();
+                    self.apply_operator_motion(op, motion_cmd, cx);
+                    return;
+                }
+            }
+            // Unknown or modified key — silently cancel operator pending.
+            return;
+        }
+
         // ── `/` and `?` search, `n`/`N` repeat ──────────────────────────────
         if in_modal && !k.modifiers.platform && !k.modifiers.control {
             let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
@@ -1206,6 +1449,44 @@ impl EditorPane {
             }
             if k.key == "N" && self.last_search.is_some() {
                 self.search_prev(cx);
+                cx.stop_propagation();
+                return;
+            }
+            // * / # : search word under cursor (forward / backward).
+            let key_ch = k.key_char.as_deref().unwrap_or(&k.key);
+            if key_ch == "*" {
+                if let Some(word) = self.word_under_cursor() {
+                    self.last_search = Some(word);
+                    self.last_search_backward = false;
+                    self.search_next(cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
+            if key_ch == "#" {
+                if let Some(word) = self.word_under_cursor() {
+                    self.last_search = Some(word);
+                    self.last_search_backward = true;
+                    self.search_prev(cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
+        }
+
+        // ── d/c/y: set operator pending in Normal mode ───────────────────────
+        // Intercept before key_normal maps these to DeleteLine / ChangeLine / YankLine.
+        if self.state.mode == Mode::Normal && self.pending == PendingKey::None
+            && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.shift
+        {
+            let op = match k.key.as_str() {
+                "d" => Some(PendingOp::Delete),
+                "c" => Some(PendingOp::Change),
+                "y" => Some(PendingOp::Yank),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.pending = PendingKey::Operator(op);
                 cx.stop_propagation();
                 return;
             }
@@ -1457,11 +1738,24 @@ impl Render for EditorPane {
                     (None, vec![])
                 };
 
+            // Highest-severity diagnostic on this line (error beats warning).
+            let diag_sev: Option<DiagnosticSeverity> = self.diagnostics.iter()
+                .filter(|d| d.line == Some(i))
+                .fold(None, |acc, d| Some(match acc {
+                    None => d.severity.clone(),
+                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
+                    Some(DiagnosticSeverity::Warning) => d.severity.clone(),
+                }));
+
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
-                lnm, line_count, &other_matches, focused_match, &t,
+                lnm, line_count, &other_matches, focused_match, diag_sev, &t,
             ));
         }
+
+        // Word count — split on whitespace boundaries.
+        let word_count = self.buffer.text().split_whitespace().count();
+        let word_count_label = format!("{} w", word_count);
 
         let mode_label = match mode {
             Mode::Insert => "INSERT",
@@ -1519,6 +1813,12 @@ impl Render for EditorPane {
                     .text_color(gpui::rgb(t.text_faint))
                     .font_family("Menlo")
                     .child(format!("{}:{}", cursor.line + 1, cursor.col + 1)),
+            )
+            .child(
+                div()
+                    .text_color(gpui::rgb(t.text_faint))
+                    .font_family("Menlo")
+                    .child(word_count_label),
             )
             .child(if self.state.is_dirty {
                 div()
@@ -1883,6 +2183,41 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<S
     spans
 }
 
+/// Map a `PendingOp` to the corresponding selection-operator `EditorCommand`.
+fn pending_op_to_command(op: PendingOp) -> EditorCommand {
+    match op {
+        PendingOp::Delete => EditorCommand::DeleteSelection,
+        PendingOp::Change => EditorCommand::ChangeSelection,
+        PendingOp::Yank   => EditorCommand::YankSelection,
+    }
+}
+
+/// Map a key string to a single-key motion `EditorCommand` for operator+motion.
+///
+/// Returns `None` for keys that are not plain motions (e.g. `f`/`t` — those
+/// require a sub-character and are handled separately).
+fn operator_motion_from_key(key: &str) -> Option<EditorCommand> {
+    Some(match key {
+        "w" => EditorCommand::MoveWordForward,
+        "b" => EditorCommand::MoveWordBackward,
+        "e" => EditorCommand::MoveWordEnd,
+        "W" => EditorCommand::MoveWORDForward,
+        "B" => EditorCommand::MoveWORDBackward,
+        "E" => EditorCommand::MoveWORDEnd,
+        "h" => EditorCommand::MoveLeft,
+        "l" => EditorCommand::MoveRight,
+        "k" => EditorCommand::MoveUp,
+        "j" => EditorCommand::MoveDown,
+        "0" => EditorCommand::MoveStartOfLine,
+        "$" => EditorCommand::MoveEndOfLine,
+        "^" => EditorCommand::MoveFirstNonWhitespace,
+        "G" => EditorCommand::MoveEndOfDocument,
+        "{" => EditorCommand::MoveParagraphBack,
+        "}" => EditorCommand::MoveParagraphForward,
+        _ => return None,
+    })
+}
+
 /// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
 /// Returns an empty vec if `query` is empty.
 fn find_all_matches(buf: &InMemoryBuffer, query: &str) -> Vec<Pos> {
@@ -1913,6 +2248,7 @@ fn render_line(
     total_lines: usize,
     other_matches: &[(usize, usize)],
     focused_match: Option<(usize, usize)>,
+    diag_sev: Option<DiagnosticSeverity>,
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -2075,6 +2411,15 @@ fn render_line(
         .flex_row()
         .whitespace_nowrap()
         .overflow_x_hidden();
+
+    // Diagnostic left-border indicator: red stripe for errors, amber for warnings.
+    if let Some(sev) = diag_sev {
+        let stripe_color = match sev {
+            DiagnosticSeverity::Error   => gpui::rgb(0xff5555u32),
+            DiagnosticSeverity::Warning => gpui::rgb(0xffb86cu32),
+        };
+        row = row.border_l_2().border_color(stripe_color);
+    }
 
     if let Some(g) = gutter_cell {
         row = row.child(g);

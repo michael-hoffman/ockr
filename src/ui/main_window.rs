@@ -39,7 +39,7 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    OpenPluginManager, OpenQuickSwitch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    OpenPluginManager, OpenQuickSwitch, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
     SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
@@ -278,7 +278,11 @@ impl MainWindow {
                     match result {
                         CompileResult::OkHtml(ref html) => {
                             let html = html.clone();
-                            this.update(cx, |win, _cx| {
+                            this.update(cx, |win, cx| {
+                                // Clear diagnostics in the active editor pane on success.
+                                if let Some(pane) = win.panes.get(win.active_idx) {
+                                    pane.editor.update(cx, |ep, _cx| ep.clear_diagnostics());
+                                }
                                 if let Some(ref wv) = win.html_webview {
                                     wv.load_html(&html);
                                 }
@@ -286,7 +290,13 @@ impl MainWindow {
                         }
                         CompileResult::Ok(ref doc) => {
                             let doc = doc.clone();
-                            this.update(cx, |win, _cx| { win.last_paged_doc = Some(doc.clone()); }).ok();
+                            this.update(cx, |win, cx| {
+                                // Clear diagnostics in the active editor pane on success.
+                                if let Some(pane) = win.panes.get(win.active_idx) {
+                                    pane.editor.update(cx, |ep, _cx| ep.clear_diagnostics());
+                                }
+                                win.last_paged_doc = Some(doc.clone());
+                            }).ok();
                             preview.update(cx, |pane, cx| pane.set_document(doc, cx));
                         }
                         CompileResult::Err(ref diags) => {
@@ -294,7 +304,11 @@ impl MainWindow {
                                 .map(|d| d.message.clone())
                                 .unwrap_or_else(|| "Unknown error".to_string());
                             let diags = diags.clone();
-                            this.update(cx, |win, _cx| {
+                            this.update(cx, |win, cx| {
+                                // Forward diagnostics to the active editor pane.
+                                if let Some(pane) = win.panes.get(win.active_idx) {
+                                    pane.editor.update(cx, |ep, _cx| ep.set_diagnostics(diags.clone()));
+                                }
                                 if let Some(ref wv) = win.html_webview {
                                     wv.load_error(&first_msg);
                                 }
@@ -927,7 +941,7 @@ impl MainWindow {
         vault_root: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let content = match &template_path {
+        let raw = match &template_path {
             Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
             None => String::new(),
         };
@@ -939,11 +953,17 @@ impl MainWindow {
                 "{:04}-{:02}-{:02}",
                 today.year(), today.month() as u8, today.day()
             );
-            match heading_to_filename_stem(&content) {
+            // Derive stem from date/datetime-substituted content (title not yet known).
+            let partial = apply_template_substitutions(&raw, "");
+            match heading_to_filename_stem(&partial) {
                 Some(stem) => format!("{stem}.typ"),
                 None => format!("untitled-{date_str}.typ"),
             }
         };
+
+        // Derive title from filename stem and do full substitution.
+        let title_stem = filename.trim_end_matches(".typ").to_string();
+        let content = apply_template_substitutions(&raw, &title_stem);
 
         // Avoid clobbering an existing file by appending a counter.
         let note_path = unique_path(&vault_root, &filename);
@@ -967,7 +987,7 @@ impl MainWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let content = match &template_path {
+        let raw = match &template_path {
             Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
             None => String::new(),
         };
@@ -979,11 +999,15 @@ impl MainWindow {
                 "{:04}-{:02}-{:02}",
                 today.year(), today.month() as u8, today.day()
             );
-            match heading_to_filename_stem(&content) {
+            let partial = apply_template_substitutions(&raw, "");
+            match heading_to_filename_stem(&partial) {
                 Some(stem) => format!("{stem}.typ"),
                 None => format!("untitled-{date_str}.typ"),
             }
         };
+
+        let title_stem = filename.trim_end_matches(".typ").to_string();
+        let content = apply_template_substitutions(&raw, &title_stem);
 
         let note_path = unique_path(&vault_root, &filename);
         let _ = std::fs::write(&note_path, &content);
@@ -1189,6 +1213,9 @@ impl MainWindow {
             "close-pane" => cx.dispatch_action(&ClosePane),
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
             "open-plugin-manager" => cx.dispatch_action(&OpenPluginManager),
+            "open-backlinks" => cx.dispatch_action(&OpenBacklinks),
+            "open-search" => cx.dispatch_action(&OpenSearch),
+            "open-replace" => cx.dispatch_action(&OpenReplace),
             "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
             "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
             "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
@@ -1554,6 +1581,30 @@ fn unique_path(root: &std::path::Path, filename: &str) -> PathBuf {
 
 fn minimal_daily_template(date: &str) -> String {
     format!("= {date}\n\n// Daily note — {date}\n\n")
+}
+
+/// Substitute template placeholders in note content.
+///
+/// Supported tokens:
+/// - `{{date}}`     → YYYY-MM-DD (today)
+/// - `{{datetime}}` → YYYY-MM-DD HH:MM
+/// - `{{title}}`    → note title derived from the filename stem (or empty)
+fn apply_template_substitutions(content: &str, title: &str) -> String {
+    let now = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let date_str = format!(
+        "{:04}-{:02}-{:02}",
+        now.year(), now.month() as u8, now.day()
+    );
+    let datetime_str = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        now.year(), now.month() as u8, now.day(),
+        now.hour(), now.minute()
+    );
+    content
+        .replace("{{date}}", &date_str)
+        .replace("{{datetime}}", &datetime_str)
+        .replace("{{title}}", title)
 }
 
 fn open_file_in_editor(

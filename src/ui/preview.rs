@@ -137,7 +137,7 @@ impl PreviewPane {
     /// Convenience wrapper for a single plain error string (panics, etc.).
     pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
         self.set_diagnostics(
-            vec![Diagnostic { severity: DiagnosticSeverity::Error, message: msg, span_file: None }],
+            vec![Diagnostic { severity: DiagnosticSeverity::Error, message: msg, line: None }],
             cx,
         );
     }

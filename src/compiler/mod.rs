@@ -25,6 +25,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use typst::layout::PagedDocument;
+use typst::syntax::Span;
+use typst::World as _;
 
 use self::world::OckrWorld;
 
@@ -68,10 +70,10 @@ pub struct CompileRequest {
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
-    /// Source file the diagnostic points to. Currently unpopulated (`None`)
-    /// until span resolution is wired into the compiler.
-    #[allow(dead_code)]
-    pub span_file: Option<String>,
+    /// 0-based line number in the main source file where the diagnostic points.
+    /// `None` when the span could not be resolved (e.g. in a different file or
+    /// if the span is detached).
+    pub line: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +224,24 @@ fn compiler_loop(
     }
 }
 
+/// Resolve a typst `Span` to a 0-based line number in the main source file.
+///
+/// Returns `None` when the span is detached, points to a different file, or
+/// resolution otherwise fails.
+fn span_to_line(world: &OckrWorld, span: Span) -> Option<usize> {
+    let file_id = span.id()?;
+    let source = world.source(file_id).ok()?;
+    let node = source.find(span)?;
+    let byte_offset = node.offset();
+    // Count newlines before the byte offset to get the 0-based line number.
+    let text = source.text();
+    let line = text[..byte_offset.min(text.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count();
+    Some(line)
+}
+
 fn compile(world: &OckrWorld, mode: PreviewMode) -> CompileResult {
     match mode {
         PreviewMode::Html => compile_html(world),
@@ -240,12 +260,12 @@ fn compile_paged(world: &OckrWorld) -> CompileResult {
                 .map(|d| Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: d.message.to_string(),
-                    span_file: None,
+                    line: span_to_line(world, d.span),
                 })
                 .chain(warned.warnings.iter().map(|w| Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: w.message.to_string(),
-                    span_file: None,
+                    line: span_to_line(world, w.span),
                 }))
                 .collect();
             CompileResult::Err(diags)
@@ -266,7 +286,7 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
                         .map(|d| Diagnostic {
                             severity: DiagnosticSeverity::Error,
                             message: d.message.to_string(),
-                            span_file: None,
+                            line: span_to_line(world, d.span),
                         })
                         .collect();
                     return CompileResult::Err(diags);
@@ -279,12 +299,12 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
                 .map(|d| Diagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: d.message.to_string(),
-                    span_file: None,
+                    line: span_to_line(world, d.span),
                 })
                 .chain(warned.warnings.iter().map(|w| Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: w.message.to_string(),
-                    span_file: None,
+                    line: span_to_line(world, w.span),
                 }))
                 .collect();
             CompileResult::Err(diags)
