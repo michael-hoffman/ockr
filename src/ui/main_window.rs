@@ -277,15 +277,16 @@ impl MainWindow {
                             preview.update(cx, |pane, cx| pane.set_document(doc, cx));
                         }
                         CompileResult::Err(ref diags) => {
-                            let msg = diags.first()
+                            let first_msg = diags.first()
                                 .map(|d| d.message.clone())
                                 .unwrap_or_else(|| "Unknown error".to_string());
+                            let diags = diags.clone();
                             this.update(cx, |win, _cx| {
                                 if let Some(ref wv) = win.html_webview {
-                                    wv.load_error(&msg);
+                                    wv.load_error(&first_msg);
                                 }
                             }).ok();
-                            preview.update(cx, |pane, cx| pane.set_error(msg, cx));
+                            preview.update(cx, |pane, cx| pane.set_diagnostics(diags, cx));
                         }
                         CompileResult::Panicked(ref msg) => {
                             let msg = format!("Compiler panicked: {msg}");
@@ -677,6 +678,29 @@ impl MainWindow {
         self.open_tab_in_pane(self.active_idx, abs_path, cx);
     }
 
+    // ── Session persistence ───────────────────────────────────────────────────
+
+    /// Open the previously saved tab set (called once after construction).
+    pub fn restore_session_tabs(&mut self, cx: &mut Context<Self>) {
+        let (tabs, active_idx) = crate::session::load_open_tabs();
+        if tabs.is_empty() { return; }
+        for path in tabs {
+            self.open_tab_in_pane(0, path, cx);
+        }
+        // Switch to the previously active tab.
+        if active_idx < self.panes[0].tabs.len() {
+            self.switch_tab_in_pane(0, active_idx, cx);
+        }
+    }
+
+    /// Persist the current tab list (active pane only) to the session file.
+    fn persist_tabs(&self) {
+        if self.panes.is_empty() { return; }
+        let pane = &self.panes[self.active_idx];
+        let paths: Vec<PathBuf> = pane.tabs.iter().map(|t| t.path.clone()).collect();
+        crate::session::save_open_tabs(&paths, pane.active_tab);
+    }
+
     // ── Tab management ────────────────────────────────────────────────────────
 
     /// Open `abs_path` as a new tab in `pane_idx`, or switch to it if already open.
@@ -721,6 +745,8 @@ impl MainWindow {
         self.recent_paths.retain(|p| p != &abs_path);
         self.recent_paths.insert(0, abs_path);
         self.recent_paths.truncate(20);
+
+        self.persist_tabs();
     }
 
     /// Switch the active tab of `pane_idx` to `tab_idx`, loading that file.
@@ -749,6 +775,7 @@ impl MainWindow {
         });
 
         self.panes[pane_idx].active_tab = tab_idx;
+        self.persist_tabs();
     }
 
     fn buffer_next(
@@ -817,6 +844,7 @@ impl MainWindow {
 
         // Re-focus the editor after closing.
         editor.read(cx).focus_handle(cx).focus(window);
+        self.persist_tabs();
         cx.notify();
     }
 

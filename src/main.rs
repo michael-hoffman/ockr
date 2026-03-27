@@ -182,11 +182,13 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                cx.new(|cx| {
+                let entity = cx.new(|cx| {
                     let view = ui::MainWindow::new(vault_for_window, cx);
                     view.focus_handle.focus(window);
                     view
-                })
+                });
+                entity.update(cx, |view, cx| view.restore_session_tabs(cx));
+                entity
             },
         )
         .unwrap();

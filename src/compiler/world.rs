@@ -42,8 +42,16 @@ pub struct OckrWorld {
     source: Arc<Mutex<Source>>,
     /// Root directory of the vault, used to resolve file references.
     vault_root: Option<PathBuf>,
-    /// Binary file cache (vault-relative path → Bytes).
-    file_cache: HashMap<PathBuf, Bytes>,
+    /// Binary file cache (vault-relative path → Bytes). Cleared on vault change.
+    ///
+    /// `Mutex` is needed because `World::file()` takes `&self` but the World
+    /// trait requires `Sync`.
+    file_cache: Mutex<HashMap<PathBuf, Bytes>>,
+    /// Source import cache (vault-relative path → text). Cleared on vault change.
+    ///
+    /// Imported `.typ` files rarely change during an editing session, so caching
+    /// them avoids one `read_to_string` syscall per imported file per compilation.
+    source_cache: Mutex<HashMap<PathBuf, String>>,
     /// Plugin-provided typst packages: `"@plugin/<name>/lib.typ"` → source.
     plugin_packages: Option<PluginPackages>,
 }
@@ -74,7 +82,8 @@ impl OckrWorld {
             main_id,
             source: Arc::new(Mutex::new(source)),
             vault_root: None,
-            file_cache: HashMap::new(),
+            file_cache: Mutex::new(HashMap::new()),
+            source_cache: Mutex::new(HashMap::new()),
             plugin_packages: None,
         }
     }
@@ -82,7 +91,8 @@ impl OckrWorld {
     /// Update the vault root (called when the user opens a vault).
     pub fn set_vault_root(&mut self, root: PathBuf) {
         self.vault_root = Some(root);
-        self.file_cache.clear();
+        self.file_cache.lock().unwrap().clear();
+        self.source_cache.lock().unwrap().clear();
     }
 
     /// Update the plugin packages map (swapped each compile request).
@@ -156,16 +166,25 @@ impl World for OckrWorld {
 
         // For imported files, read from disk relative to the vault root.
         let path = resolve_vault_path(&self.vault_root, id)?;
+        if let Some(cached) = self.source_cache.lock().unwrap().get(&path).cloned() {
+            return Ok(Source::new(id, cached));
+        }
         let text = std::fs::read_to_string(&path)
             .map_err(|e| file_io_error(e, &path))?;
+        self.source_cache.lock().unwrap().insert(path, text.clone());
         Ok(Source::new(id, text))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         let path = resolve_vault_path(&self.vault_root, id)?;
+        if let Some(cached) = self.file_cache.lock().unwrap().get(&path).cloned() {
+            return Ok(cached);
+        }
         let data = std::fs::read(&path)
             .map_err(|e| file_io_error(e, &path))?;
-        Ok(Bytes::new(data))
+        let bytes = Bytes::new(data);
+        self.file_cache.lock().unwrap().insert(path, bytes.clone());
+        Ok(bytes)
     }
 
     fn font(&self, index: usize) -> Option<Font> {

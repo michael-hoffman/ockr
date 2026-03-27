@@ -791,17 +791,6 @@ impl EditorPane {
             return;
         }
 
-        // Cmd-P / Cmd-Shift-P: open command palette.
-        // Stop propagation BEFORE emitting so the `cmd-p` key-binding action
-        // (`OpenCommandPalette`) does not also fire — that would call `open_palette`
-        // which sees palette.is_some() == true (set by the emit path) and toggles
-        // it immediately back closed.
-        if k.modifiers.platform && k.key == "p" {
-            cx.stop_propagation();
-            cx.emit(EditorPaneEvent::OpenPalette);
-            return;
-        }
-
         // Cmd-Z: undo (macOS convention — works in all modes).
         if k.modifiers.platform && k.key == "z" && !k.modifiers.shift {
             if let Some((text, pos)) = self.undo_history.pop() {

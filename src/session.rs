@@ -1,7 +1,8 @@
-//! Session persistence — save and restore the last-opened vault path.
+//! Session persistence — save and restore vault path and open tabs.
 //!
 //! The session file lives at `~/.local/share/ockr/session.json` (XDG-style).
-//! We do not use a crate dependency for this simple case; std I/O is sufficient.
+//! All saves are best-effort: I/O errors are silently ignored so they never
+//! crash the app.
 
 use std::path::PathBuf;
 
@@ -10,6 +11,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default)]
 struct Session {
     last_vault: Option<PathBuf>,
+    /// Absolute paths of open tabs, in order, at the time of last save.
+    #[serde(default)]
+    open_tabs: Vec<PathBuf>,
+    /// Index of the active tab within `open_tabs`.
+    #[serde(default)]
+    active_tab: usize,
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -25,29 +32,56 @@ fn session_path() -> Option<PathBuf> {
     Some(data_home.join("ockr").join("session.json"))
 }
 
-/// Save the last-opened vault path. Silently ignores I/O errors — session
-/// persistence is best-effort and should never crash the app.
-pub fn save_last_vault(path: &PathBuf) {
+fn write_session(session: &Session) {
     let Some(p) = session_path() else { return };
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let session = Session {
-        last_vault: Some(path.clone()),
-    };
-    if let Ok(json) = serde_json::to_string_pretty(&session) {
+    if let Ok(json) = serde_json::to_string_pretty(session) {
         let _ = std::fs::write(&p, json);
     }
 }
 
+fn read_session() -> Session {
+    let Some(p) = session_path() else { return Session::default() };
+    let Ok(json) = std::fs::read_to_string(&p) else { return Session::default() };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Save the last-opened vault path. Preserves existing tab data.
+pub fn save_last_vault(path: &PathBuf) {
+    let mut session = read_session();
+    session.last_vault = Some(path.clone());
+    // When the vault changes, clear stale tab paths.
+    session.open_tabs.clear();
+    session.active_tab = 0;
+    write_session(&session);
+}
+
+/// Save the current set of open tabs for the active vault.
+pub fn save_open_tabs(tabs: &[PathBuf], active_tab: usize) {
+    let mut session = read_session();
+    session.open_tabs = tabs.to_vec();
+    session.active_tab = active_tab.min(tabs.len().saturating_sub(1));
+    write_session(&session);
+}
+
 /// Load the last-opened vault path, if any. Returns `None` if no session
-/// file exists or parsing fails.
+/// file exists or the directory no longer exists.
 pub fn load_last_vault() -> Option<PathBuf> {
-    let p = session_path()?;
-    let json = std::fs::read_to_string(&p).ok()?;
-    let session: Session = serde_json::from_str(&json).ok()?;
-    // Only return the path if the directory still exists on disk.
-    session
-        .last_vault
-        .filter(|p| p.is_dir())
+    let session = read_session();
+    session.last_vault.filter(|p| p.is_dir())
+}
+
+/// Load the previously open tabs for the current session.
+///
+/// Only returns paths that still exist on disk.
+pub fn load_open_tabs() -> (Vec<PathBuf>, usize) {
+    let session = read_session();
+    let tabs: Vec<PathBuf> = session.open_tabs
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+    let active = session.active_tab.min(tabs.len().saturating_sub(1));
+    (tabs, active)
 }

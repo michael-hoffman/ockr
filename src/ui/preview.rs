@@ -33,6 +33,7 @@ use gpui::{
     Render, RenderImage, Window, canvas, div, prelude::*, px,
 };
 
+use crate::compiler::{Diagnostic, DiagnosticSeverity};
 use crate::ui::theme::ThemePalette;
 use image::Frame;
 use typst::layout::{FrameItem, PagedDocument};
@@ -88,8 +89,8 @@ pub struct PreviewPane {
     /// canvas closure (which cannot borrow `self`) and read back from the
     /// `on_mouse_down` listener in the same render frame cycle.
     preview_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Compiler error / panic message shown in place of the preview.
-    error: Option<String>,
+    /// Compiler diagnostics shown in place of the preview on failure.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl PreviewPane {
@@ -99,7 +100,7 @@ impl PreviewPane {
             image_px: None,
             link_regions: Vec::new(),
             preview_bounds: Rc::new(Cell::new(None)),
-            error: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -108,7 +109,7 @@ impl PreviewPane {
     /// Rasterises the first page, extracts link annotations, and schedules a
     /// re-render.
     pub fn set_document(&mut self, doc: Arc<PagedDocument>, cx: &mut Context<Self>) {
-        self.error = None;
+        self.diagnostics.clear();
         let (image, px_size) = rasterize(&doc);
         self.image = image;
         self.image_px = px_size;
@@ -124,13 +125,21 @@ impl PreviewPane {
         cx.notify();
     }
 
-    /// Show a compiler error/warning instead of the preview.
-    pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
+    /// Show compiler diagnostics instead of the preview.
+    pub fn set_diagnostics(&mut self, diags: Vec<Diagnostic>, cx: &mut Context<Self>) {
         self.image = None;
         self.image_px = None;
         self.link_regions.clear();
-        self.error = Some(msg);
+        self.diagnostics = diags;
         cx.notify();
+    }
+
+    /// Convenience wrapper for a single plain error string (panics, etc.).
+    pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.set_diagnostics(
+            vec![Diagnostic { severity: DiagnosticSeverity::Error, message: msg, span_file: None }],
+            cx,
+        );
     }
 
 
@@ -212,13 +221,60 @@ impl Render for PreviewPane {
         let t = cx.global::<ThemePalette>().clone();
         let bg = gpui::rgb(t.bg_panel);
 
-        // ── Error state ───────────────────────────────────────────────────────
-        if let Some(ref err) = self.error {
-            let err_text = err.clone();
+        // ── Diagnostics state ─────────────────────────────────────────────────
+        if !self.diagnostics.is_empty() {
+            let all_text = self.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let all_text_for_copy = all_text.clone();
             let bg_hover = t.bg_hover;
             let text_subtle = t.text_subtle;
             let text = t.text;
-            return div()
+
+            let error_count = self.diagnostics.iter()
+                .filter(|d| d.severity == DiagnosticSeverity::Error)
+                .count();
+            let warn_count = self.diagnostics.iter()
+                .filter(|d| d.severity == DiagnosticSeverity::Warning)
+                .count();
+            let header_label = match (error_count, warn_count) {
+                (e, 0) => format!("{e} error{}", if e == 1 { "" } else { "s" }),
+                (0, w) => format!("{w} warning{}", if w == 1 { "" } else { "s" }),
+                (e, w) => format!("{e} error{}, {w} warning{}", if e == 1 { "" } else { "s" }, if w == 1 { "" } else { "s" }),
+            };
+
+            let diag_rows: Vec<_> = self.diagnostics.iter().map(|d| {
+                let (badge_color, msg_color) = match d.severity {
+                    DiagnosticSeverity::Error   => (0xff5555u32, 0xffaaaau32),
+                    DiagnosticSeverity::Warning => (0xffcc55u32, 0xffe8aau32),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(badge_color))
+                            .text_xs()
+                            .font_family("Menlo")
+                            .flex_shrink_0()
+                            .child(match d.severity {
+                                DiagnosticSeverity::Error   => "E",
+                                DiagnosticSeverity::Warning => "W",
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(msg_color))
+                            .text_xs()
+                            .font_family("Menlo")
+                            .child(d.message.clone()),
+                    )
+            }).collect();
+
+            let mut container = div()
                 .size_full()
                 .overflow_hidden()
                 .bg(bg)
@@ -237,7 +293,7 @@ impl Render for PreviewPane {
                                 .text_color(gpui::rgb(0xff5555))
                                 .text_sm()
                                 .font_family("Menlo")
-                                .child("Compiler error"),
+                                .child(header_label),
                         )
                         .child(
                             div()
@@ -252,24 +308,19 @@ impl Render for PreviewPane {
                                 .hover(move |s| s.text_color(gpui::rgb(text)))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |_this: &mut PreviewPane, _, _, cx| {
+                                    cx.listener(move |_: &mut PreviewPane, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
-                                            err_text.clone(),
+                                            all_text_for_copy.clone(),
                                         ));
                                     }),
                                 )
-                                .child("copy"),
+                                .child("copy all"),
                         ),
-                )
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .text_color(gpui::rgb(0xffaaaa))
-                        .text_xs()
-                        .font_family("Menlo")
-                        .child(err.clone()),
-                )
-                .into_any_element();
+                );
+            for row in diag_rows {
+                container = container.child(row);
+            }
+            return container.into_any_element();
         }
 
         // ── Image state ───────────────────────────────────────────────────────

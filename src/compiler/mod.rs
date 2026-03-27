@@ -66,9 +66,12 @@ pub struct CompileRequest {
 /// A diagnostic produced by the typst compiler.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
-    #[allow(dead_code)] pub severity: DiagnosticSeverity,
+    pub severity: DiagnosticSeverity,
     pub message: String,
-    #[allow(dead_code)] pub span_file: Option<String>,
+    /// Source file the diagnostic points to. Currently unpopulated (`None`)
+    /// until span resolution is wired into the compiler.
+    #[allow(dead_code)]
+    pub span_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
