@@ -245,9 +245,8 @@ impl Render for PluginPanel {
             )
             .flex()
             .flex_col()
-            .items_end()
-            .pt(px(8.0))
-            .pr(px(8.0))
+            .items_center()
+            .pt(px(48.0))
             .child(
                 div()
                     .w(modal_width)

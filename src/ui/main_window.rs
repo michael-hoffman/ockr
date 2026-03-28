@@ -154,8 +154,10 @@ pub struct MainWindow {
     preview_width: f32,
     drag: Option<DragState>,
     palette: Option<Entity<CommandPalette>>,
-    /// True when the palette was just created and needs focus on next render.
-    palette_focus_pending: bool,
+    /// True when a pane requested the palette; created in next render (needs `&mut Window`).
+    open_palette_pending: bool,
+    /// True when the palette was just dismissed and the active editor needs focus.
+    refocus_editor_pending: bool,
     quick_switch: Option<Entity<QuickSwitch>>,
     template_picker: Option<Entity<TemplatePicker>>,
     backlinks: Option<Entity<BacklinkPanel>>,
@@ -383,7 +385,8 @@ impl MainWindow {
             preview_width: 420.0,
             drag: None,
             palette: None,
-            palette_focus_pending: false,
+            open_palette_pending: false,
+            refocus_editor_pending: false,
             quick_switch: None,
             template_picker: None,
             backlinks: None,
@@ -414,30 +417,7 @@ impl MainWindow {
                     this.open_path(path.clone(), cx);
                 }
                 EditorPaneEvent::OpenPalette => {
-                    // Create palette without focusing yet; render() will
-                    // focus it on the next pass (needs &mut Window).
-                    if this.palette.is_some() {
-                        // Already open — toggle off.
-                        this.palette = None;
-                        cx.notify();
-                        return;
-                    }
-                    let palette = cx.new(|cx| CommandPalette::new(cx));
-                    cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
-                        match event {
-                            PaletteEvent::Close => {
-                                this.palette = None;
-                                cx.notify();
-                            }
-                            PaletteEvent::Execute(id) => {
-                                this.palette = None;
-                                cx.notify();
-                                this.handle_palette_execute(id, cx);
-                            }
-                        }
-                    }).detach();
-                    this.palette = Some(palette);
-                    this.palette_focus_pending = true;
+                    this.open_palette_pending = true;
                     cx.notify();
                 }
             }
@@ -1480,6 +1460,7 @@ impl MainWindow {
     ) {
         if self.palette.is_some() {
             self.palette = None;
+            self.refocus_editor_pending = true;
             cx.notify();
             return;
         }
@@ -1491,10 +1472,12 @@ impl MainWindow {
             match event {
                 PaletteEvent::Close => {
                     this.palette = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                 }
                 PaletteEvent::Execute(id) => {
                     this.palette = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                     this.handle_palette_execute(id, cx);
                 }
@@ -1650,13 +1633,35 @@ impl Render for MainWindow {
         let t = cx.global::<ThemePalette>().clone();
         let preview_mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
 
-        // Focus the palette if it was just created via the editor-pane event path
-        // (subscriptions don't receive &mut Window, so we defer the focus to render).
-        if self.palette_focus_pending {
-            if let Some(ref p) = self.palette {
-                p.read(cx).focus_handle.clone().focus(window);
+        // Open the command palette if requested by a pane (deferred to render for Window access).
+        if self.open_palette_pending {
+            self.open_palette_pending = false;
+            if self.palette.is_none() {
+                let palette = cx.new(|cx| CommandPalette::new(cx));
+                palette.read(cx).focus_handle.clone().focus(window);
+                cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
+                    match event {
+                        PaletteEvent::Close => {
+                            this.palette = None;
+                            this.refocus_editor_pending = true;
+                            cx.notify();
+                        }
+                        PaletteEvent::Execute(id) => {
+                            this.palette = None;
+                            this.refocus_editor_pending = true;
+                            cx.notify();
+                            this.handle_palette_execute(id, cx);
+                        }
+                    }
+                }).detach();
+                self.palette = Some(palette);
             }
-            self.palette_focus_pending = false;
+        }
+
+        // Refocus the active editor after any modal (palette, etc.) is dismissed.
+        if self.refocus_editor_pending {
+            self.active_editor().read(cx).focus_handle.clone().focus(window);
+            self.refocus_editor_pending = false;
         }
 
         // Focus the plugin panel if it was just created.

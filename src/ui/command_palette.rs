@@ -228,10 +228,9 @@ impl Render for CommandPalette {
                 }),
             )
             .flex()
-            .flex_col()      // column direction: items_end aligns to the right (cross-axis)
-            .items_end()     // align modal to the right edge
-            .pt(px(8.0))     // near the top
-            .pr(px(8.0))     // gap from the right edge
+            .flex_col()
+            .items_center()  // center modal horizontally
+            .pt(px(48.0))    // offset from top
             .child(
                 // Modal container — stop click propagation to backdrop.
                 div()
