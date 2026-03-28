@@ -6,7 +6,8 @@ A fast, modal Typst note editor built with GPUI.
 
 ## Features
 
-- **Modal editing** — Helix-style Normal / Insert / Visual modes
+- **Two keyboard modes** — **Helix** (modal, select-then-act) or **Standard** (VS Code–style, Shift+arrow selection); switch any time via `switch-keyboard-mode` in the command palette
+- **Runtime theme switching** — **Oxide** (dark) and **Ochre** (light); toggle via `switch-theme` in the command palette; persists across restarts
 - **Live Typst preview** — HTML (fast) or paged/PDF, toggled with `Cmd-Alt-H`
 - **Wikilinks** — `[[note name]]` navigation with autocomplete and backlinks
 - **Graph view** — interactive note-relationship graph (`Cmd-Shift-G`)
