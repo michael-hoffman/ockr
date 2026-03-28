@@ -1174,6 +1174,11 @@ impl EditorPane {
             KeymapResult::Surround { open, close } => {
                 self.apply_surround(&open, close, cx);
             }
+            KeymapResult::Commands(cmds) => {
+                for cmd in cmds {
+                    self.execute_command(cmd, cx);
+                }
+            }
             KeymapResult::Command(cmd) => {
                 self.execute_command(cmd, cx);
             }

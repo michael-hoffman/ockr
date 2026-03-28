@@ -115,6 +115,12 @@ pub enum EditorCommand {
     DeleteWordBefore,
     /// Collapse the current Visual selection to its cursor endpoint and return to Normal (`;`).
     CollapseSelection,
+    /// Collapse the Visual selection to whichever endpoint comes first in the
+    /// document (used by Standard-mode Left-arrow to mimic VS Code behaviour).
+    CollapseSelectionLeft,
+    /// Collapse the Visual selection to whichever endpoint comes last in the
+    /// document (used by Standard-mode Right-arrow to mimic VS Code behaviour).
+    CollapseSelectionRight,
     /// Swap anchor and cursor of the current Visual selection (`Alt-;`).
     /// In Normal mode this is a no-op.
     FlipSelection,

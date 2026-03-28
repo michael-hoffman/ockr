@@ -605,6 +605,28 @@ pub fn apply<B: Buffer>(
             (state, None)
         }
 
+        CollapseSelectionLeft => {
+            if let Mode::Visual(_) = state.mode {
+                let anchor = state.selection.anchor;
+                let cursor = state.selection.cursor;
+                let left = if anchor <= cursor { anchor } else { cursor };
+                state.mode = Mode::Normal;
+                state.move_cursor_to(left);
+            }
+            (state, None)
+        }
+
+        CollapseSelectionRight => {
+            if let Mode::Visual(_) = state.mode {
+                let anchor = state.selection.anchor;
+                let cursor = state.selection.cursor;
+                let right = if anchor >= cursor { anchor } else { cursor };
+                state.mode = Mode::Normal;
+                state.move_cursor_to(right);
+            }
+            (state, None)
+        }
+
         FlipSelection => {
             if let Mode::Visual(_) = state.mode {
                 std::mem::swap(&mut state.selection.anchor, &mut state.selection.cursor);
@@ -2027,6 +2049,34 @@ mod tests {
         let (s2, _) = apply(CollapseSelection, s, &mut b);
         assert_eq!(s2.mode, Mode::Normal);
         assert_eq!(s2.cursor(), Pos::new(0, 5));
+    }
+
+    #[test]
+    fn collapse_selection_left_goes_to_min_endpoint() {
+        let mut b = buf("hello world");
+        // Selection: anchor=5, cursor=0 (cursor is to the LEFT of anchor).
+        let mut s = visual_char_state();
+        s.selection = Selection {
+            anchor: Pos::new(0, 5),
+            cursor: Pos::new(0, 0),
+        };
+        let (s2, _) = apply(CollapseSelectionLeft, s, &mut b);
+        assert_eq!(s2.mode, Mode::Normal);
+        assert_eq!(s2.cursor(), Pos::new(0, 0)); // the leftmost endpoint
+    }
+
+    #[test]
+    fn collapse_selection_right_goes_to_max_endpoint() {
+        let mut b = buf("hello world");
+        // Selection: anchor=0, cursor=5 (cursor is to the RIGHT of anchor).
+        let mut s = visual_char_state();
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 5),
+        };
+        let (s2, _) = apply(CollapseSelectionRight, s, &mut b);
+        assert_eq!(s2.mode, Mode::Normal);
+        assert_eq!(s2.cursor(), Pos::new(0, 5)); // the rightmost endpoint
     }
 
     #[test]
