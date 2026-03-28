@@ -216,7 +216,7 @@ impl EditorPane {
             Box::new(crate::editor::keymap_helix::HelixKeymap::new())
         };
         // Standard mode starts in Insert (the default); Helix starts in Normal.
-        let mut state = EditorState::new();
+        let state = EditorState::new();
         if keymap.mode_label(&state) != "STANDARD" {
             // EditorState defaults to Insert; switch to Normal for Helix mode.
             // (We don't have a Noop path through apply for this, so set directly.)

@@ -1208,6 +1208,18 @@ impl MainWindow {
                 let editor = self.panes[self.active_idx].editor.clone();
                 editor.update(cx, |pane, _cx| pane.switch_keyboard_mode());
             }
+            "switch-theme" => {
+                let settings = cx.global::<crate::settings::Settings>();
+                let new_name = match settings.theme.as_str() {
+                    "ochre" => "oxide",
+                    _ => "ochre",
+                };
+                let new_theme = crate::load_theme_by_name(new_name);
+                *cx.global_mut::<ThemePalette>() = new_theme;
+                cx.global_mut::<crate::settings::Settings>().theme = new_name.to_string();
+                crate::settings::save_global_setting("theme", new_name);
+                cx.notify();
+            }
             _ => {
                 // Plugin command?
                 let plugin_id = cx

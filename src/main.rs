@@ -323,7 +323,7 @@ fn set_dock_icon() {
 }
 
 /// Load a theme by name, checking bundled themes and `~/.config/ockr/themes/`.
-fn load_theme_by_name(name: &str) -> ThemePalette {
+pub fn load_theme_by_name(name: &str) -> ThemePalette {
     // Check user themes directory first.
     let user_dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
@@ -393,6 +393,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         // Settings
         ("reload-settings",       "Reload Settings",                  None),
         ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
+        ("switch-theme",          "Switch Theme",                     None),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));
