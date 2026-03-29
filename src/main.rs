@@ -99,6 +99,7 @@ fn main() {
             KeyBinding::new("cmd-s", SaveFile, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
+            KeyBinding::new("cmd-shift-r", OpenRecentFiles, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
             KeyBinding::new("cmd-shift-f", OpenVaultSearch, None),
             KeyBinding::new("cmd-enter", FollowLink, None),
@@ -179,6 +180,7 @@ fn main() {
                 name: "Go".into(),
                 items: vec![
                     MenuItem::action("Quick Switch", OpenQuickSwitch),
+                    MenuItem::action("Recent Files", OpenRecentFiles),
                     MenuItem::action("Daily Note", OpenDailyNote),
                     MenuItem::separator(),
                     MenuItem::action("Graph View", OpenGraphView),
@@ -245,6 +247,9 @@ fn main() {
         });
         cx.on_action(|_: &OpenQuickSwitch, _cx| {
             // Story 11: quick note switcher
+        });
+        cx.on_action(|_: &OpenRecentFiles, _cx| {
+            // Story 44: recent files modal
         });
         cx.on_action(|_: &OpenVaultSearch, _cx| {
             // Story 02+: vault-wide full-text search
@@ -369,6 +374,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("new-note",             "New Note",                        Some("Cmd-N")),
         ("save-file",            "Save File",                       Some("Cmd-S")),
         ("open-quick-switch",    "Quick Switch",                    Some("Cmd-K")),
+        ("open-recent-files",    "Recent Files",                    Some("Cmd-Shift-R")),
         ("open-backlinks",       "Open Backlinks",                  Some("Cmd-Shift-K")),
         ("vault-search",         "Vault Search",                    Some("Cmd-Shift-F")),
         ("open-search",          "Search",                          Some("Cmd-F")),

@@ -293,6 +293,7 @@ Same behaviour as Helix Insert mode — see [Auto-close pairs](#auto-close-pairs
 | `Cmd-O`       | Open vault (folder picker)          |
 | `Cmd-N`       | New note                            |
 | `Cmd-K`       | Quick switch (fuzzy-open note)      |
+| `Cmd-Shift-R` | Recent files                        |
 | `Cmd-Shift-K` | Backlinks panel                     |
 | `Cmd-Shift-F` | Vault full-text search              |
 | `Cmd-Enter`   | Follow `[[wikilink]]` under cursor  |
@@ -349,6 +350,7 @@ A `:<hint>` shows the Helix ex-command equivalent.
 | ID | Description | Shortcut / Hint |
 |----|-------------|-----------------|
 | `open-quick-switch` | Quick-switch note | `Cmd-K` |
+| `open-recent-files` | Recent files (last 20 opened, most-recent first) | `Cmd-Shift-R` |
 | `open-backlinks` | Backlinks panel | `Cmd-Shift-K` |
 | `open-vault-search` | Full-text vault search | `Cmd-Shift-F` |
 | `open-daily-note` | Today's daily note | `Cmd-T` |

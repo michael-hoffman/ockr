@@ -17,6 +17,9 @@ struct Session {
     /// Index of the active tab within `open_tabs`.
     #[serde(default)]
     active_tab: usize,
+    /// Recently opened file paths, most-recent first (max 20).
+    #[serde(default)]
+    recent_paths: Vec<PathBuf>,
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -71,6 +74,24 @@ pub fn save_open_tabs(tabs: &[PathBuf], active_tab: usize) {
 pub fn load_last_vault() -> Option<PathBuf> {
     let session = read_session();
     session.last_vault.filter(|p| p.is_dir())
+}
+
+/// Save the recent-files list (most-recent first).  Preserves other session data.
+pub fn save_recent_paths(paths: &[PathBuf]) {
+    let mut session = read_session();
+    session.recent_paths = paths.to_vec();
+    write_session(&session);
+}
+
+/// Load the recent-files list saved in the last session.
+///
+/// Only returns paths that still exist on disk.
+pub fn load_recent_paths() -> Vec<PathBuf> {
+    read_session()
+        .recent_paths
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect()
 }
 
 /// Load the previously open tabs for the current session.

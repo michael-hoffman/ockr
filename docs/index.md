@@ -6,6 +6,7 @@ A fast, modal Typst note editor built with GPUI.
 
 ## Features
 
+- **Recent files** — `Cmd-Shift-R` reopens the last 20 visited notes (most-recent first); list persists across restarts
 - **Two keyboard modes** — **Helix** (modal, select-then-act) or **Standard** (VS Code–style, Shift+arrow selection); switch any time via `switch-keyboard-mode` in the command palette
 - **Runtime theme switching** — **Oxide** (dark) and **Ochre** (light); toggle via `switch-theme` in the command palette; persists across restarts
 - **Live Typst preview** — HTML (fast) or paged/PDF, toggled with `Cmd-Alt-H`

@@ -39,7 +39,7 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    OpenPluginManager, OpenQuickSwitch, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
     SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
@@ -691,6 +691,11 @@ impl MainWindow {
 
     /// Open the previously saved tab set (called once after construction).
     pub fn restore_session_tabs(&mut self, cx: &mut Context<Self>) {
+        // Restore the recent-paths list before opening tabs so that
+        // open_tab_in_pane doesn't push session-restored paths to the front
+        // of a list that is about to be overwritten anyway.
+        self.recent_paths = crate::session::load_recent_paths();
+
         let (tabs, active_idx) = crate::session::load_open_tabs();
         if tabs.is_empty() { return; }
         for path in tabs {
@@ -755,6 +760,7 @@ impl MainWindow {
         self.recent_paths.insert(0, abs_path);
         self.recent_paths.truncate(20);
 
+        crate::session::save_recent_paths(&self.recent_paths);
         self.persist_tabs();
     }
 
@@ -1084,6 +1090,54 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn open_recent_files(
+        &mut self,
+        _: &OpenRecentFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle: pressing again closes the panel.
+        if self.quick_switch.is_some() {
+            self.quick_switch = None;
+            cx.notify();
+            return;
+        }
+
+        // Build a file list of only the recently-opened paths, in recency order.
+        // Filter to paths that are still in the vault (or still on disk).
+        let all_files = self.vault.read(cx).files.clone();
+        let recent: Vec<_> = self.recent_paths.iter()
+            .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
+            .collect();
+
+        if recent.is_empty() {
+            // Nothing to show — open Quick Switch instead so the user still has
+            // a useful picker available.
+            self.open_quick_switch(&OpenQuickSwitch, window, cx);
+            return;
+        }
+
+        let qs = cx.new(|cx| QuickSwitch::new(recent, cx));
+        qs.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| {
+            match event {
+                QuickSwitchEvent::Close => {
+                    this.quick_switch = None;
+                    cx.notify();
+                }
+                QuickSwitchEvent::Open(path) => {
+                    this.quick_switch = None;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        }).detach();
+
+        self.quick_switch = Some(qs);
+        cx.notify();
+    }
+
     fn open_backlinks(
         &mut self,
         _: &OpenBacklinks,
@@ -1186,6 +1240,7 @@ impl MainWindow {
             "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
             "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
+            "open-recent-files" => cx.dispatch_action(&OpenRecentFiles),
             "vault-search" => cx.dispatch_action(&OpenVaultSearch),
             "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
             "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
@@ -1744,6 +1799,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_graph_view))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_quick_switch))
+            .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
