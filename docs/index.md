@@ -14,6 +14,7 @@ A fast, modal Typst note editor built with GPUI.
 - **Plugin system** — sandboxed WASM plugins with typed capability declarations; network (`ockr_http_get`), filesystem, console, and typst-package capabilities; plugin manager panel via `open-plugin-manager`
 - **In-buffer search & replace** — `/` · `?` · `Cmd-F` · `Cmd-H`
 - **Auto-close pairs** — `(` `[` `{` `"` `$` with smart backspace
+- **Document stats** — live word count, character count, and line count in the status bar; when a selection is active, selected word / char count is shown alongside
 - **Tab persistence** — open tabs and undo history survive restarts
 
 ## Quick start

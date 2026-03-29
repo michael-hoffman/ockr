@@ -1414,9 +1414,52 @@ impl Render for EditorPane {
             ));
         }
 
-        // Word count — split on whitespace boundaries.
-        let word_count = self.buffer.text().split_whitespace().count();
-        let word_count_label = format!("{} w", word_count);
+        // ── Document stats ─────────────────────────────────────────────────
+        let full_text = self.buffer.text();
+        let word_count: usize = full_text.split_whitespace().count();
+        let char_count: usize = full_text.chars().count();
+        let line_count_total: usize = self.buffer.line_count();
+        let doc_stats_label = format!("{} w · {} ch · {} L", word_count, char_count, line_count_total);
+
+        // When a Visual selection is active, also show per-selection stats.
+        let sel_stats_label: Option<String> = if matches!(mode, Mode::Visual(_)) {
+            let sel   = &self.state.selection;
+            let start = sel.start();
+            let end   = sel.end();
+            if start != end {
+                let selected: String = if start.line == end.line {
+                    self.buffer.line(start.line)
+                        .get(start.col..end.col)
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    let mut parts: Vec<String> = Vec::new();
+                    parts.push(
+                        self.buffer.line(start.line)
+                            .get(start.col..)
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                    for l in (start.line + 1)..end.line {
+                        parts.push(self.buffer.line(l).to_string());
+                    }
+                    parts.push(
+                        self.buffer.line(end.line)
+                            .get(..end.col)
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                    parts.join("\n")
+                };
+                let sel_words = selected.split_whitespace().count();
+                let sel_chars = selected.chars().count();
+                Some(format!("{} w · {} ch sel", sel_words, sel_chars))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let mode_label = self.keymap.mode_label(&self.state).to_string();
         let mode_color = match mode {
@@ -1471,11 +1514,20 @@ impl Render for EditorPane {
                     .font_family("Menlo")
                     .child(format!("{}:{}", cursor.line + 1, cursor.col + 1)),
             )
+            .child(if let Some(ref lbl) = sel_stats_label {
+                div()
+                    .text_color(gpui::rgb(t.mode_visual))
+                    .font_family("Menlo")
+                    .child(lbl.clone())
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(
                 div()
                     .text_color(gpui::rgb(t.text_faint))
                     .font_family("Menlo")
-                    .child(word_count_label),
+                    .child(doc_stats_label),
             )
             .child(if self.state.is_dirty {
                 div()
