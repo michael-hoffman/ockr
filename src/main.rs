@@ -101,6 +101,7 @@ fn main() {
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
             KeyBinding::new("cmd-shift-r", OpenRecentFiles, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
+            KeyBinding::new("cmd-shift-o", OpenOutline, None),
             KeyBinding::new("cmd-shift-f", OpenVaultSearch, None),
             KeyBinding::new("cmd-enter", FollowLink, None),
             KeyBinding::new("cmd-t", OpenDailyNote, None),
@@ -185,6 +186,7 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Graph View", OpenGraphView),
                     MenuItem::action("Backlinks", OpenBacklinks),
+                    MenuItem::action("Document Outline", OpenOutline),
                     MenuItem::action("Vault Search", OpenVaultSearch),
                 ],
             },
@@ -250,6 +252,9 @@ fn main() {
         });
         cx.on_action(|_: &OpenRecentFiles, _cx| {
             // Story 44: recent files modal
+        });
+        cx.on_action(|_: &OpenOutline, _cx| {
+            // Story 34: document outline panel
         });
         cx.on_action(|_: &OpenVaultSearch, _cx| {
             // Story 02+: vault-wide full-text search
@@ -376,6 +381,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("open-quick-switch",    "Quick Switch",                    Some("Cmd-K")),
         ("open-recent-files",    "Recent Files",                    Some("Cmd-Shift-R")),
         ("open-backlinks",       "Open Backlinks",                  Some("Cmd-Shift-K")),
+        ("open-outline",         "Document Outline",                Some("Cmd-Shift-O")),
         ("vault-search",         "Vault Search",                    Some("Cmd-Shift-F")),
         ("open-search",          "Search",                          Some("Cmd-F")),
         ("open-replace",         "Find & Replace",                  Some("Cmd-H")),

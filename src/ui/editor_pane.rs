@@ -411,6 +411,16 @@ impl EditorPane {
         }
     }
 
+    /// Returns the full text of the current buffer (lines joined by `\n`).
+    ///
+    /// Used by the Document Outline panel to parse headings.
+    pub fn buffer_text(&self) -> String {
+        (0..self.buffer.line_count())
+            .map(|l| self.buffer.line(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Move the cursor to `line` (0-based) and scroll the viewport there.
     ///
     /// Used by features like vault search that know a target line number.
@@ -616,7 +626,10 @@ impl EditorPane {
             }
             _ => {
                 if !k.modifiers.platform && !k.modifiers.control {
-                    if let Some(ch) = &k.key_char {
+                    // Use key_char when present; fall back to explicit "space" key name.
+                    let ch_opt = k.key_char.as_deref()
+                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    if let Some(ch) = ch_opt {
                         if let Some(ref mut s) = self.search {
                             if in_replace {
                                 if let Some(ref mut r) = s.replace { r.push_str(ch); }

@@ -33,6 +33,7 @@ actions!(
         OpenQuickSwitch,
         OpenRecentFiles,
         OpenBacklinks,
+        OpenOutline,
         OpenVaultSearch,
         FollowLink,
         OpenDailyNote,

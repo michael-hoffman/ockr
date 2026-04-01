@@ -1,4 +1,5 @@
 pub mod backlink_panel;
+pub mod outline_panel;
 pub mod plugin_manager;
 pub mod command_palette;
 pub mod graph_view;

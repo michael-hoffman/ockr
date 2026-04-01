@@ -39,11 +39,12 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
     SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
+use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
 use crate::ui::graph_view::{GraphView, GraphViewEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::html_preview::HtmlWebView;
@@ -161,6 +162,7 @@ pub struct MainWindow {
     quick_switch: Option<Entity<QuickSwitch>>,
     template_picker: Option<Entity<TemplatePicker>>,
     backlinks: Option<Entity<BacklinkPanel>>,
+    outline: Option<Entity<OutlinePanel>>,
     vault_search: Option<Entity<VaultSearch>>,
     graph_view: Option<Entity<GraphView>>,
     recent_paths: Vec<PathBuf>,
@@ -390,6 +392,7 @@ impl MainWindow {
             quick_switch: None,
             template_picker: None,
             backlinks: None,
+            outline: None,
             vault_search: None,
             graph_view: None,
             recent_paths: Vec::new(),
@@ -1186,6 +1189,43 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn open_outline(
+        &mut self,
+        _: &OpenOutline,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.outline.is_some() {
+            self.outline = None;
+            cx.notify();
+            return;
+        }
+
+        let text = self.active_editor().read(cx).buffer_text();
+        let panel = cx.new(|cx| OutlinePanel::new(text, cx));
+        panel.read(cx).focus_handle.clone().focus(window);
+
+        cx.subscribe(&panel, |this, _, event: &OutlinePanelEvent, cx| {
+            match event {
+                OutlinePanelEvent::Close => {
+                    this.outline = None;
+                    cx.notify();
+                }
+                OutlinePanelEvent::JumpToLine(line) => {
+                    this.outline = None;
+                    cx.notify();
+                    let line = *line;
+                    this.active_editor().clone().update(cx, |pane, cx| {
+                        pane.jump_to_line(line, cx);
+                    });
+                }
+            }
+        }).detach();
+
+        self.outline = Some(panel);
+        cx.notify();
+    }
+
     fn open_vault_search(
         &mut self,
         _: &OpenVaultSearch,
@@ -1249,6 +1289,7 @@ impl MainWindow {
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
             "open-plugin-manager" => cx.dispatch_action(&OpenPluginManager),
             "open-backlinks" => cx.dispatch_action(&OpenBacklinks),
+            "open-outline" => cx.dispatch_action(&OpenOutline),
             "open-search" => cx.dispatch_action(&OpenSearch),
             "open-replace" => cx.dispatch_action(&OpenReplace),
             "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
@@ -1801,6 +1842,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
+            .on_action(cx.listener(Self::open_outline))
             .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_preview_mode))
@@ -2017,6 +2059,9 @@ impl Render for MainWindow {
                 root.child(gpui::deferred(picker).with_priority(100))
             })
             .when_some(self.backlinks.clone(), |root, panel| {
+                root.child(gpui::deferred(panel).with_priority(100))
+            })
+            .when_some(self.outline.clone(), |root, panel| {
                 root.child(gpui::deferred(panel).with_priority(100))
             })
             .when_some(self.vault_search.clone(), |root, panel| {
