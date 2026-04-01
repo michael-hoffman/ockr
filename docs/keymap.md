@@ -129,6 +129,7 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `N`           | Jump to previous match              |
 | `Enter`       | Confirm search, close bar           |
 | `Escape`      | Cancel search, restore cursor       |
+| —             | `[n/M]` match counter shown in search bar; `↩ wrap` appears when navigation wraps around the document |
 | `Cmd-F`       | Open forward search (any mode)      |
 | `Cmd-H`       | Open find-and-replace bar           |
 

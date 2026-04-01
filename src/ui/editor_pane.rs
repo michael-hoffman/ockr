@@ -109,6 +109,8 @@ struct SearchState {
     replace: Option<String>,
     /// Which row has keyboard focus: `false` = query, `true` = replace.
     replace_focused: bool,
+    /// `true` when the last match jump had to wrap around the document boundary.
+    wrapped: bool,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -181,6 +183,9 @@ pub struct EditorPane {
     last_search: Option<String>,
     /// Direction of the last completed search (`true` = backward / `?`).
     last_search_backward: bool,
+    /// Match position from the last `n`/`N` navigation: (current 1-indexed, total, wrapped).
+    /// Shown in the status bar while the search bar is closed.
+    search_nav_status: Option<(usize, usize, bool)>,
     /// How line numbers are rendered in the gutter.
     line_number_mode: LineNumberMode,
     /// Plugin-provided typst packages forwarded to each CompileRequest.
@@ -237,6 +242,7 @@ impl EditorPane {
             search: None,
             last_search: None,
             last_search_backward: false,
+            search_nav_status: None,
             line_number_mode: LineNumberMode::Relative,
             plugin_packages: None,
             compile_sequence: 0,
@@ -526,6 +532,7 @@ impl EditorPane {
     /// Open the search bar (`/` forward, `?` backward), saving cursor for Escape-cancel.
     fn open_search(&mut self, backward: bool) {
         let saved = self.state.cursor();
+        self.search_nav_status = None;
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
@@ -534,12 +541,14 @@ impl EditorPane {
             backward,
             replace: None,
             replace_focused: false,
+            wrapped: false,
         });
     }
 
     /// Open the search+replace bar (Cmd-H), focused on the query row.
     fn open_replace(&mut self) {
         let saved = self.state.cursor();
+        self.search_nav_status = None;
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
@@ -548,6 +557,7 @@ impl EditorPane {
             backward: false,
             replace: Some(String::new()),
             replace_focused: false,
+            wrapped: false,
         });
     }
 
@@ -633,24 +643,24 @@ impl EditorPane {
 
         // For forward search: pick first match at or after saved cursor.
         // For backward search: pick last match at or before saved cursor.
-        let idx = if matches.is_empty() {
-            0
+        let (idx, wrapped) = if matches.is_empty() {
+            (0, false)
         } else if backward {
-            matches
+            let found = matches
                 .iter()
                 .rposition(|p| {
                     p.line < saved.line
                         || (p.line == saved.line && p.col <= saved.col)
-                })
-                .unwrap_or(matches.len() - 1)
+                });
+            (found.unwrap_or(matches.len() - 1), found.is_none())
         } else {
-            matches
+            let found = matches
                 .iter()
                 .position(|p| {
                     p.line > saved.line
                         || (p.line == saved.line && p.col >= saved.col)
-                })
-                .unwrap_or(0)
+                });
+            (found.unwrap_or(0), found.is_none())
         };
 
         let dest = matches.get(idx).copied();
@@ -658,6 +668,7 @@ impl EditorPane {
         if let Some(s) = &mut self.search {
             s.matches = matches;
             s.current_idx = idx;
+            s.wrapped = wrapped && dest.is_some();
         }
 
         if let Some(pos) = dest {
@@ -683,18 +694,19 @@ impl EditorPane {
             return;
         }
         let cursor = self.state.cursor();
-        let idx = if backward {
-            matches
+        let (idx, wrapped) = if backward {
+            let found = matches
                 .iter()
-                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
-                .unwrap_or(matches.len() - 1)
+                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+            (found.unwrap_or(matches.len() - 1), found.is_none())
         } else {
-            matches
+            let found = matches
                 .iter()
-                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
-                .unwrap_or(0)
+                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+            (found.unwrap_or(0), found.is_none())
         };
         self.state.move_cursor_to(matches[idx]);
+        self.search_nav_status = Some((idx + 1, matches.len(), wrapped));
         self.update_viewport();
         cx.notify();
     }
@@ -712,18 +724,19 @@ impl EditorPane {
         }
         let cursor = self.state.cursor();
         // `N` is always the reverse of `n`.
-        let idx = if backward {
-            matches
+        let (idx, wrapped) = if backward {
+            let found = matches
                 .iter()
-                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col))
-                .unwrap_or(0)
+                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+            (found.unwrap_or(0), found.is_none())
         } else {
-            matches
+            let found = matches
                 .iter()
-                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col))
-                .unwrap_or(matches.len() - 1)
+                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+            (found.unwrap_or(matches.len() - 1), found.is_none())
         };
         self.state.move_cursor_to(matches[idx]);
+        self.search_nav_status = Some((idx + 1, matches.len(), wrapped));
         self.update_viewport();
         cx.notify();
     }
@@ -1529,6 +1542,33 @@ impl Render for EditorPane {
                     .font_family("Menlo")
                     .child(doc_stats_label),
             )
+            .child(if let Some((cur, total, wrapped)) = self.search_nav_status {
+                // Show match position from the last n/N navigation when the
+                // search bar is closed.
+                if self.search.is_none() {
+                    let label = if wrapped {
+                        format!("{}/{} ↩", cur, total)
+                    } else {
+                        format!("{}/{}", cur, total)
+                    };
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(t.text_faint))
+                                .font_family("Menlo")
+                                .child(label),
+                        )
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                }
+            } else {
+                div().into_any_element()
+            })
             .child(if self.state.is_dirty {
                 div()
                     .text_color(gpui::rgb(t.ochre))
@@ -1548,9 +1588,22 @@ impl Render for EditorPane {
                     .child("  no matches")
                     .into_any_element()
             } else {
+                let count_str = format!("  [{}/{}]", s.current_idx + 1, s.matches.len());
+                let wrap_str = if s.wrapped { "  ↩ wrap" } else { "" };
                 div()
-                    .text_color(gpui::rgb(t.text_faint))
-                    .child(format!("  [{}/{}]", s.current_idx + 1, s.matches.len()))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(t.text_faint))
+                            .child(count_str),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(t.ochre))
+                            .child(wrap_str),
+                    )
                     .into_any_element()
             };
 
