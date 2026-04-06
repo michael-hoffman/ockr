@@ -34,6 +34,7 @@ actions!(
         OpenRecentFiles,
         OpenBacklinks,
         OpenOutline,
+        ToggleZenMode,
         OpenVaultSearch,
         FollowLink,
         OpenDailyNote,

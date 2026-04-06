@@ -40,7 +40,7 @@ use crate::actions::{
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
     OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
-    SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
+    SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
@@ -154,6 +154,12 @@ pub struct MainWindow {
     sidebar_width: f32,
     preview_width: f32,
     drag: Option<DragState>,
+    /// Whether Zen Mode (distraction-free writing) is active.
+    zen_mode: bool,
+    /// Sidebar visibility saved when entering Zen Mode; restored on exit.
+    zen_saved_sidebar: bool,
+    /// Preview width saved when entering Zen Mode; restored on exit.
+    zen_saved_preview: f32,
     palette: Option<Entity<CommandPalette>>,
     /// True when a pane requested the palette; created in next render (needs `&mut Window`).
     open_palette_pending: bool,
@@ -386,6 +392,9 @@ impl MainWindow {
             sidebar_width: 220.0,
             preview_width: 420.0,
             drag: None,
+            zen_mode: false,
+            zen_saved_sidebar: true,
+            zen_saved_preview: 420.0,
             palette: None,
             open_palette_pending: false,
             refocus_editor_pending: false,
@@ -566,6 +575,27 @@ impl MainWindow {
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    fn toggle_zen_mode(
+        &mut self,
+        _: &ToggleZenMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zen_mode {
+            // Exit Zen Mode — restore saved layout state.
+            self.sidebar_visible = self.zen_saved_sidebar;
+            self.preview_width = self.zen_saved_preview;
+            self.zen_mode = false;
+        } else {
+            // Enter Zen Mode — save current layout state then hide chrome.
+            self.zen_saved_sidebar = self.sidebar_visible;
+            self.zen_saved_preview = self.preview_width;
+            self.sidebar_visible = false;
+            self.zen_mode = true;
+        }
         cx.notify();
     }
 
@@ -1278,6 +1308,7 @@ impl MainWindow {
             "buffer-previous" => cx.dispatch_action(&BufferPrevious),
             "buffer-close" => cx.dispatch_action(&BufferClose),
             "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
+            "toggle-zen-mode" => cx.dispatch_action(&ToggleZenMode),
             "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
             "open-recent-files" => cx.dispatch_action(&OpenRecentFiles),
@@ -1802,8 +1833,13 @@ impl Render for MainWindow {
                     self.html_webview = HtmlWebView::new(self.html_link_sender.clone());
                 }
                 if let Some(ref wv) = self.html_webview {
-                    wv.update_frame(preview_x, 0.0, self.preview_width as f64, content_h);
-                    wv.set_hidden(false);
+                    if self.zen_mode {
+                        // Hide the webview while in Zen Mode.
+                        wv.set_hidden(true);
+                    } else {
+                        wv.update_frame(preview_x, 0.0, self.preview_width as f64, content_h);
+                        wv.set_hidden(false);
+                    }
                 }
             }
             PreviewMode::Paged => {
@@ -1845,6 +1881,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_outline))
             .on_action(cx.listener(Self::open_vault_search))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::toggle_zen_mode))
             .on_action(cx.listener(Self::toggle_preview_mode))
             .on_action(cx.listener(Self::export_pdf))
             .on_action(cx.listener(Self::open_daily_note))
@@ -1878,7 +1915,9 @@ impl Render for MainWindow {
         // Each sub-pane is rendered as a flex-col with a tab bar at the top.
 
         let sidebar_w = if self.sidebar_visible { self.sidebar_width + 4.0 } else { 0.0 };
-        let editor_area_w = (content_w as f32 - sidebar_w - self.preview_width - 4.0).max(200.0);
+        // In Zen Mode the preview is hidden, so do not subtract preview_width.
+        let effective_preview_w = if self.zen_mode { 0.0 } else { self.preview_width + 4.0 };
+        let editor_area_w = (content_w as f32 - sidebar_w - effective_preview_w).max(200.0);
 
         // Build a pane column (tab bar + editor) for pane at `idx`.
         let pane_col = |pane_idx: usize, this: &Self, cx: &mut Context<Self>| -> gpui::AnyElement {
@@ -2045,10 +2084,32 @@ impl Render for MainWindow {
             ).with_priority(150)
         });
 
-        root.child(editor_area)
-            .child(handle(DragTarget::Preview, true, cx))
-            .child(preview_col)
-            .when_some(export_toast, |root, toast| root.child(toast))
+        let root = if self.zen_mode {
+            // ── Zen Mode: centered editor, no preview ─────────────────────────
+            // Cap the writing column at 800 px; centre it in the full window.
+            let zen_col_w = (content_w as f32).min(800.0);
+            let centered = div()
+                .flex_1()
+                .h_full()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(px(zen_col_w))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(editor_area),
+                );
+            root.child(centered)
+        } else {
+            root.child(editor_area)
+                .child(handle(DragTarget::Preview, true, cx))
+                .child(preview_col)
+        };
+
+        root.when_some(export_toast, |root, toast| root.child(toast))
             .when_some(self.palette.clone(), |root, p| {
                 root.child(gpui::deferred(p).with_priority(100))
             })

@@ -14,6 +14,7 @@ A fast, modal Typst note editor built with GPUI.
 - **Graph view** — interactive note-relationship graph (`Cmd-Shift-G`)
 - **Plugin system** — sandboxed WASM plugins with typed capability declarations; network (`ockr_http_get`), filesystem, console, and typst-package capabilities; plugin manager panel via `open-plugin-manager`
 - **Document outline** — `Cmd-Shift-O` shows all headings in the active note with level badges and line numbers; click or press Enter to jump to any heading
+- **Zen Mode** — `Ctrl-Cmd-Z` (or `toggle-zen-mode` in the palette) hides the sidebar and preview and centres the writing column at ≤ 800 px; press again to restore the previous layout
 - **In-buffer search & replace** — `/` · `?` · `Cmd-F` · `Cmd-H`
 - **Auto-close pairs** — `(` `[` `{` `"` `$` with smart backspace
 - **Document stats** — live word count, character count, and line count in the status bar; when a selection is active, selected word / char count is shown alongside

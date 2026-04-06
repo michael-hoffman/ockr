@@ -98,6 +98,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewNote, None),
             KeyBinding::new("cmd-s", SaveFile, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-cmd-z", ToggleZenMode, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
             KeyBinding::new("cmd-shift-r", OpenRecentFiles, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
@@ -164,6 +165,7 @@ fn main() {
                 items: vec![
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Toggle Preview Mode", TogglePreviewMode),
+                    MenuItem::action("Zen Mode", ToggleZenMode),
                     MenuItem::separator(),
                     MenuItem::submenu(Menu {
                         name: "Line Numbers".into(),
@@ -255,6 +257,9 @@ fn main() {
         });
         cx.on_action(|_: &OpenOutline, _cx| {
             // Story 34: document outline panel
+        });
+        cx.on_action(|_: &ToggleZenMode, _cx| {
+            // Story 35: zen mode
         });
         cx.on_action(|_: &OpenVaultSearch, _cx| {
             // Story 02+: vault-wide full-text search
@@ -373,6 +378,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("buffer-previous", "buffer-previous  · previous buffer",   Some(":bp")),
         ("buffer-close",    "buffer-close  · close current buffer", Some(":bc")),
         ("toggle-sidebar",  "toggle-sidebar",                       Some(":toggle-sidebar")),
+        ("toggle-zen-mode", "Zen Mode",                             Some("Ctrl-Cmd-Z")),
         // ── GUI commands (Cmd-* shortcuts) ───────────────────────────────────
         ("open-command-palette", "Open Command Palette",            Some("Cmd-P / :")),
         ("open-vault",           "Open Vault",                      Some("Cmd-O")),

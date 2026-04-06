@@ -301,6 +301,7 @@ Same behaviour as Helix Insert mode — see [Auto-close pairs](#auto-close-pairs
 | `Cmd-Enter`   | Follow `[[wikilink]]` under cursor  |
 | `Cmd-T`       | Open / create today's daily note    |
 | `Cmd-B`       | Toggle sidebar                      |
+| `Ctrl-Cmd-Z`  | Toggle Zen Mode (distraction-free)  |
 | `Cmd-\`       | Split pane vertically               |
 | `Cmd-Shift-\` | Split pane horizontally             |
 | `Cmd-W`       | Close current tab (or pane when empty) |
@@ -331,6 +332,7 @@ A `:<hint>` shows the Helix ex-command equivalent.
 | `reload` | Reload current file from disk | `:e` |
 | `reload-settings` | Re-read `settings.toml` without restarting | — |
 | `toggle-sidebar` | Show / hide sidebar | `Cmd-B` |
+| `toggle-zen-mode` | Zen Mode — hide sidebar + preview, centre the writing column | `Ctrl-Cmd-Z` |
 | `toggle-comment` | Toggle `// ` comment on current line / selection | `gc` · `Cmd-/` |
 
 ### File & Buffer
@@ -367,6 +369,7 @@ A `:<hint>` shows the Helix ex-command equivalent.
 |----|-------------|-----------------|
 | `open-graph-view` | Graph view | `Cmd-Shift-G` |
 | `toggle-preview-mode` | HTML ↔ paged preview | `Cmd-Alt-H` |
+| `toggle-zen-mode` | Zen Mode — hides sidebar + preview, centres the writing column at ≤ 800 px | `Ctrl-Cmd-Z` |
 | `open-plugin-manager` | Plugin manager (installed plugins + status) | — |
 | `split-pane-vertical` | Split editor pane vertically | `Cmd-\` |
 | `split-pane-horizontal` | Split editor pane horizontally | `Cmd-Shift-\` |
