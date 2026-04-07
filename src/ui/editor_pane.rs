@@ -209,6 +209,13 @@ pub struct EditorPane {
     /// the compiler returns errors or warnings.  Used to render per-line
     /// indicator gutter marks.
     diagnostics: Vec<Diagnostic>,
+    /// Cached (word_count, char_count) — `None` means stale.
+    /// Invalidated whenever the buffer mutates; recomputed lazily in `render()`.
+    cached_doc_stats: Option<(usize, usize)>,
+    /// Microseconds elapsed for the last `handle_key_down` call (perf overlay).
+    last_key_micros: Option<u128>,
+    /// Whether the `OCKR_PERF=1` timing overlay is enabled (set once at init).
+    perf_overlay: bool,
 }
 
 impl EditorPane {
@@ -248,6 +255,9 @@ impl EditorPane {
             compile_sequence: 0,
             viewport_top: 0,
             diagnostics: Vec::new(),
+            cached_doc_stats: None,
+            last_key_micros: None,
+            perf_overlay: std::env::var_os("OCKR_PERF").is_some(),
         }
     }
 
@@ -337,6 +347,7 @@ impl EditorPane {
         let (undo, redo) = crate::undo_store::load_undo_history(&file.abs_path);
         self.undo_history = undo;
         self.redo_history = redo;
+        self.cached_doc_stats = None;
         self.trigger_compile(cx);
         cx.notify();
     }
@@ -419,6 +430,23 @@ impl EditorPane {
             .map(|l| self.buffer.line(l))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Compute (word_count, char_count) by iterating lines directly.
+    /// Avoids allocating a full buffer join string — O(N) chars but no heap join.
+    fn compute_doc_stats(&self) -> (usize, usize) {
+        let mut words = 0usize;
+        let mut chars = 0usize;
+        let lc = self.buffer.line_count();
+        for i in 0..lc {
+            let line = self.buffer.line(i);
+            words += line.split_whitespace().count();
+            chars += line.chars().count();
+            if i + 1 < lc {
+                chars += 1; // newline between lines
+            }
+        }
+        (words, chars)
     }
 
     /// Move the cursor to `line` (0-based) and scroll the viewport there.
@@ -870,6 +898,7 @@ impl EditorPane {
         let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
         self.state = new_state;
         if effect == SideEffect::BufferChanged {
+            self.cached_doc_stats = None;
             self.trigger_compile(cx);
         }
         self.update_viewport();
@@ -895,6 +924,7 @@ impl EditorPane {
             let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
             self.state = new_state;
             if effect == SideEffect::BufferChanged {
+                self.cached_doc_stats = None;
                 self.trigger_compile(cx);
             }
         }
@@ -1024,6 +1054,11 @@ impl EditorPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let _perf_start: Option<std::time::Instant> = if self.perf_overlay {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let k = &event.keystroke;
 
         // ── Global shortcuts handled before the keymap ────────────────────
@@ -1128,6 +1163,10 @@ impl EditorPane {
         // ── Delegate to the keymap handler ────────────────────────────────
         let result = self.keymap.handle_key(event, &self.state);
         self.execute_keymap_result(result, cx);
+
+        if let Some(start) = _perf_start {
+            self.last_key_micros = Some(start.elapsed().as_micros());
+        }
     }
 
     /// Execute a `KeymapResult` produced by the keymap handler.
@@ -1204,6 +1243,7 @@ impl EditorPane {
                 let (new_state, effect) = apply(cmd, prev, &mut self.buffer);
                 self.state = new_state;
                 if effect == SideEffect::BufferChanged {
+                    self.cached_doc_stats = None;
                     self.trigger_compile(cx);
                 }
                 self.update_viewport();
@@ -1282,6 +1322,7 @@ impl EditorPane {
 
         match effect {
             SideEffect::BufferChanged => {
+                self.cached_doc_stats = None;
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -1304,6 +1345,7 @@ impl EditorPane {
             self.state.mode = Mode::Normal;
             self.state.move_cursor_to(pos);
             self.state.is_dirty = true;
+            self.cached_doc_stats = None;
             self.update_viewport();
             self.trigger_compile(cx);
             cx.notify();
@@ -1318,6 +1360,7 @@ impl EditorPane {
             self.state.mode = Mode::Normal;
             self.state.move_cursor_to(pos);
             self.state.is_dirty = true;
+            self.cached_doc_stats = None;
             self.update_viewport();
             self.trigger_compile(cx);
             cx.notify();
@@ -1453,10 +1496,12 @@ impl Render for EditorPane {
         }
 
         // ── Document stats ─────────────────────────────────────────────────
-        let full_text = self.buffer.text();
-        let word_count: usize = full_text.split_whitespace().count();
-        let char_count: usize = full_text.chars().count();
         let line_count_total: usize = self.buffer.line_count();
+        if self.cached_doc_stats.is_none() {
+            let stats = self.compute_doc_stats();
+            self.cached_doc_stats = Some(stats);
+        }
+        let (word_count, char_count) = self.cached_doc_stats.unwrap();
         let doc_stats_label = format!("{} w · {} ch · {} L", word_count, char_count, line_count_total);
 
         // When a Visual selection is active, also show per-selection stats.
@@ -1790,6 +1835,30 @@ impl Render for EditorPane {
             )
             .child(status_bar)
             .when_some(wikilink_popup, |root, popup| root.child(popup))
+            .when_some(
+                if self.perf_overlay { self.last_key_micros } else { None },
+                |root, micros| {
+                    let label = if micros >= 1_000 {
+                        format!("{:.1} ms", micros as f64 / 1_000.0)
+                    } else {
+                        format!("{} µs", micros)
+                    };
+                    root.child(
+                        div()
+                            .absolute()
+                            .bottom(px(28.0))
+                            .right(px(8.0))
+                            .px_2()
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .bg(gpui::rgba(0x000000cc))
+                            .text_xs()
+                            .font_family("Menlo")
+                            .text_color(gpui::rgb(0x00ff88))
+                            .child(label),
+                    )
+                },
+            )
     }
 }
 
