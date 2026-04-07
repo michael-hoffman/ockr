@@ -101,6 +101,20 @@ impl Render for Sidebar {
             rows.into_any_element()
         };
 
+        // "Indexing…" chip shown while backlink build is in progress (Story 36).
+        let indexing_banner = if vault.indexing {
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint))
+                .child("⟳ Indexing links…")
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         div()
             .track_focus(&self.focus_handle)
             .flex()
@@ -111,6 +125,7 @@ impl Render for Sidebar {
             .border_r_1()
             .border_color(gpui::rgb(t.border_subtle))
             .child(header)
+            .child(indexing_banner)
             .child(body)
     }
 }

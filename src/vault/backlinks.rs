@@ -14,13 +14,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+use serde::{Deserialize, Serialize};
 
 use crate::vault::VaultFile;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// An in-memory graph of wikilink edges across the vault.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct BacklinkIndex {
     /// Maps the **source** file's abs-path to the set of normalised target keys
     /// it links to.  Used to remove stale entries on re-index.
@@ -105,6 +108,76 @@ impl BacklinkIndex {
 
         self.outgoing.insert(source.abs_path.clone(), new_keys);
     }
+}
+
+// ── On-disk cache (Story 37) ──────────────────────────────────────────────────
+
+/// Serialisable envelope written to `<vault>/.ockr/backlinks.cache`.
+#[derive(Serialize, Deserialize)]
+struct BacklinkCacheFile {
+    /// Each entry is (abs_path_string, mtime_seconds) for every vault file at
+    /// the time the cache was written.  If any entry mismatches the current
+    /// file list/mtimes, the cache is rejected and a fresh build is triggered.
+    manifest: Vec<(String, u64)>,
+    index: BacklinkIndex,
+}
+
+fn cache_path(vault_root: &Path) -> PathBuf {
+    vault_root.join(".ockr").join("backlinks.cache")
+}
+
+/// Compute a stable mtime signature for a slice of `VaultFile`s.
+/// Returns `Vec<(abs_path_string, mtime_secs)>` sorted by path.
+fn file_manifest(files: &[VaultFile]) -> Vec<(String, u64)> {
+    let mut m: Vec<(String, u64)> = files
+        .iter()
+        .map(|f| {
+            let mtime = f
+                .abs_path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (f.abs_path.to_string_lossy().into_owned(), mtime)
+        })
+        .collect();
+    m.sort_by(|a, b| a.0.cmp(&b.0));
+    m
+}
+
+/// Try to load a valid cache for `vault_root`.  Returns `Some(index)` only if
+/// the cache exists **and** its manifest exactly matches `current_files`.
+pub fn try_load_cache(vault_root: &Path, current_files: &[VaultFile]) -> Option<BacklinkIndex> {
+    let path = cache_path(vault_root);
+    let bytes = std::fs::read(&path).ok()?;
+    let cache: BacklinkCacheFile = serde_json::from_slice(&bytes).ok()?;
+    let current_manifest = file_manifest(current_files);
+    if cache.manifest == current_manifest {
+        Some(cache.index)
+    } else {
+        None
+    }
+}
+
+/// Persist `index` alongside its file manifest so future starts can skip
+/// the full rebuild.  Failures are silently ignored (the app works fine
+/// without a cache; the next start will just rebuild).
+pub fn save_cache(vault_root: &Path, files: &[VaultFile], index: &BacklinkIndex) {
+    let envelope = BacklinkCacheFile {
+        manifest: file_manifest(files),
+        index: index.clone(),
+    };
+    if let Ok(json) = serde_json::to_vec(&envelope) {
+        let _ = std::fs::write(cache_path(vault_root), json);
+    }
+}
+
+/// Delete the cache file so the next open triggers a fresh build.
+/// Called after an incremental `update_file` so the stored graph stays consistent.
+pub fn invalidate_cache(vault_root: &Path) {
+    let _ = std::fs::remove_file(cache_path(vault_root));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

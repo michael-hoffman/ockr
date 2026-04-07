@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 pub use backlinks::BacklinkIndex;
 
 /// A single note file within the vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VaultFile {
     /// Vault-relative path, e.g. `"notes/my-note.typ"`.
     pub rel_path: PathBuf,
@@ -32,6 +32,9 @@ pub struct VaultState {
     pub files: Vec<VaultFile>,
     /// In-memory backlink graph. Updated on open and on each file save.
     pub backlinks: BacklinkIndex,
+    /// `true` while the backlink index is being built on a background thread.
+    /// The sidebar may show an "Indexing…" hint during this period.
+    pub indexing: bool,
 }
 
 impl VaultState {
@@ -40,32 +43,64 @@ impl VaultState {
             root: None,
             files: Vec::new(),
             backlinks: BacklinkIndex::new(),
+            indexing: false,
         }
     }
 
-    /// Open a directory as a vault: create the `.ockr/` metadata directory if
-    /// absent and scan for `.typ` files.
+    /// Fast open: scan files and check the on-disk backlink cache.
+    ///
+    /// If the cache is fresh (all file mtimes match), load it synchronously and
+    /// return with `indexing = false`.  Otherwise return with an empty index and
+    /// `indexing = true`; the caller is responsible for kicking off a background
+    /// build via [`finish_backlink_build`].
     pub fn open(root: PathBuf) -> Self {
         let ockr_dir = root.join(".ockr");
         if !ockr_dir.exists() {
-            // Best-effort: if we can't create the dir, we carry on anyway.
             let _ = std::fs::create_dir_all(&ockr_dir);
         }
 
         let files = scan_for_typ_files(&root);
-        let backlinks = BacklinkIndex::build(&files);
+
+        // Try the on-disk cache first (Story 37).
+        if let Some(index) = backlinks::try_load_cache(&root, &files) {
+            return Self {
+                root: Some(root),
+                files,
+                backlinks: index,
+                indexing: false,
+            };
+        }
+
+        // Cache miss — return immediately with an empty index; the background
+        // build will call `finish_backlink_build` when done.
         Self {
             root: Some(root),
             files,
-            backlinks,
+            backlinks: BacklinkIndex::new(),
+            indexing: true,
         }
+    }
+
+    /// Called by the background build task when indexing is complete.
+    /// Stores the finished index and writes the on-disk cache.
+    pub fn finish_backlink_build(&mut self, index: BacklinkIndex) {
+        if let Some(ref root) = self.root {
+            backlinks::save_cache(root, &self.files, &index);
+        }
+        self.backlinks = index;
+        self.indexing = false;
     }
 
     /// Re-index a single file after it has been saved.
     /// `content` is the new raw source (before wikilink preprocessing).
+    /// Also invalidates the on-disk cache so the next startup does a fresh build.
     pub fn reindex_file(&mut self, file: &VaultFile, content: &str) {
         let files = self.files.clone();
         self.backlinks.update_file(file, content, &files);
+        // Invalidate the cache — it is now stale for this file.
+        if let Some(ref root) = self.root {
+            backlinks::invalidate_cache(root);
+        }
     }
 }
 

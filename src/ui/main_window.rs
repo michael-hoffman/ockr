@@ -240,20 +240,42 @@ impl MainWindow {
         // Install the plugin registry as a GPUI global.
         cx.set_global(PluginRegistry::new());
 
-        // Load plugins already installed in the vault (probe caps, then real instance).
-        let (plugin_instances, plugin_info) = Self::instantiate_vault_plugins(
-            &wasmtime_engine,
-            vault.read(cx).root.as_deref(),
-            cx.global::<PluginRegistry>().event_tx.clone(),
-            Arc::clone(&plugin_packages),
-        );
-        // Persist metadata and status in the registry for the plugin manager.
+        // ── Story 38: defer plugin loading to background ──────────────────────
+        // Start with an empty plugin map; the background task below will probe
+        // and instantiate vault plugins after the first frame is shown.
+        let plugin_instances: HashMap<String, Arc<Mutex<PluginInstance>>> = HashMap::new();
         {
-            let reg = cx.global_mut::<PluginRegistry>();
-            for (meta, status) in plugin_info {
-                reg.mark_loaded(PluginInfo::from(&meta));
-                reg.plugin_statuses.insert(meta.id, status);
-            }
+            let engine = wasmtime_engine.clone();
+            let vault_root = vault.read(cx).root.clone();
+            let event_tx = cx.global::<PluginRegistry>().event_tx.clone();
+            let pkgs = Arc::clone(&plugin_packages);
+            cx.spawn(async move |this, cx| {
+                let (instances, info) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        Self::instantiate_vault_plugins(
+                            &engine,
+                            vault_root.as_deref(),
+                            event_tx,
+                            pkgs,
+                        )
+                    })
+                    .await;
+                cx.update(|cx| {
+                    this.update(cx, |win, cx| {
+                        win.plugin_instances = instances;
+                        let reg = cx.global_mut::<PluginRegistry>();
+                        for (meta, status) in info {
+                            reg.mark_loaded(PluginInfo::from(&meta));
+                            reg.plugin_statuses.insert(meta.id, status);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .ok();
+            })
+            .detach();
         }
 
         // Spawn a 100ms polling task to drain plugin events onto the UI thread.
@@ -363,14 +385,41 @@ impl MainWindow {
             }
         }).detach();
 
-        // ── Vault change → reload plugins ─────────────────────────────────────
+        // ── Vault change → reload plugins + kick background backlink build ────
         cx.observe(&vault, |this, vault_entity, cx| {
             let new_root = vault_entity.read(cx).root.clone();
             let old_root = this.vault.read(cx).root.clone();
             if new_root != old_root {
                 this.reload_vault_plugins(cx);
             }
+            // If another code path set indexing = true, start the build here.
+            if vault_entity.read(cx).indexing {
+                this.spawn_backlink_build_if_needed(cx);
+            }
         }).detach();
+
+        // ── Story 36: kick off background backlink build if vault was opened ─
+        // Spawn immediately so the window is visible before the index builds.
+        {
+            let vault_for_idx = vault.clone();
+            if vault_for_idx.read(cx).indexing {
+                let files = vault_for_idx.read(cx).files.clone();
+                cx.spawn(async move |_this, cx| {
+                    let index = cx
+                        .background_executor()
+                        .spawn(async move { crate::vault::BacklinkIndex::build(&files) })
+                        .await;
+                    cx.update(|cx| {
+                        vault_for_idx.update(cx, |vs, cx| {
+                            vs.finish_backlink_build(index);
+                            cx.notify();
+                        });
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
 
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
@@ -709,6 +758,7 @@ impl MainWindow {
         self.vault.update(cx, |vs, _cx| {
             *vs = crate::vault::VaultState::open(root.clone());
         });
+        self.spawn_backlink_build_if_needed(cx);
 
         // Route through tab management so the daily note gets a tab.
         let _ = window; // Window not needed — open_tab_in_pane uses open_file_no_focus.
@@ -992,6 +1042,7 @@ impl MainWindow {
         self.vault.update(cx, |vs, _cx| {
             *vs = crate::vault::VaultState::open(vault_root.clone());
         });
+        self.spawn_backlink_build_if_needed(cx);
 
         // Route through tab management.
         self.open_tab_in_pane(self.active_idx, note_path, cx);
@@ -1034,6 +1085,7 @@ impl MainWindow {
         self.vault.update(cx, |vs, _cx| {
             *vs = crate::vault::VaultState::open(vault_root.clone());
         });
+        self.spawn_backlink_build_if_needed(cx);
 
         // Route through tab management.
         let _ = window; // open_tab_in_pane uses open_file_no_focus (no Window needed).
@@ -1473,6 +1525,32 @@ impl MainWindow {
             }
         }
         (instances, info_out)
+    }
+
+    // ── Story 36: background backlink build ───────────────────────────────────
+
+    /// If `vault.indexing` is true, spawn a background task that builds the
+    /// backlink index and calls `finish_backlink_build` when done.
+    fn spawn_backlink_build_if_needed(&self, cx: &mut Context<Self>) {
+        if !self.vault.read(cx).indexing {
+            return;
+        }
+        let vault = self.vault.clone();
+        let files = vault.read(cx).files.clone();
+        cx.spawn(async move |_this, cx| {
+            let index = cx
+                .background_executor()
+                .spawn(async move { crate::vault::BacklinkIndex::build(&files) })
+                .await;
+            cx.update(|cx| {
+                vault.update(cx, |vs, cx| {
+                    vs.finish_backlink_build(index);
+                    cx.notify();
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Unload all plugins from the old vault and load from the new vault root.
