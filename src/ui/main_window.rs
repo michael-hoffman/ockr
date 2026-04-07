@@ -39,7 +39,7 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
     LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    FollowLink, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
     SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
@@ -1297,7 +1297,14 @@ impl MainWindow {
     /// Shared: execute a palette command ID dispatched by the user.
     fn handle_palette_execute(&mut self, id: &str, cx: &mut Context<Self>) {
         match id {
-            "write" | "save-file" => cx.dispatch_action(&SaveFile),
+            "write" | "save-file" => {
+                // SaveFile's on_action handler lives on EditorPane, not MainWindow.
+                // Call save() directly so focus state doesn't matter.
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.save(cx);
+                    cx.notify();
+                });
+            }
             "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
             "quit" => cx.dispatch_action(&Quit),
             "quit-force" => cx.dispatch_action(&ForceQuit),
@@ -1309,23 +1316,59 @@ impl MainWindow {
             "buffer-close" => cx.dispatch_action(&BufferClose),
             "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
             "toggle-zen-mode" => cx.dispatch_action(&ToggleZenMode),
+            "toggle-preview-mode" => cx.dispatch_action(&TogglePreviewMode),
             "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
+            "open-quick-switch" => cx.dispatch_action(&OpenQuickSwitch),
             "open-recent-files" => cx.dispatch_action(&OpenRecentFiles),
+            "follow-link" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.follow_link_at_cursor(cx);
+                });
+            }
             "vault-search" => cx.dispatch_action(&OpenVaultSearch),
             "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
             "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
             "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
             "close-pane" => cx.dispatch_action(&ClosePane),
+            "focus-pane-left"  => cx.dispatch_action(&FocusPaneLeft),
+            "focus-pane-right" => cx.dispatch_action(&FocusPaneRight),
+            "focus-pane-up"    => cx.dispatch_action(&FocusPaneUp),
+            "focus-pane-down"  => cx.dispatch_action(&FocusPaneDown),
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
             "open-plugin-manager" => cx.dispatch_action(&OpenPluginManager),
             "open-backlinks" => cx.dispatch_action(&OpenBacklinks),
             "open-outline" => cx.dispatch_action(&OpenOutline),
-            "open-search" => cx.dispatch_action(&OpenSearch),
-            "open-replace" => cx.dispatch_action(&OpenReplace),
-            "line-numbers-relative" => cx.dispatch_action(&LineNumbersRelative),
-            "line-numbers-absolute" => cx.dispatch_action(&LineNumbersAbsolute),
-            "line-numbers-off"      => cx.dispatch_action(&LineNumbersOff),
+            "open-search" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.open_search(false);
+                    cx.notify();
+                });
+            }
+            "open-replace" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.open_replace();
+                    cx.notify();
+                });
+            }
+            "line-numbers-relative" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Relative);
+                    cx.notify();
+                });
+            }
+            "line-numbers-absolute" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Absolute);
+                    cx.notify();
+                });
+            }
+            "line-numbers-off" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Off);
+                    cx.notify();
+                });
+            }
             "reload-settings" => {
                 let vault_root = self.vault.read(cx).root.clone();
                 let new_settings = crate::settings::load_settings(vault_root.as_deref());

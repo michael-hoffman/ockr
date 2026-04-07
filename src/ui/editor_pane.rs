@@ -475,7 +475,15 @@ impl EditorPane {
         }
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    /// Follow the wikilink under the cursor — callable from the command palette
+    /// where the `FollowLink` action cannot be dispatched via the focus chain.
+    pub fn follow_link_at_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.resolve_wikilink_at_cursor(cx) {
+            cx.emit(EditorPaneEvent::OpenFile(path));
+        }
+    }
+
+    pub fn save(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.state.path.clone() else { return };
         let content = self.buffer.text();
         let _ = std::fs::write(&path, &content);
@@ -540,7 +548,7 @@ impl EditorPane {
     // ── Search ────────────────────────────────────────────────────────────────
 
     /// Open the search bar (`/` forward, `?` backward), saving cursor for Escape-cancel.
-    fn open_search(&mut self, backward: bool) {
+    pub fn open_search(&mut self, backward: bool) {
         let saved = self.state.cursor();
         self.search_nav_status = None;
         self.search = Some(SearchState {
@@ -556,7 +564,7 @@ impl EditorPane {
     }
 
     /// Open the search+replace bar (Cmd-H), focused on the query row.
-    fn open_replace(&mut self) {
+    pub fn open_replace(&mut self) {
         let saved = self.state.cursor();
         self.search_nav_status = None;
         self.search = Some(SearchState {
@@ -569,6 +577,10 @@ impl EditorPane {
             replace_focused: false,
             wrapped: false,
         });
+    }
+
+    pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
+        self.line_number_mode = mode;
     }
 
     /// Route a keystroke to the search bar (or its replace row) while it is open.
