@@ -37,10 +37,10 @@ use gpui::{
 
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
-    LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenGraphView,
-    FollowLink, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace, OpenSearch, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
-    SaveFileAndQuit, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
+    FocusPaneRight, FocusPaneUp, NewNote, OpenBacklinks, OpenCommandPalette,
+    OpenDailyNote, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
+    OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
+    SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
@@ -1357,9 +1357,15 @@ impl MainWindow {
                     cx.notify();
                 });
             }
-            "write-quit" => cx.dispatch_action(&SaveFileAndQuit),
-            "quit" => cx.dispatch_action(&Quit),
-            "quit-force" => cx.dispatch_action(&ForceQuit),
+            "write-quit" => {
+                // Save the active editor, then quit — implement directly because the
+                // SaveFileAndQuit App-level action is a TODO stub.
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.save(cx);
+                });
+                cx.quit();
+            }
+            "quit" | "quit-force" => cx.quit(),
             "reload" => cx.dispatch_action(&ReloadFile),
             "open" | "open-vault" => cx.dispatch_action(&OpenVault),
             "new" | "new-note" => cx.dispatch_action(&NewNote),

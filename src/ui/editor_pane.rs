@@ -2242,14 +2242,16 @@ fn render_line(
     }
 
     // ── Assemble row ──────────────────────────────────────────────────────────
-    let content_row = div().flex().flex_row().children(segs);
+    // `flex_wrap` lets segments spill onto the next visual row when the line
+    // is longer than the editor column — soft word-wrap with the same logical
+    // line number.  `flex_1` makes the content area fill the width left over
+    // after the gutter so wrapping is bounded by the editor pane width.
+    let content_row = div().flex().flex_row().flex_wrap().flex_1().children(segs);
 
     let mut row = div()
         .min_h(line_height)
         .flex()
-        .flex_row()
-        .whitespace_nowrap()
-        .overflow_x_hidden();
+        .flex_row();
 
     // Diagnostic left-border indicator: red stripe for errors, amber for warnings.
     if let Some(sev) = diag_sev {
