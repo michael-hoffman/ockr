@@ -174,6 +174,10 @@ pub enum EditorCommand {
     RepeatLastChange,
     /// Toggle `// ` comment prefix on the current line or selection.
     ToggleComment,
+    /// Increment the integer at or nearest the cursor by 1 (`Ctrl-a`).
+    IncrementNumber,
+    /// Decrement the integer at or nearest the cursor by 1 (`Ctrl-x`).
+    DecrementNumber,
 
     // ── Text object selection (Helix `mi` / `ma`) ─────────────────────────
     /// Select a text object, entering Visual Char mode.

@@ -1165,10 +1165,84 @@ pub fn apply<B: Buffer>(
             (state, BufferChanged)
         }
 
+        // ── Increment / Decrement number under cursor ─────────────────────────
+        IncrementNumber | DecrementNumber => {
+            let delta: i64 = if matches!(cmd, IncrementNumber) { 1 } else { -1 };
+            let pos = state.cursor();
+            let line_str = buf.line(pos.line).to_string();
+            if let Some((byte_start, byte_end, value)) = find_integer_near(&line_str, pos.col) {
+                let new_str = (value + delta).to_string();
+                buf.delete_range(pos.line, byte_start, byte_end);
+                buf.insert(pos.line, byte_start, &new_str);
+                // Leave cursor on the last digit of the new number.
+                let new_col = byte_start + new_str.len().saturating_sub(1);
+                state.move_cursor_to(Pos::new(pos.line, new_col));
+                state.is_dirty = true;
+                (state, BufferChanged)
+            } else {
+                (state, None)
+            }
+        }
+
         // OpenPalette is handled in the UI layer before reaching apply().
         OpenPalette => (state, None),
         Noop => (state, None),
     }
+}
+
+// ── Integer search for Ctrl-a / Ctrl-x ───────────────────────────────────────
+
+/// Find the integer (decimal, optionally negative) at or to the right of `col`
+/// on the given line.  Returns `(byte_start, byte_end, value)`.
+///
+/// Scanning strategy:
+/// 1. If the cursor is already inside a digit run, expand to its full extent.
+/// 2. Otherwise scan right to the next digit run.
+/// A leading `-` is included when the character immediately before the digit
+/// run is `-` and is itself not preceded by a digit (i.e. not `x-5`).
+fn find_integer_near(line: &str, col: usize) -> Option<(usize, usize, i64)> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+
+    // Find the start of a digit run at-or-after `col`.
+    let digit_pos = {
+        let mut i = col.min(len);
+        // If already on a digit, scan left to find the start of this run.
+        if i < len && bytes[i].is_ascii_digit() {
+            while i > 0 && bytes[i - 1].is_ascii_digit() {
+                i -= 1;
+            }
+            i
+        } else {
+            // Scan right for the next digit.
+            loop {
+                if i >= len { return None; }
+                if bytes[i].is_ascii_digit() { break; }
+                i += 1;
+            }
+            i
+        }
+    };
+
+    // Include a leading minus if the character immediately before is `-`
+    // and that `-` is not itself preceded by a digit.
+    let start = if digit_pos > 0 && bytes[digit_pos - 1] == b'-'
+        && (digit_pos < 2 || !bytes[digit_pos - 2].is_ascii_digit())
+    {
+        digit_pos - 1
+    } else {
+        digit_pos
+    };
+
+    // Scan to end of digit run.
+    let mut end = digit_pos;
+    while end < len && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+
+    let num_str = &line[start..end];
+    let value: i64 = num_str.parse().ok()?;
+    Some((start, end, value))
 }
 
 // ── Visual selection helpers ──────────────────────────────────────────────────

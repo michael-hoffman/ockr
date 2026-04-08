@@ -70,6 +70,11 @@ use crate::vault::{VaultFile, VaultState};
 /// comfortably covering any realistic window height.
 const VIEWPORT_LINES: usize = 80;
 
+/// Approximate advance width (px) of one character in Menlo at `text_sm`
+/// (0.875 rem × 16 px/rem = 14 px).  Used for pixel-accurate positioning of
+/// the wikilink popup and the insert-mode cursor bar overlay.
+const CHAR_W: f32 = 8.4;
+
 /// How line numbers are displayed in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineNumberMode {
@@ -111,6 +116,9 @@ struct SearchState {
     replace_focused: bool,
     /// `true` when the last match jump had to wrap around the document boundary.
     wrapped: bool,
+    /// When `Some`, only matches inside this (start, end) inclusive line range
+    /// are considered (used by Visual-mode `s` — select-within-selection).
+    selection_bounds: Option<(Pos, Pos)>,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -588,6 +596,36 @@ impl EditorPane {
             replace: None,
             replace_focused: false,
             wrapped: false,
+            selection_bounds: None,
+        });
+    }
+
+    /// Open the search bar scoped to the current Visual selection.
+    ///
+    /// Only matches within the selection's line range are shown; `n`/`N` stay
+    /// within bounds.  Called by the `SelectInSelection` keymap result (`s` in Visual).
+    pub fn open_search_in_selection(&mut self) {
+        use crate::editor::state::Mode;
+        let saved = self.state.cursor();
+        let bounds = if matches!(self.state.mode, Mode::Visual(_)) {
+            let sel = &self.state.selection;
+            let (a, b) = (sel.anchor, sel.cursor);
+            let (start, end) = if a.line <= b.line { (a, b) } else { (b, a) };
+            Some((start, end))
+        } else {
+            None
+        };
+        self.search_nav_status = None;
+        self.search = Some(SearchState {
+            query: String::new(),
+            matches: Vec::new(),
+            current_idx: 0,
+            saved_cursor: saved,
+            backward: false,
+            replace: None,
+            replace_focused: false,
+            wrapped: false,
+            selection_bounds: bounds,
         });
     }
 
@@ -604,6 +642,7 @@ impl EditorPane {
             replace: Some(String::new()),
             replace_focused: false,
             wrapped: false,
+            selection_bounds: None,
         });
     }
 
@@ -687,12 +726,20 @@ impl EditorPane {
 
     /// Recompute match positions from the current query and jump to the best one.
     fn update_search_matches(&mut self, _cx: &mut Context<Self>) {
-        let (query, saved, backward) = match &self.search {
-            Some(s) => (s.query.clone(), s.saved_cursor, s.backward),
+        let (query, saved, backward, bounds) = match &self.search {
+            Some(s) => (s.query.clone(), s.saved_cursor, s.backward, s.selection_bounds),
             None => return,
         };
 
-        let matches = find_all_matches(&self.buffer, &query);
+        let all_matches = find_all_matches(&self.buffer, &query);
+        // Filter to selection bounds if this is a scoped search.
+        let matches: Vec<Pos> = if let Some((lo, hi)) = bounds {
+            all_matches.into_iter()
+                .filter(|p| p.line >= lo.line && p.line <= hi.line)
+                .collect()
+        } else {
+            all_matches
+        };
 
         // For forward search: pick first match at or after saved cursor.
         // For backward search: pick last match at or before saved cursor.
@@ -1249,6 +1296,36 @@ impl EditorPane {
                 self.update_viewport();
                 cx.notify();
             }
+            KeymapResult::SelectInSelection => {
+                cx.stop_propagation();
+                self.open_search_in_selection();
+                cx.notify();
+            }
+            KeymapResult::JumpDiagnostic { forward } => {
+                cx.stop_propagation();
+                let cursor_line = self.state.cursor().line;
+                let dest = if forward {
+                    // First diagnostic strictly after cursor line; wrap to first.
+                    self.diagnostics.iter()
+                        .filter_map(|d| d.line)
+                        .filter(|&l| l > cursor_line)
+                        .min()
+                        .or_else(|| self.diagnostics.iter().filter_map(|d| d.line).min())
+                } else {
+                    // Last diagnostic strictly before cursor line; wrap to last.
+                    self.diagnostics.iter()
+                        .filter_map(|d| d.line)
+                        .filter(|&l| l < cursor_line)
+                        .max()
+                        .or_else(|| self.diagnostics.iter().filter_map(|d| d.line).max())
+                };
+                if let Some(line) = dest {
+                    use crate::editor::state::Pos;
+                    self.state.move_cursor_to(Pos::new(line, 0));
+                    self.update_viewport();
+                    cx.notify();
+                }
+            }
             KeymapResult::Surround { open, close } => {
                 self.apply_surround(&open, close, cx);
             }
@@ -1739,7 +1816,6 @@ impl Render for EditorPane {
         // Positioned immediately below and to the right of the `[[` opening on
         // the cursor line, using approximate fixed character metrics.
         let wikilink_popup = self.wikilink_complete.as_ref().map(|wl| {
-            const CHAR_W: f32 = 8.4;
             const LINE_H: f32 = 20.0;
             const PADDING: f32 = 16.0;
             // Gutter contributes roughly (digits × CHAR_W) + 12 px right-padding.
@@ -2263,10 +2339,8 @@ fn render_line(
 
     // ── Insert-mode cursor bar ────────────────────────────────────────────────
     // Overlay a 2 px vertical bar at the cursor's character position.
-    // Menlo at text_sm (14 px / 0.875 rem) has a fixed advance of ~8.4 px.
     // The bar is absolutely positioned relative to the content div so it sits
     // exactly at the left edge of the character under the caret.
-    const CHAR_W: f32 = 8.4;
     let insert_bar: Option<gpui::AnyElement> = if is_cursor_line && mode == Mode::Insert {
         // Convert byte cursor to character column for pixel positioning.
         let char_col = text[..cursor_col.min(text_len)].chars().count();
