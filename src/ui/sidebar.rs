@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use gpui::{App, Context, Entity, FocusHandle, Focusable, Render, Window, div, prelude::*};
 
+use crate::plugin::panel::PanelPosition;
+use crate::plugin::registry::PluginRegistry;
 use crate::ui::theme::ThemePalette;
 use crate::vault::VaultState;
 
@@ -20,6 +22,11 @@ use crate::vault::VaultState;
 pub enum SidebarEvent {
     /// User clicked a file row.  Carries the absolute path of the file.
     OpenFile(PathBuf),
+    /// User clicked a plugin panel button in the sidebar.
+    OpenPluginPanel {
+        plugin_id: String,
+        panel_id: String,
+    },
 }
 
 pub struct Sidebar {
@@ -115,6 +122,75 @@ impl Render for Sidebar {
             div().into_any_element()
         };
 
+        // ── Plugin panels registered for sidebar position ─────────────────────
+        let plugin_panel_buttons: Vec<gpui::AnyElement> = if let Some(reg) = cx.try_global::<PluginRegistry>() {
+            let mut buttons: Vec<gpui::AnyElement> = Vec::new();
+            // Collect all sidebar panels from all plugins, sorted by title.
+            let mut sidebar_panels: Vec<(String, String, String)> = reg.plugin_panels
+                .iter()
+                .flat_map(|(plugin_id, panels)| {
+                    panels.iter()
+                        .filter(|p| matches!(p.position, PanelPosition::Sidebar))
+                        .map(|p| (plugin_id.clone(), p.panel_id.clone(), p.title.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            sidebar_panels.sort_by(|a, b| a.2.cmp(&b.2));
+
+            for (btn_idx, (plugin_id, panel_id, title)) in sidebar_panels.into_iter().enumerate() {
+                let pid = plugin_id.clone();
+                let panid = panel_id.clone();
+                let bg_hover = t.bg_hover;
+                let accent = t.ochre;
+                // Offset element IDs past the file list (which uses 0..N).
+                let elem_id = gpui::ElementId::Integer((1_000_000 + btn_idx) as u64);
+                buttons.push(
+                    div()
+                        .id(elem_id)
+                        .px_3()
+                        .py_1()
+                        .text_sm()
+                        .text_color(gpui::rgb(accent))
+                        .hover(move |s| s.bg(gpui::rgb(bg_hover)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SidebarEvent::OpenPluginPanel {
+                                plugin_id: pid.clone(),
+                                panel_id: panid.clone(),
+                            });
+                        }))
+                        .child(format!("⬡ {}", title))
+                        .into_any_element(),
+                );
+            }
+            buttons
+        } else {
+            Vec::new()
+        };
+
+        let plugin_section = if plugin_panel_buttons.is_empty() {
+            div().into_any_element()
+        } else {
+            let mut col = div()
+                .flex()
+                .flex_col()
+                .mt_2()
+                .border_t_1()
+                .border_color(gpui::rgb(t.border_subtle));
+            col = col.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(gpui::rgb(t.text_faint))
+                    .child("PLUGINS"),
+            );
+            for btn in plugin_panel_buttons {
+                col = col.child(btn);
+            }
+            col.into_any_element()
+        };
+
         div()
             .track_focus(&self.focus_handle)
             .flex()
@@ -127,5 +203,6 @@ impl Render for Sidebar {
             .child(header)
             .child(indexing_banner)
             .child(body)
+            .child(plugin_section)
     }
 }

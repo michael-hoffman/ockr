@@ -382,6 +382,18 @@ impl MainWindow {
                 SidebarEvent::OpenFile(abs_path) => {
                     this.open_path(abs_path.clone(), cx);
                 }
+                SidebarEvent::OpenPluginPanel { plugin_id, panel_id } => {
+                    // Look up the RegisteredPanel from the registry and open it.
+                    let panel = cx
+                        .global::<PluginRegistry>()
+                        .plugin_panels
+                        .get(plugin_id)
+                        .and_then(|panels| panels.iter().find(|p| &p.panel_id == panel_id))
+                        .cloned();
+                    if let Some(p) = panel {
+                        this.open_plugin_panel(p, cx);
+                    }
+                }
             }
         }).detach();
 

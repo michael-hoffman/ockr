@@ -49,6 +49,42 @@ fn main() {
                 }
                 return;
             }
+            "list" => {
+                let lock = plugin::loader::Lockfile::load(&vault_root);
+                if lock.plugins.is_empty() {
+                    println!("No plugins installed.");
+                } else {
+                    println!("Installed plugins ({}):", lock.plugins.len());
+                    for e in &lock.plugins {
+                        println!("  {} v{}  ({})", e.id, e.version, e.url);
+                    }
+                }
+                return;
+            }
+            "remove" => {
+                let id = match args.get(2) {
+                    Some(i) => i.as_str(),
+                    None => {
+                        eprintln!("Usage: ockr remove <plugin-id>");
+                        std::process::exit(1);
+                    }
+                };
+                match plugin::loader::remove_plugin(&vault_root, id) {
+                    Ok(()) => println!("Removed plugin '{}'.", id),
+                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                }
+                return;
+            }
+            "help" | "--help" | "-h" => {
+                println!("ockr — a Typst-native editor");
+                println!("Usage:");
+                println!("  ockr                         Launch the editor");
+                println!("  ockr install <url>           Install a plugin from URL");
+                println!("  ockr update                  Update all installed plugins");
+                println!("  ockr list                    List installed plugins");
+                println!("  ockr remove <plugin-id>      Remove an installed plugin");
+                return;
+            }
             _ => {}
         }
     }

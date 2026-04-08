@@ -130,6 +130,24 @@ pub fn update_plugins(vault_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ── remove_plugin ─────────────────────────────────────────────────────────────
+
+/// Remove a plugin by id: delete its WASM file and remove from lockfile.
+pub fn remove_plugin(vault_root: &Path, id: &str) -> Result<(), String> {
+    let mut lock = Lockfile::load(vault_root);
+    let before = lock.plugins.len();
+    lock.plugins.retain(|e| e.id != id);
+    if lock.plugins.len() == before {
+        return Err(format!("Plugin '{}' not found", id));
+    }
+    lock.save(vault_root);
+    let wasm_path = plugin_dir(vault_root).join(format!("{}.wasm", id));
+    if wasm_path.exists() {
+        std::fs::remove_file(&wasm_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ── load_vault_plugins ────────────────────────────────────────────────────────
 
 /// Load all installed plugin WASM bytes from the vault's `.ockr/plugins/` dir.
