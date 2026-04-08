@@ -1156,15 +1156,18 @@ impl MainWindow {
 
         let qs = cx.new(|cx| QuickSwitch::new(ordered, cx));
         qs.read(cx).focus_handle.clone().focus(window);
+        self.refocus_editor_pending = false;
 
         cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| {
             match event {
                 QuickSwitchEvent::Close => {
                     this.quick_switch = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                 }
                 QuickSwitchEvent::Open(path) => {
                     this.quick_switch = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                     this.open_path(path.clone(), cx);
                 }
@@ -1252,15 +1255,18 @@ impl MainWindow {
 
         let panel = cx.new(|cx| BacklinkPanel::new(current_title, incoming, cx));
         panel.read(cx).focus_handle.clone().focus(window);
+        self.refocus_editor_pending = false;
 
         cx.subscribe(&panel, |this, _, event: &BacklinkPanelEvent, cx| {
             match event {
                 BacklinkPanelEvent::Close => {
                     this.backlinks = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                 }
                 BacklinkPanelEvent::Open(path) => {
                     this.backlinks = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                     this.open_path(path.clone(), cx);
                 }
@@ -1286,15 +1292,19 @@ impl MainWindow {
         let text = self.active_editor().read(cx).buffer_text();
         let panel = cx.new(|cx| OutlinePanel::new(text, cx));
         panel.read(cx).focus_handle.clone().focus(window);
+        // Cancel pending editor refocus so the outline panel keeps focus.
+        self.refocus_editor_pending = false;
 
         cx.subscribe(&panel, |this, _, event: &OutlinePanelEvent, cx| {
             match event {
                 OutlinePanelEvent::Close => {
                     this.outline = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                 }
                 OutlinePanelEvent::JumpToLine(line) => {
                     this.outline = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                     let line = *line;
                     this.active_editor().clone().update(cx, |pane, cx| {
@@ -1323,15 +1333,18 @@ impl MainWindow {
         let files = self.vault.read(cx).files.clone();
         let panel = cx.new(|cx| VaultSearch::new(files, cx));
         panel.read(cx).focus_handle.clone().focus(window);
+        self.refocus_editor_pending = false;
 
         cx.subscribe(&panel, |this, _, event: &VaultSearchEvent, cx| {
             match event {
                 VaultSearchEvent::Close => {
                     this.vault_search = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                 }
                 VaultSearchEvent::Open(path, line_no) => {
                     this.vault_search = None;
+                    this.refocus_editor_pending = true;
                     cx.notify();
                     this.open_path(path.clone(), cx);
                     let line = *line_no;

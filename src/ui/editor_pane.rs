@@ -2160,26 +2160,40 @@ fn render_line(
     boundaries.dedup();
 
     // ── Mode-derived colours ──────────────────────────────────────────────────
-    let cursor_rgb = match mode {
-        Mode::Insert   => gpui::rgb(t.mode_insert),
-        Mode::Normal   => gpui::rgb(t.mode_normal),
-        Mode::Visual(_)=> gpui::rgb(t.mode_visual),
+    let cursor_bg: gpui::Hsla = match mode {
+        Mode::Insert   => gpui::rgb(t.mode_insert).into(),
+        Mode::Normal   => gpui::rgb(t.mode_normal).into(),
+        Mode::Visual(_)=> gpui::rgb(t.mode_visual).into(),
     };
-    let sel_bg           = gpui::rgb(t.ochre_dim);
+    let cursor_fg: gpui::Hsla = gpui::rgb(t.cursor_fg).into();
+    let sel_bg: gpui::Hsla    = gpui::rgb(t.ochre_dim).into();
     // Non-current match: translucent ochre tint.
-    let match_bg         = rgba(((t.ochre as u64) << 8 | 0x55) as u32);
+    let match_bg: gpui::Hsla  = rgba(((t.ochre as u64) << 8 | 0x55) as u32).into();
     // Current (focused) match: solid ochre, inverted text.
-    let focused_bg       = gpui::rgb(t.ochre);
+    let focused_bg: gpui::Hsla = gpui::rgb(t.ochre).into();
     // Matching bracket highlight.
-    let bracket_match_bg = gpui::rgb(t.bracket_match_bg);
+    let bracket_bg: gpui::Hsla = gpui::rgb(t.bracket_match_bg).into();
 
-    // ── Build segments ────────────────────────────────────────────────────────
-    let mut segs: Vec<gpui::AnyElement> = Vec::new();
+    // ── Build TextRun list ────────────────────────────────────────────────────
+    // Each run covers a byte range of the line text.  We use `StyledText` with
+    // explicit `TextRun`s so the whole line is a single text layout that wraps
+    // naturally at word boundaries when wider than the editor column.
+    let base_font = gpui::font("Menlo");
+    let mut runs: Vec<gpui::TextRun> = Vec::with_capacity(boundaries.len().saturating_sub(1));
+
+    // Append a trailing space when the cursor sits at end-of-line so the EOL
+    // cursor position is visible (the space gets the cursor highlight).
+    let eol_cursor = is_cursor_line && cursor_col >= text_len;
+    let text_content: String = if eol_cursor {
+        format!("{} ", text)
+    } else {
+        text.clone()
+    };
 
     for w in boundaries.windows(2) {
         let (a, b) = (w[0], w[1]);
         if a >= b { continue; }
-        let Some(seg_text) = text.get(a..b) else { continue };
+        if text.get(a..b).is_none() { continue; }
 
         let is_cursor_block =
             is_cursor_line && a == cursor_col && cursor_col < text_len && mode != Mode::Insert;
@@ -2188,66 +2202,125 @@ fn render_line(
 
         // Foreground and font attributes from syntax spans (or default).
         let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
-        let syn_fg = active_span.map(|sp| sp.color).unwrap_or(default_fg);
-        let syn_bold = active_span.map(|sp| sp.bold).unwrap_or(false);
+        let syn_fg: gpui::Hsla = gpui::rgb(
+            active_span.map(|sp| sp.color).unwrap_or(default_fg)
+        ).into();
+        let syn_bold   = active_span.map(|sp| sp.bold).unwrap_or(false);
         let syn_italic = active_span.map(|sp| sp.italic).unwrap_or(false);
 
-        let cell = div().text_sm().font_family("Menlo");
-        // Apply bold / italic from syntax spans.
-        let cell = if syn_bold {
-            cell.font_weight(gpui::FontWeight::BOLD)
-        } else {
-            cell
+        let font = gpui::Font {
+            weight: if syn_bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL },
+            style:  if syn_italic { gpui::FontStyle::Italic } else { gpui::FontStyle::Normal },
+            ..base_font.clone()
         };
-        let cell = if syn_italic { cell.italic() } else { cell };
 
-        let cell = if is_cursor_block {
-            cell.text_color(gpui::rgb(t.cursor_fg)).bg(cursor_rgb)
+        let (fg, bg, underline) = if is_cursor_block {
+            (cursor_fg, Some(cursor_bg), None)
         } else if is_cursor_bar {
-            cell.text_color(gpui::rgb(syn_fg))
-                .border_l_2()
-                .border_color(cursor_rgb)
+            // Insert-mode cursor: render the character normally; the caret bar
+            // is painted as an absolute-positioned overlay below.
+            (syn_fg, None, None)
         } else if focused_match.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
-            cell.text_color(gpui::rgb(t.cursor_fg)).bg(focused_bg)
+            (cursor_fg, Some(focused_bg), None)
         } else if other_matches.iter().any(|&(s, e)| s <= a && a < e) {
-            cell.text_color(gpui::rgb(syn_fg)).bg(match_bg)
+            (syn_fg, Some(match_bg), None)
         } else if bracket_range.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
-            cell.text_color(gpui::rgb(syn_fg)).bg(bracket_match_bg)
+            (syn_fg, Some(bracket_bg), None)
         } else if in_selection {
-            cell.text_color(gpui::rgb(syn_fg)).bg(sel_bg)
+            (syn_fg, Some(sel_bg), None)
         } else {
-            cell.text_color(gpui::rgb(syn_fg))
+            (syn_fg, None, None)
         };
 
-        segs.push(cell.child(seg_text.to_string()).into_any_element());
+        runs.push(gpui::TextRun {
+            len: b - a,
+            font,
+            color: fg,
+            background_color: bg,
+            underline,
+            strikethrough: None,
+        });
     }
 
-    // Cursor at end-of-line (when cursor_col >= text_len).
-    if is_cursor_line && cursor_col >= text_len {
-        let eol = if mode != Mode::Insert {
-            div()
-                .text_sm().font_family("Menlo")
-                .text_color(gpui::rgb(t.cursor_fg))
-                .bg(cursor_rgb)
-                .child(" ")
+    // End-of-line cursor run (over the appended trailing space).
+    if eol_cursor {
+        let (fg, bg) = if mode != Mode::Insert {
+            (cursor_fg, Some(cursor_bg))
         } else {
-            div()
-                .text_sm().font_family("Menlo")
-                .text_color(gpui::rgb(t.text_muted))
-                .border_l_2()
-                .border_color(cursor_rgb)
-                .child(" ")
+            // Insert cursor at EOL: show a plain space; the bar overlay below
+            // handles the visual caret.
+            (gpui::rgb(t.text_muted).into(), None)
         };
-        segs.push(eol.into_any_element());
+        runs.push(gpui::TextRun {
+            len: 1, // the trailing space appended above
+            font: base_font.clone(),
+            color: fg,
+            background_color: bg,
+            underline: None,
+            strikethrough: None,
+        });
     }
+
+    // ── Insert-mode cursor bar ────────────────────────────────────────────────
+    // Overlay a 2 px vertical bar at the cursor's character position.
+    // Menlo at text_sm (14 px / 0.875 rem) has a fixed advance of ~8.4 px.
+    // The bar is absolutely positioned relative to the content div so it sits
+    // exactly at the left edge of the character under the caret.
+    const CHAR_W: f32 = 8.4;
+    let insert_bar: Option<gpui::AnyElement> = if is_cursor_line && mode == Mode::Insert {
+        // Convert byte cursor to character column for pixel positioning.
+        let char_col = text[..cursor_col.min(text_len)].chars().count();
+        Some(
+            div()
+                .absolute()
+                .left(px(char_col as f32 * CHAR_W))
+                .top(px(0.0))
+                .w(px(2.0))
+                .h(px(20.0)) // line_height
+                .bg(gpui::rgb(t.mode_insert))
+                .into_any_element(),
+        )
+    } else {
+        None
+    };
+
+    // ── Assemble content ──────────────────────────────────────────────────────
+    // `StyledText` renders the whole line as a single text layout that wraps at
+    // word boundaries when the available width is narrower than the text.  This
+    // gives proper soft-wrap behaviour — the same logical line number covers
+    // multiple visual rows.  `flex_1` ensures the content div fills the width
+    // left over after the gutter so the wrap constraint is the editor column.
+    // `min_w_0()` zeroes the flex item's default `min-width: auto` so taffy
+    // can shrink the content div below its text's natural (unwrapped) width.
+    // Without it the flex algorithm honours the minimum content size, the div
+    // overflows the row, and text escapes past the editor boundary.
+    // With `min_w_0()` taffy assigns a definite known_dimensions.width equal
+    // to the flex-allocated width, which StyledText receives as its wrap
+    // constraint, producing proper soft word-wrap.
+    let content = if runs.is_empty() {
+        // Empty line — render a zero-width placeholder so the row has min_h.
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .text_sm()
+            .font_family("Menlo")
+            .child("")
+            .when_some(insert_bar, |d, bar| d.child(bar))
+            .into_any_element()
+    } else {
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .text_sm()
+            .font_family("Menlo")
+            .child(gpui::StyledText::new(text_content).with_runs(runs))
+            .when_some(insert_bar, |d, bar| d.child(bar))
+            .into_any_element()
+    };
 
     // ── Assemble row ──────────────────────────────────────────────────────────
-    // `flex_wrap` lets segments spill onto the next visual row when the line
-    // is longer than the editor column — soft word-wrap with the same logical
-    // line number.  `flex_1` makes the content area fill the width left over
-    // after the gutter so wrapping is bounded by the editor pane width.
-    let content_row = div().flex().flex_row().flex_wrap().flex_1().children(segs);
-
     let mut row = div()
         .min_h(line_height)
         .flex()
@@ -2265,7 +2338,7 @@ fn render_line(
     if let Some(g) = gutter_cell {
         row = row.child(g);
     }
-    row.child(content_row).into_any_element()
+    row.child(content).into_any_element()
 }
 
 // ── Key translation ───────────────────────────────────────────────────────────
