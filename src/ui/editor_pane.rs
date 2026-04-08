@@ -234,6 +234,17 @@ pub struct EditorPane {
     macro_playing: bool,
     /// Register of the most recently played macro (`@@` shortcut).
     last_macro_reg: Option<char>,
+    /// When `true`, the viewport is kept centred on the cursor line
+    /// (typewriter / focus mode).  Toggled via `toggle-typewriter-mode`.
+    typewriter_mode: bool,
+    /// Word-count writing target parsed from frontmatter `target: N`.
+    /// `None` = no target set.
+    word_target: Option<usize>,
+    /// Misspelled word spans on visible lines, cached between renders.
+    ///
+    /// Each entry is `(line, byte_start, byte_end)`.  Invalidated whenever
+    /// the buffer changes.  Built on demand in `render()`.
+    spell_errors: Option<Vec<(usize, usize, usize)>>,
 }
 
 impl EditorPane {
@@ -281,6 +292,9 @@ impl EditorPane {
             macros: std::collections::HashMap::new(),
             macro_playing: false,
             last_macro_reg: None,
+            typewriter_mode: false,
+            word_target: None,
+            spell_errors: None,
         }
     }
 
@@ -371,6 +385,8 @@ impl EditorPane {
         self.undo_history = undo;
         self.redo_history = redo;
         self.cached_doc_stats = None;
+        self.spell_errors = None;
+        self.refresh_word_target();
         self.trigger_compile(cx);
         cx.notify();
     }
@@ -438,11 +454,31 @@ impl EditorPane {
     /// Does not call `cx.notify()` — the caller already will.
     fn update_viewport(&mut self) {
         let cursor_line = self.state.cursor().line;
-        if cursor_line < self.viewport_top {
-            self.viewport_top = cursor_line;
-        } else if cursor_line >= self.viewport_top + VIEWPORT_LINES {
-            self.viewport_top = cursor_line + 1 - VIEWPORT_LINES;
+        if self.typewriter_mode {
+            // Keep cursor centred in the viewport.
+            let half = VIEWPORT_LINES / 2;
+            self.viewport_top = cursor_line.saturating_sub(half);
+        } else {
+            if cursor_line < self.viewport_top {
+                self.viewport_top = cursor_line;
+            } else if cursor_line >= self.viewport_top + VIEWPORT_LINES {
+                self.viewport_top = cursor_line + 1 - VIEWPORT_LINES;
+            }
         }
+    }
+
+    /// Toggle typewriter (focus) mode: keeps the cursor centred vertically.
+    pub fn toggle_typewriter_mode(&mut self) {
+        self.typewriter_mode = !self.typewriter_mode;
+        self.update_viewport();
+    }
+
+    /// Scan the first `---` frontmatter block for `target: N` and cache it.
+    ///
+    /// Called whenever the buffer is saved or reloaded.  Returns `None` if
+    /// there is no frontmatter or no `target:` key.
+    pub fn refresh_word_target(&mut self) {
+        self.word_target = parse_word_target_from_buffer(&self.buffer);
     }
 
     /// Returns the full text of the current buffer (lines joined by `\n`).
@@ -987,6 +1023,7 @@ impl EditorPane {
             self.state = new_state;
             if effect == SideEffect::BufferChanged {
                 self.cached_doc_stats = None;
+                self.spell_errors = None;
                 self.trigger_compile(cx);
             }
         }
@@ -1306,6 +1343,7 @@ impl EditorPane {
                 self.state = new_state;
                 if effect == SideEffect::BufferChanged {
                     self.cached_doc_stats = None;
+                self.spell_errors = None;
                     self.trigger_compile(cx);
                 }
                 self.update_viewport();
@@ -1459,6 +1497,7 @@ impl EditorPane {
         match effect {
             SideEffect::BufferChanged => {
                 self.cached_doc_stats = None;
+                self.spell_errors = None;
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -1577,6 +1616,12 @@ impl Render for EditorPane {
 
         let lnm = self.line_number_mode;
 
+        // ── Spell check (lazy, cached) ──────────────────────────────────────
+        if self.spell_errors.is_none() {
+            self.spell_errors = Some(check_spelling(&self.buffer, first, last));
+        }
+        let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);
+
         let mut line_elements = Vec::with_capacity(last - first);
         for i in first..last {
             let text = self.buffer.line(i).to_string();
@@ -1624,10 +1669,16 @@ impl Render for EditorPane {
                     (m.col, end)
                 });
 
+            // Collect spell error byte-ranges for this line.
+            let line_spell_errors: Vec<(usize, usize)> = spell_errors_cache.iter()
+                .filter(|&&(l, _, _)| l == i)
+                .map(|&(_, s, e)| (s, e))
+                .collect();
+
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
                 lnm, line_count, &other_matches, focused_match, diag_sev,
-                bracket_range, &t,
+                bracket_range, &line_spell_errors, &t,
             ));
         }
 
@@ -1638,7 +1689,12 @@ impl Render for EditorPane {
             self.cached_doc_stats = Some(stats);
         }
         let (word_count, char_count) = self.cached_doc_stats.unwrap();
-        let doc_stats_label = format!("{} w · {} ch · {} L", word_count, char_count, line_count_total);
+        let doc_stats_label = if let Some(target) = self.word_target {
+            let pct = ((word_count as f64 / target as f64) * 100.0).min(100.0) as usize;
+            format!("{} / {} w ({}%) · {} ch · {} L", word_count, target, pct, char_count, line_count_total)
+        } else {
+            format!("{} w · {} ch · {} L", word_count, char_count, line_count_total)
+        };
 
         // When a Visual selection is active, also show per-selection stats.
         let sel_stats_label: Option<String> = if matches!(mode, Mode::Visual(_)) {
@@ -2183,6 +2239,92 @@ fn operator_kind_to_command(op: OperatorKind) -> EditorCommand {
     }
 }
 
+/// Parse a `target: N` (or `goal: N`) value from the YAML frontmatter block
+/// at the top of the buffer (between `---` delimiters).  Returns `None` if
+/// there is no frontmatter or no matching key.
+fn parse_word_target_from_buffer(buf: &InMemoryBuffer) -> Option<usize> {
+    let line_count = buf.line_count();
+    if line_count < 2 { return None; }
+    if buf.line(0).trim() != "---" { return None; }
+    // Find closing `---`.
+    let end = (1..line_count).find(|&i| buf.line(i).trim() == "---")?;
+    for i in 1..end {
+        let line = buf.line(i);
+        for key in &["target:", "goal:", "wc-target:", "wordcount-target:"] {
+            if let Some(rest) = line.trim().strip_prefix(key) {
+                let val = rest.trim();
+                if let Ok(n) = val.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Spell-check visible lines of `buf` using `NSSpellChecker` (macOS only).
+///
+/// Returns a vec of `(line, byte_start, byte_end)` for each misspelled word
+/// span within the lines `[first_line, last_line)`.  Short-word runs (1–2
+/// chars) and lines inside the frontmatter block are skipped.
+///
+/// On non-macOS platforms returns an empty vec.
+fn check_spelling(
+    buf: &InMemoryBuffer,
+    first_line: usize,
+    last_line: usize,
+) -> Vec<(usize, usize, usize)> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSSpellChecker;
+        use objc2_foundation::NSString;
+
+        let mut errors: Vec<(usize, usize, usize)> = Vec::new();
+        let checker = NSSpellChecker::sharedSpellChecker();
+
+        // Determine frontmatter range so we skip those lines.
+        let lc = buf.line_count();
+        let fm_end = if lc > 1 && buf.line(0).trim() == "---" {
+            (1..lc).find(|&i| buf.line(i).trim() == "---").unwrap_or(0)
+        } else {
+            0
+        };
+
+        let last = last_line.min(lc);
+        for line_idx in first_line..last {
+            // Skip frontmatter.
+            if line_idx <= fm_end && fm_end > 0 { continue; }
+
+            let line = buf.line(line_idx).to_string();
+            if line.trim().is_empty() { continue; }
+
+            let ns_line = NSString::from_str(&line);
+            let byte_len = line.len();
+            let mut pos: usize = 0;
+            loop {
+                let range = checker
+                    .checkSpellingOfString_startingAt(
+                        &ns_line,
+                        pos as isize,
+                    );
+                if range.length == 0 { break; }
+                let start = range.location as usize;
+                let end = (range.location + range.length) as usize;
+                if start >= byte_len { break; }
+                let end = end.min(byte_len);
+                // Skip 1–2-char "words" (likely markup or abbreviations).
+                if end - start > 2 {
+                    errors.push((line_idx, start, end));
+                }
+                pos = end;
+            }
+        }
+        errors
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (buf, first_line, last_line); Vec::new() }
+}
+
 /// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
 /// Returns an empty vec if `query` is empty.
 fn find_all_matches(buf: &InMemoryBuffer, query: &str) -> Vec<Pos> {
@@ -2215,6 +2357,7 @@ fn render_line(
     focused_match: Option<(usize, usize)>,
     diag_sev: Option<DiagnosticSeverity>,
     bracket_range: Option<(usize, usize)>,
+    spell_errors: &[(usize, usize)],
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -2289,6 +2432,10 @@ fn render_line(
         boundaries.push(s);
         boundaries.push(e);
     }
+    for &(s, e) in spell_errors {
+        boundaries.push(s);
+        boundaries.push(e);
+    }
     // Keep only valid UTF-8 char boundaries inside the string.
     boundaries.retain(|&b| b <= text_len && text.is_char_boundary(b));
     boundaries.sort_unstable();
@@ -2349,22 +2496,33 @@ fn render_line(
             ..base_font.clone()
         };
 
+        let is_spell_error = spell_errors.iter().any(|&(s, e)| s <= a && a < e);
+        let spell_underline = if is_spell_error {
+            Some(gpui::UnderlineStyle {
+                thickness: gpui::px(1.5),
+                color: Some(gpui::rgb(0xff5555u32).into()),
+                wavy: true,
+            })
+        } else {
+            None
+        };
+
         let (fg, bg, underline) = if is_cursor_block {
             (cursor_fg, Some(cursor_bg), None)
         } else if is_cursor_bar {
             // Insert-mode cursor: render the character normally; the caret bar
             // is painted as an absolute-positioned overlay below.
-            (syn_fg, None, None)
+            (syn_fg, None, spell_underline)
         } else if focused_match.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
             (cursor_fg, Some(focused_bg), None)
         } else if other_matches.iter().any(|&(s, e)| s <= a && a < e) {
-            (syn_fg, Some(match_bg), None)
+            (syn_fg, Some(match_bg), spell_underline)
         } else if bracket_range.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
-            (syn_fg, Some(bracket_bg), None)
+            (syn_fg, Some(bracket_bg), spell_underline)
         } else if in_selection {
-            (syn_fg, Some(sel_bg), None)
+            (syn_fg, Some(sel_bg), spell_underline)
         } else {
-            (syn_fg, None, None)
+            (syn_fg, None, spell_underline)
         };
 
         runs.push(gpui::TextRun {

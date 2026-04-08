@@ -34,7 +34,7 @@ reqwest = { version = "0.12", features = ["blocking"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSImage", "NSView", "NSWindow", "NSSpellChecker"] }
 objc2-web-kit = { version = "0.3.2", features = [
     "WKWebView",
     "WKWebViewConfiguration",

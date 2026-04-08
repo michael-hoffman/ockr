@@ -1387,6 +1387,12 @@ impl MainWindow {
             "buffer-close" => cx.dispatch_action(&BufferClose),
             "toggle-sidebar" => cx.dispatch_action(&ToggleSidebar),
             "toggle-zen-mode" => cx.dispatch_action(&ToggleZenMode),
+            "toggle-typewriter-mode" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.toggle_typewriter_mode();
+                    cx.notify();
+                });
+            }
             "toggle-preview-mode" => cx.dispatch_action(&TogglePreviewMode),
             "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
