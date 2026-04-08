@@ -88,6 +88,12 @@ pub enum KeymapResult {
     Pending,
     /// Not handled by the keymap.  Caller should check global shortcuts.
     Passthrough,
+    /// Begin recording keystrokes into register `reg`.
+    StartMacro(char),
+    /// Finish recording and save the macro.
+    StopMacro,
+    /// Replay the macro stored in register `reg`.
+    PlayMacro(char),
 }
 
 // ── Trait ─────────────────────────────────────────────────────────────────────
@@ -108,4 +114,9 @@ pub trait KeymapHandler: Send {
 
     /// How the cursor should render in the current state.
     fn cursor_style(&self, state: &EditorState) -> CursorStyle;
+
+    /// Notify the keymap that macro recording has started (`true`) or stopped
+    /// (`false`).  The keymap may use this to adjust key handling (e.g. `q`
+    /// to stop recording when active).  Default implementation is a no-op.
+    fn set_macro_recording(&mut self, _active: bool) {}
 }

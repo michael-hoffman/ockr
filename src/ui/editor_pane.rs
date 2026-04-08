@@ -224,6 +224,16 @@ pub struct EditorPane {
     last_key_micros: Option<u128>,
     /// Whether the `OCKR_PERF=1` timing overlay is enabled (set once at init).
     perf_overlay: bool,
+    /// Which register is currently being recorded into (`None` = not recording).
+    recording_macro: Option<char>,
+    /// Commands recorded so far in the current macro session (while recording).
+    macro_buffer: Vec<EditorCommand>,
+    /// Named macro registers: `reg → command sequence`.
+    macros: std::collections::HashMap<char, Vec<EditorCommand>>,
+    /// `true` during macro playback — suppresses re-recording.
+    macro_playing: bool,
+    /// Register of the most recently played macro (`@@` shortcut).
+    last_macro_reg: Option<char>,
 }
 
 impl EditorPane {
@@ -266,6 +276,11 @@ impl EditorPane {
             cached_doc_stats: None,
             last_key_micros: None,
             perf_overlay: std::env::var_os("OCKR_PERF").is_some(),
+            recording_macro: None,
+            macro_buffer: Vec::new(),
+            macros: std::collections::HashMap::new(),
+            macro_playing: false,
+            last_macro_reg: None,
         }
     }
 
@@ -1337,6 +1352,41 @@ impl EditorPane {
             KeymapResult::Command(cmd) => {
                 self.execute_command(cmd, cx);
             }
+            KeymapResult::StartMacro(reg) => {
+                cx.stop_propagation();
+                self.recording_macro = Some(reg);
+                self.macro_buffer.clear();
+                self.keymap.set_macro_recording(true);
+                cx.notify();
+            }
+            KeymapResult::StopMacro => {
+                cx.stop_propagation();
+                if let Some(reg) = self.recording_macro.take() {
+                    let cmds = std::mem::take(&mut self.macro_buffer);
+                    self.macros.insert(reg, cmds);
+                }
+                self.keymap.set_macro_recording(false);
+                cx.notify();
+            }
+            KeymapResult::PlayMacro(reg) => {
+                cx.stop_propagation();
+                // `@` (the at-sign char) means "replay last macro".
+                let target_reg = if reg == '@' {
+                    self.last_macro_reg
+                } else {
+                    Some(reg)
+                };
+                if let Some(r) = target_reg {
+                    if let Some(cmds) = self.macros.get(&r).cloned() {
+                        self.last_macro_reg = Some(r);
+                        self.macro_playing = true;
+                        for cmd in cmds {
+                            self.execute_command(cmd, cx);
+                        }
+                        self.macro_playing = false;
+                    }
+                }
+            }
         }
     }
 
@@ -1380,6 +1430,15 @@ impl EditorPane {
         } else {
             None
         };
+
+        // Record this command into the macro buffer (when recording and not playing back).
+        // We record ALL commands except Noop/RepeatLastChange so movement is captured too.
+        if self.recording_macro.is_some()
+            && !self.macro_playing
+            && !matches!(cmd, EditorCommand::Noop | EditorCommand::RepeatLastChange)
+        {
+            self.macro_buffer.push(cmd.clone());
+        }
 
         let prev_state = std::mem::take(&mut self.state);
         let (new_state, effect) = apply(cmd, prev_state, &mut self.buffer);

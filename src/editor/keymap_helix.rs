@@ -48,18 +48,25 @@ enum PendingKey {
     OpenBracket,
     /// `]` pressed; awaiting second key for bracket-navigation.
     CloseBracket,
+    /// `q` pressed (not recording); awaiting register character.
+    MacroRecord,
+    /// `@` pressed; awaiting register character to play back.
+    MacroPlay,
 }
 
 // ── HelixKeymap ──────────────────────────────────────────────────────────────
 
 pub struct HelixKeymap {
     pending: PendingKey,
+    /// `true` while a macro is actively being recorded.
+    recording: bool,
 }
 
 impl HelixKeymap {
     pub fn new() -> Self {
         Self {
             pending: PendingKey::None,
+            recording: false,
         }
     }
 }
@@ -304,6 +311,47 @@ impl KeymapHandler for HelixKeymap {
             return KeymapResult::SelectInSelection;
         }
 
+        // ── Macro record / play (`q` / `@`) ────────────────────────────
+        if state.mode == Mode::Normal
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && !k.modifiers.shift
+            && self.pending == PendingKey::None
+        {
+            if k.key == "q" {
+                if self.recording {
+                    // Stop recording.
+                    return KeymapResult::StopMacro;
+                } else {
+                    // Start recording: wait for register key.
+                    self.pending = PendingKey::MacroRecord;
+                    return KeymapResult::Pending;
+                }
+            }
+            if k.key == "@" || k.key_char.as_deref() == Some("@") {
+                self.pending = PendingKey::MacroPlay;
+                return KeymapResult::Pending;
+            }
+        }
+        if self.pending == PendingKey::MacroRecord {
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    return KeymapResult::StartMacro(ch);
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+        if self.pending == PendingKey::MacroPlay {
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    return KeymapResult::PlayMacro(ch);
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+
         // ── `/`, `?` search and `n`/`N`/`*`/`#` ────────────────────────
         if in_modal && !k.modifiers.platform && !k.modifiers.control {
             let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
@@ -427,6 +475,10 @@ impl KeymapHandler for HelixKeymap {
             Mode::Insert => CursorStyle::Line,
             _ => CursorStyle::Block,
         }
+    }
+
+    fn set_macro_recording(&mut self, active: bool) {
+        self.recording = active;
     }
 }
 
