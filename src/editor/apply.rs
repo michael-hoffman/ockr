@@ -1187,7 +1187,65 @@ pub fn apply<B: Buffer>(
         // OpenPalette is handled in the UI layer before reaching apply().
         OpenPalette => (state, None),
         Noop => (state, None),
+
+        // ── Multi-cursor commands (Story 22) ─────────────────────────────
+        AddCursorBelow => {
+            let pos = state.cursor();
+            let line_count = buf.line_count();
+            if pos.line + 1 < line_count {
+                let next_line = buf.line(pos.line + 1).to_string();
+                // Clamp column to valid byte boundary on the new line.
+                let new_col = byte_boundary_clamp(&next_line, pos.col);
+                let new_pos = Pos::new(pos.line + 1, new_col);
+                if !state.extra_cursors.contains(&new_pos) {
+                    state.extra_cursors.push(new_pos);
+                }
+                // Advance primary cursor to the new line too (Helix behaviour).
+                state.move_cursor_to(new_pos);
+            }
+            (state, None)
+        }
+
+        AddCursorAbove => {
+            let pos = state.cursor();
+            if pos.line > 0 {
+                let prev_line = buf.line(pos.line - 1).to_string();
+                let new_col = byte_boundary_clamp(&prev_line, pos.col);
+                let new_pos = Pos::new(pos.line - 1, new_col);
+                if !state.extra_cursors.contains(&new_pos) {
+                    state.extra_cursors.push(new_pos);
+                }
+                // Move primary cursor to the new line too.
+                state.move_cursor_to(new_pos);
+            }
+            (state, None)
+        }
+
+        KeepPrimaryCursor => {
+            state.extra_cursors.clear();
+            (state, None)
+        }
+
+        RemovePrimaryCursor => {
+            if let Some(next) = state.extra_cursors.first().copied() {
+                state.extra_cursors.remove(0);
+                state.move_cursor_to(next);
+            }
+            (state, None)
+        }
     }
+}
+
+/// Clamp `col` to the nearest valid UTF-8 char boundary within `line`,
+/// not exceeding the line length.
+fn byte_boundary_clamp(line: &str, col: usize) -> usize {
+    let clamped = col.min(line.len());
+    // Walk back to a char boundary.
+    let mut c = clamped;
+    while c > 0 && !line.is_char_boundary(c) {
+        c -= 1;
+    }
+    c
 }
 
 // ── Integer search for Ctrl-a / Ctrl-x ───────────────────────────────────────

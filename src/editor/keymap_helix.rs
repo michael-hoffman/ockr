@@ -352,6 +352,31 @@ impl KeymapHandler for HelixKeymap {
             return KeymapResult::Passthrough;
         }
 
+        // ── Multi-cursor (`C` / `Alt-C` / `,` / `Alt-,`) ───────────────
+        if in_modal
+            && self.pending == PendingKey::None
+            && !k.modifiers.platform
+            && !k.modifiers.control
+        {
+            // C (shift) — add cursor below (in Helix, C without shift too; we use
+            // the capital letter since lowercase `c` is already change).
+            if k.key == "C" && !k.modifiers.alt {
+                return KeymapResult::Command(EditorCommand::AddCursorBelow);
+            }
+            // Alt-C — add cursor above.
+            if k.key == "C" && k.modifiers.alt {
+                return KeymapResult::Command(EditorCommand::AddCursorAbove);
+            }
+            // , — keep only primary cursor.
+            if (k.key == "," || k.key_char.as_deref() == Some(",")) && !k.modifiers.alt && !k.modifiers.shift {
+                return KeymapResult::Command(EditorCommand::KeepPrimaryCursor);
+            }
+            // Alt-, — remove primary cursor.
+            if (k.key == "," || k.key_char.as_deref() == Some(",")) && k.modifiers.alt {
+                return KeymapResult::Command(EditorCommand::RemovePrimaryCursor);
+            }
+        }
+
         // ── `/`, `?` search and `n`/`N`/`*`/`#` ────────────────────────
         if in_modal && !k.modifiers.platform && !k.modifiers.control {
             let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");

@@ -90,6 +90,7 @@ pub enum VisualKind {
 ///           (it requires buffer snapshots which are not part of pure state).
 /// Story 13: last_visual_selection for `gv` reselect.
 /// Story 20+: last_change for `.` repeat.
+/// Story 22: extra_cursors for multi-cursor editing.
 #[derive(Debug, Clone)]
 pub struct EditorState {
     pub selection: Selection,
@@ -107,6 +108,12 @@ pub struct EditorState {
     /// The last buffer-mutating command sequence, for `.` (repeat last change).
     /// Stored as a `Vec` to support compound changes (e.g. change-line + insert).
     pub last_change: Option<Vec<crate::editor::command::EditorCommand>>,
+    /// Additional cursor positions for multi-cursor mode (Story 22).
+    ///
+    /// The primary cursor is always `self.selection.cursor`.  Each entry
+    /// here is an independent secondary cursor.  Empty when not in
+    /// multi-cursor mode.
+    pub extra_cursors: Vec<Pos>,
 }
 
 impl EditorState {
@@ -119,6 +126,7 @@ impl EditorState {
             yank_register: String::new(),
             last_visual_selection: None,
             last_change: None,
+            extra_cursors: Vec::new(),
         }
     }
 

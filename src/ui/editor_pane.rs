@@ -1467,6 +1467,165 @@ impl EditorPane {
     }
 
     /// Execute a single `EditorCommand`: undo snapshot, apply, side effects.
+    /// Apply a buffer mutation or cursor movement to all extra cursors, then
+    /// restore `extra_cursors` on `self.state`.
+    ///
+    /// **Mutation commands** (`Insert`, `DeleteCharBefore`, `InsertNewline`,
+    /// `DeleteCharAt`): applied to each cursor in descending document order
+    /// (bottom-right → top-left) so that each edit leaves earlier cursor
+    /// positions unaffected.
+    ///
+    /// **Movement commands**: applied to each extra cursor via a temporary
+    /// single-cursor state so the same motion repeats on all cursors.
+    ///
+    /// Returns `true` if the command was handled multi-cursor (caller should
+    /// skip the normal single-cursor `execute_command` call).
+    fn apply_to_extra_cursors(&mut self, cmd: &EditorCommand) -> bool {
+        if self.state.extra_cursors.is_empty() {
+            return false;
+        }
+
+        // Collect all cursor positions (primary first, then extras).
+        let primary = self.state.cursor();
+        let mut all: Vec<Pos> = std::iter::once(primary)
+            .chain(self.state.extra_cursors.iter().copied())
+            .collect();
+
+        // Deduplicate.
+        all.sort_unstable();
+        all.dedup();
+
+        match cmd {
+            // ── Buffer-mutating commands ──────────────────────────────────
+            EditorCommand::Insert(text) if !text.contains('\n') => {
+                // Sort descending so earlier (higher) positions aren't shifted.
+                all.sort_unstable_by(|a, b| b.cmp(a));
+                let mut new_positions: Vec<Pos> = Vec::with_capacity(all.len());
+                for pos in &all {
+                    self.buffer.insert(pos.line, pos.col, text);
+                    new_positions.push(Pos::new(pos.line, pos.col + text.len()));
+                }
+                // The primary cursor gets the result of the primary position.
+                // Find which index corresponds to the original primary.
+                let primary_new = all.iter().zip(new_positions.iter())
+                    .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
+                    .map(|(_, &np)| np)
+                    .unwrap_or(Pos::new(primary.line, primary.col + text.len()));
+                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                    .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
+                    .map(|(_, &np)| np)
+                    .collect();
+                self.state.move_cursor_to(primary_new);
+                self.state.extra_cursors = extras;
+                self.state.is_dirty = true;
+                true
+            }
+
+            EditorCommand::DeleteCharBefore => {
+                // Sort descending (right-to-left, bottom-to-top).
+                all.sort_unstable_by(|a, b| b.cmp(a));
+                let mut new_positions: Vec<Option<Pos>> = Vec::with_capacity(all.len());
+                for pos in &all {
+                    if pos.col > 0 {
+                        // Find the byte length of the char before cursor.
+                        let line = self.buffer.line(pos.line).to_string();
+                        let char_len = line[..pos.col]
+                            .char_indices()
+                            .last()
+                            .map(|(i, c)| c.len_utf8().min(pos.col - i))
+                            .unwrap_or(1);
+                        let new_col = pos.col - char_len;
+                        self.buffer.delete_range(pos.line, new_col, pos.col);
+                        new_positions.push(Some(Pos::new(pos.line, new_col)));
+                    } else if pos.line > 0 {
+                        // At col 0: merge with previous line.
+                        let prev_len = self.buffer.line(pos.line - 1).len();
+                        self.buffer.join_with_next(pos.line - 1);
+                        new_positions.push(Some(Pos::new(pos.line - 1, prev_len)));
+                    } else {
+                        // Already at document start.
+                        new_positions.push(Some(*pos));
+                    }
+                }
+                let primary_new = all.iter().zip(new_positions.iter())
+                    .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
+                    .and_then(|(_, &np)| np)
+                    .unwrap_or(primary);
+                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                    .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
+                    .filter_map(|(_, &np)| np)
+                    .collect();
+                self.state.move_cursor_to(primary_new);
+                self.state.extra_cursors = extras;
+                self.state.is_dirty = true;
+                true
+            }
+
+            EditorCommand::InsertNewline => {
+                // Sort descending (bottom cursors first).
+                all.sort_unstable_by(|a, b| b.cmp(a));
+                let mut new_positions: Vec<Pos> = Vec::with_capacity(all.len());
+                for pos in &all {
+                    let line_str = self.buffer.line(pos.line).to_string();
+                    // Compute smart indent (match previous line + extra for openers).
+                    let leading_ws: String = line_str.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                    let before = &line_str[..pos.col.min(line_str.len())];
+                    let extra = if before.trim_end().ends_with('{')
+                        || before.trim_end().ends_with('[')
+                        || before.trim_end().ends_with('(')
+                    { "  " } else { "" };
+                    self.buffer.split_line(pos.line, pos.col);
+                    let indent = format!("{}{}", leading_ws, extra);
+                    let indent_len = indent.len();
+                    if !indent.is_empty() {
+                        self.buffer.insert(pos.line + 1, 0, &indent);
+                    }
+                    new_positions.push(Pos::new(pos.line + 1, indent_len));
+                }
+                let primary_new = all.iter().zip(new_positions.iter())
+                    .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
+                    .map(|(_, &np)| np)
+                    .unwrap_or(Pos::new(primary.line + 1, 0));
+                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                    .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
+                    .map(|(_, &np)| np)
+                    .collect();
+                self.state.move_cursor_to(primary_new);
+                self.state.extra_cursors = extras;
+                self.state.is_dirty = true;
+                true
+            }
+
+            // ── Movement commands ─────────────────────────────────────────
+            cmd if is_movement_command(cmd) => {
+                // Apply the same movement to each extra cursor via a temporary state.
+                let extra = std::mem::take(&mut self.state.extra_cursors);
+                let new_extra: Vec<Pos> = extra.into_iter().map(|pos| {
+                    let mut tmp = crate::editor::state::EditorState::new();
+                    tmp.mode = self.state.mode;
+                    tmp.move_cursor_to(pos);
+                    let (new_tmp, _) = apply(cmd.clone(), tmp, &mut self.buffer);
+                    new_tmp.cursor()
+                }).collect();
+                self.state.extra_cursors = new_extra;
+                // Don't return true — let execute_command handle primary cursor.
+                false
+            }
+
+            // EnterInsert / mode changes — clear extra cursors on Escape, keep on entry.
+            EditorCommand::EnterNormal => {
+                // Keep extra cursors when returning to Normal from Insert.
+                false
+            }
+
+            // For all other commands: clear extra cursors, apply to primary only.
+            _ => {
+                self.state.extra_cursors.clear();
+                false
+            }
+        }
+    }
+
     fn execute_command(
         &mut self,
         cmd: EditorCommand,
@@ -1474,6 +1633,33 @@ impl EditorPane {
     ) {
         // We are handling this key — tell GPUI so macOS doesn't double-insert.
         cx.stop_propagation();
+
+        // ── Multi-cursor fan-out ──────────────────────────────────────────────
+        // For mutation commands, `apply_to_extra_cursors` handles all cursors
+        // (including primary via direct buffer calls) and returns `true`.
+        // For movement commands, it propagates the motion to extra cursors and
+        // returns `false` so the primary cursor is still handled below.
+        // Skip this for commands that are themselves multi-cursor management.
+        let is_multi_mgmt = matches!(cmd,
+            EditorCommand::AddCursorBelow
+            | EditorCommand::AddCursorAbove
+            | EditorCommand::KeepPrimaryCursor
+            | EditorCommand::RemovePrimaryCursor
+        );
+        if !is_multi_mgmt && !self.state.extra_cursors.is_empty() {
+            let handled = self.apply_to_extra_cursors(&cmd);
+            if handled {
+                // Buffer was already mutated for all cursors.  Apply side effects.
+                cx.stop_propagation();
+                self.cached_doc_stats = None;
+                self.spell_errors = None;
+                self.update_viewport();
+                self.trigger_compile(cx);
+                cx.notify();
+                return;
+            }
+            // Movement was propagated to extras; fall through for primary.
+        }
 
         // Auto-close / skip-over in Insert mode.
         if let EditorCommand::Insert(ref typed) = cmd {
@@ -1557,6 +1743,7 @@ impl EditorPane {
             self.buffer = InMemoryBuffer::from_text(&text);
             self.state.mode = Mode::Normal;
             self.state.move_cursor_to(pos);
+            self.state.extra_cursors.clear();
             self.state.is_dirty = true;
             self.cached_doc_stats = None;
             self.update_viewport();
@@ -1572,6 +1759,7 @@ impl EditorPane {
             self.buffer = InMemoryBuffer::from_text(&text);
             self.state.mode = Mode::Normal;
             self.state.move_cursor_to(pos);
+            self.state.extra_cursors.clear();
             self.state.is_dirty = true;
             self.cached_doc_stats = None;
             self.update_viewport();
@@ -1615,6 +1803,8 @@ impl EditorPane {
 
         self.state.move_cursor_to(Pos::new(line, col));
         self.state.mode = Mode::Normal;
+        // Mouse click collapses to single cursor.
+        self.state.extra_cursors.clear();
         self.update_viewport();
         cx.notify();
     }
@@ -1713,10 +1903,16 @@ impl Render for EditorPane {
                 .map(|&(_, s, e)| (s, e))
                 .collect();
 
+            // Extra cursor byte-columns on this line.
+            let line_extra_cursors: Vec<usize> = self.state.extra_cursors.iter()
+                .filter(|p| p.line == i)
+                .map(|p| p.col)
+                .collect();
+
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
                 lnm, line_count, &other_matches, focused_match, diag_sev,
-                bracket_range, &line_spell_errors, &t,
+                bracket_range, &line_spell_errors, &line_extra_cursors, &t,
             ));
         }
 
@@ -1835,6 +2031,17 @@ impl Render for EditorPane {
             div().into_any_element()
         };
 
+        // Multi-cursor indicator.
+        let multi_cursor_indicator: gpui::AnyElement = if !self.state.extra_cursors.is_empty() {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.ochre))
+                .child(format!("{} cursors", self.state.extra_cursors.len() + 1))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         // Typewriter mode indicator.
         let typewriter_indicator: gpui::AnyElement = if self.typewriter_mode {
             div()
@@ -1865,6 +2072,7 @@ impl Render for EditorPane {
                     .child(mode_label),
             )
             .child(macro_rec_indicator)
+            .child(multi_cursor_indicator)
             .child(typewriter_indicator)
             .child(
                 div()
@@ -2441,6 +2649,8 @@ fn render_line(
     diag_sev: Option<DiagnosticSeverity>,
     bracket_range: Option<(usize, usize)>,
     spell_errors: &[(usize, usize)],
+    // Extra cursor byte-columns on this line (for multi-cursor display).
+    extra_cursors: &[usize],
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -2519,6 +2729,18 @@ fn render_line(
         boundaries.push(s);
         boundaries.push(e);
     }
+    // Extra cursor positions need their char-end too.
+    for &ec in extra_cursors {
+        boundaries.push(ec);
+        if ec < text_len {
+            let char_end = text[ec..]
+                .char_indices()
+                .nth(1)
+                .map(|(b, _)| ec + b)
+                .unwrap_or(text_len);
+            boundaries.push(char_end);
+        }
+    }
     // Keep only valid UTF-8 char boundaries inside the string.
     boundaries.retain(|&b| b <= text_len && text.is_char_boundary(b));
     boundaries.sort_unstable();
@@ -2590,12 +2812,25 @@ fn render_line(
             None
         };
 
+        // Extra cursor block — slightly dimmer than the primary cursor.
+        let is_extra_cursor_block = mode != Mode::Insert
+            && extra_cursors.iter().any(|&ec| ec == a)
+            && a < text_len;
+        let extra_cursor_bg: gpui::Hsla = {
+            // 60% opacity version of cursor_bg — mix toward background.
+            let mut c = cursor_bg;
+            c.a *= 0.6;
+            c
+        };
+
         let (fg, bg, underline) = if is_cursor_block {
             (cursor_fg, Some(cursor_bg), None)
         } else if is_cursor_bar {
             // Insert-mode cursor: render the character normally; the caret bar
             // is painted as an absolute-positioned overlay below.
             (syn_fg, None, spell_underline)
+        } else if is_extra_cursor_block {
+            (cursor_fg, Some(extra_cursor_bg), spell_underline)
         } else if focused_match.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
             (cursor_fg, Some(focused_bg), None)
         } else if other_matches.iter().any(|&(s, e)| s <= a && a < e) {
@@ -2658,6 +2893,24 @@ fn render_line(
         None
     };
 
+    // Extra cursor bars (Insert mode, semi-transparent).
+    let extra_insert_bars: Vec<gpui::AnyElement> = if mode == Mode::Insert {
+        extra_cursors.iter().map(|&ec| {
+            let char_col = text[..ec.min(text_len)].chars().count();
+            div()
+                .absolute()
+                .left(px(char_col as f32 * CHAR_W))
+                .top(px(0.0))
+                .w(px(2.0))
+                .h(px(20.0))
+                .opacity(0.6)
+                .bg(gpui::rgb(t.mode_insert))
+                .into_any_element()
+        }).collect()
+    } else {
+        Vec::new()
+    };
+
     // ── Assemble content ──────────────────────────────────────────────────────
     // `StyledText` renders the whole line as a single text layout that wraps at
     // word boundaries when the available width is narrower than the text.  This
@@ -2673,25 +2926,27 @@ fn render_line(
     // constraint, producing proper soft word-wrap.
     let content = if runs.is_empty() {
         // Empty line — render a zero-width placeholder so the row has min_h.
-        div()
+        let mut d = div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child("")
-            .when_some(insert_bar, |d, bar| d.child(bar))
-            .into_any_element()
+            .child("");
+        d = d.when_some(insert_bar, |d, bar| d.child(bar));
+        for bar in extra_insert_bars { d = d.child(bar); }
+        d.into_any_element()
     } else {
-        div()
+        let mut d = div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child(gpui::StyledText::new(text_content).with_runs(runs))
-            .when_some(insert_bar, |d, bar| d.child(bar))
-            .into_any_element()
+            .child(gpui::StyledText::new(text_content).with_runs(runs));
+        d = d.when_some(insert_bar, |d, bar| d.child(bar));
+        for bar in extra_insert_bars { d = d.child(bar); }
+        d.into_any_element()
     };
 
     // ── Assemble row ──────────────────────────────────────────────────────────
@@ -2750,6 +3005,39 @@ fn is_buffer_mutating(cmd: &EditorCommand) -> bool {
             | DeleteToLineStart
             | DeleteRestOfLine
             | ToggleComment
+    )
+}
+
+/// Returns `true` for pure cursor-movement commands that do not mutate the buffer.
+fn is_movement_command(cmd: &EditorCommand) -> bool {
+    use EditorCommand::*;
+    matches!(
+        cmd,
+        MoveLeft
+            | MoveRight
+            | MoveUp
+            | MoveDown
+            | MoveStartOfLine
+            | MoveEndOfLine
+            | MoveStartOfDocument
+            | MoveEndOfDocument
+            | MoveWordForward
+            | MoveWordBackward
+            | MoveWordEnd
+            | MoveWORDForward
+            | MoveWORDBackward
+            | MoveWORDEnd
+            | MoveFirstNonWhitespace
+            | ScrollHalfDown
+            | ScrollHalfUp
+            | ScrollPageDown
+            | ScrollPageUp
+            | MoveParagraphBack
+            | MoveParagraphForward
+            | FindChar(_)
+            | FindCharBack(_)
+            | TillChar(_)
+            | TillCharBack(_)
     )
 }
 

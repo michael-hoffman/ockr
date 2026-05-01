@@ -194,6 +194,16 @@ pub enum EditorCommand {
     /// Open the command palette (`:` in Normal mode, Cmd-P globally).
     OpenPalette,
 
+    // ── Multi-cursor (Story 22) ────────────────────────────────────────────
+    /// Duplicate the primary cursor onto the next line at the same column (`C`).
+    AddCursorBelow,
+    /// Duplicate the primary cursor onto the previous line at the same column (`Alt-C`).
+    AddCursorAbove,
+    /// Remove all extra cursors, keeping only the primary (`,`).
+    KeepPrimaryCursor,
+    /// Remove the primary cursor and promote the first extra cursor (`Alt-,`).
+    RemovePrimaryCursor,
+
     // ── No-op ──────────────────────────────────────────────────────────────
     /// Discard the key with no effect (unknown binding in Normal mode, etc.).
     Noop,
