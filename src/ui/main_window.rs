@@ -1708,6 +1708,18 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// Reload the active editor's file from disk (`:reload` / `ReloadFile` action).
+    fn reload_file(
+        &mut self,
+        _: &ReloadFile,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_editor().clone().update(cx, |pane, cx| {
+            pane.reload_from_disk(cx);
+        });
+    }
+
     /// Open (or close) the plugin manager overlay.
     fn open_plugin_manager(
         &mut self,
@@ -2054,6 +2066,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::buffer_prev))
             .on_action(cx.listener(Self::buffer_close_tab))
             .on_action(cx.listener(Self::open_plugin_manager))
+            .on_action(cx.listener(Self::reload_file))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 

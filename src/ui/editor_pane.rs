@@ -467,6 +467,44 @@ impl EditorPane {
         }
     }
 
+    /// Reload the current file from disk, discarding unsaved edits.
+    ///
+    /// Preserves the cursor position (clamped to the new line count) and the
+    /// current mode.  Clears undo/redo history and all caches.
+    pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.state.path.clone() else { return };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[ockr] reload failed: {e}");
+                return;
+            }
+        };
+        let saved_cursor = self.state.cursor();
+        let saved_mode = self.state.mode;
+        self.buffer = InMemoryBuffer::from_text(&text);
+        // Clamp cursor to new bounds.
+        let new_line = saved_cursor.line.min(self.buffer.line_count().saturating_sub(1));
+        let new_col = saved_cursor.col.min(self.buffer.line(new_line).len());
+        self.state = EditorState::new();
+        self.state.path = Some(path);
+        self.state.mode = saved_mode;
+        self.state.move_cursor_to(crate::editor::state::Pos::new(new_line, new_col));
+        self.state.is_dirty = false;
+        self.undo_history.clear();
+        self.redo_history.clear();
+        self.cached_doc_stats = None;
+        self.spell_errors = None;
+        self.search = None;
+        self.macro_buffer.clear();
+        self.recording_macro = None;
+        self.keymap.set_macro_recording(false);
+        self.refresh_word_target();
+        self.update_viewport();
+        self.trigger_compile(cx);
+        cx.notify();
+    }
+
     /// Toggle typewriter (focus) mode: keeps the cursor centred vertically.
     pub fn toggle_typewriter_mode(&mut self) {
         self.typewriter_mode = !self.typewriter_mode;
@@ -1765,6 +1803,49 @@ impl Render for EditorPane {
                     .bg(gpui::rgb(t.ochre)),
             );
 
+        // Macro REC indicator — shown while recording is active.
+        let macro_rec_indicator: gpui::AnyElement = if let Some(reg) = self.recording_macro {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    // Filled red circle as the "recording" dot.
+                    div()
+                        .w(gpui::px(7.0))
+                        .h(gpui::px(7.0))
+                        .rounded_full()
+                        .bg(gpui::rgb(0xff5555u32)),
+                )
+                .child(
+                    div()
+                        .font_family("Menlo")
+                        .text_color(gpui::rgb(0xff5555u32))
+                        .child(format!("REC @{}", reg)),
+                )
+                .into_any_element()
+        } else if self.macro_playing {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.ochre))
+                .child("PLAY")
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        // Typewriter mode indicator.
+        let typewriter_indicator: gpui::AnyElement = if self.typewriter_mode {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint))
+                .child("TW")
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let status_bar = div()
             .flex()
             .flex_row()
@@ -1783,6 +1864,8 @@ impl Render for EditorPane {
                     .font_family("Menlo")
                     .child(mode_label),
             )
+            .child(macro_rec_indicator)
+            .child(typewriter_indicator)
             .child(
                 div()
                     .text_color(gpui::rgb(t.text_faint))
