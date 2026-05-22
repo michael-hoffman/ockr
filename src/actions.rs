@@ -31,6 +31,7 @@ actions!(
         FocusPaneDown,
         // Navigation
         OpenQuickSwitch,
+        OpenFilePicker,
         OpenRecentFiles,
         OpenBacklinks,
         OpenOutline,

@@ -38,7 +38,7 @@ use gpui::{
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewNote, OpenBacklinks, OpenCommandPalette,
-    OpenDailyNote, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
+    OpenDailyNote, OpenFilePicker, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
     OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
     SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
@@ -48,6 +48,7 @@ use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
 use crate::ui::graph_view::{GraphView, GraphViewEvent};
 use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::html_preview::HtmlWebView;
+use crate::ui::file_picker::{FilePicker, FilePickerEvent};
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
 use crate::ui::template_picker::{
     TemplatePicker, TemplatePickerEvent, heading_to_filename_stem, scan_templates,
@@ -166,6 +167,7 @@ pub struct MainWindow {
     /// True when the palette was just dismissed and the active editor needs focus.
     refocus_editor_pending: bool,
     quick_switch: Option<Entity<QuickSwitch>>,
+    file_picker: Option<Entity<FilePicker>>,
     template_picker: Option<Entity<TemplatePicker>>,
     backlinks: Option<Entity<BacklinkPanel>>,
     outline: Option<Entity<OutlinePanel>>,
@@ -460,6 +462,7 @@ impl MainWindow {
             open_palette_pending: false,
             refocus_editor_pending: false,
             quick_switch: None,
+            file_picker: None,
             template_picker: None,
             backlinks: None,
             outline: None,
@@ -1190,6 +1193,56 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn open_file_picker(
+        &mut self,
+        _: &OpenFilePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle: pressing Ctrl-P again closes the picker.
+        if self.file_picker.is_some() {
+            self.file_picker = None;
+            cx.notify();
+            return;
+        }
+        // Close quick_switch if open so only one picker is visible.
+        self.quick_switch = None;
+
+        // Build file list: recency-first, then the rest of the vault.
+        let all_files = self.vault.read(cx).files.clone();
+        let mut ordered: Vec<_> = self.recent_paths.iter()
+            .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
+            .collect();
+        for f in &all_files {
+            if !self.recent_paths.contains(&f.abs_path) {
+                ordered.push(f.clone());
+            }
+        }
+
+        let fp = cx.new(|cx| FilePicker::new(ordered, cx));
+        fp.read(cx).focus_handle.clone().focus(window);
+        self.refocus_editor_pending = false;
+
+        cx.subscribe(&fp, |this, _, event: &FilePickerEvent, cx| {
+            match event {
+                FilePickerEvent::Close => {
+                    this.file_picker = None;
+                    this.refocus_editor_pending = true;
+                    cx.notify();
+                }
+                FilePickerEvent::Open(path) => {
+                    this.file_picker = None;
+                    this.refocus_editor_pending = true;
+                    cx.notify();
+                    this.open_path(path.clone(), cx);
+                }
+            }
+        }).detach();
+
+        self.file_picker = Some(fp);
+        cx.notify();
+    }
+
     fn open_recent_files(
         &mut self,
         _: &OpenRecentFiles,
@@ -1415,6 +1468,7 @@ impl MainWindow {
             "export-pdf" => cx.dispatch_action(&ExportPdf),
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
             "open-quick-switch" => cx.dispatch_action(&OpenQuickSwitch),
+            "open-file-picker" => cx.dispatch_action(&OpenFilePicker),
             "open-recent-files" => cx.dispatch_action(&OpenRecentFiles),
             "follow-link" => {
                 self.active_editor().clone().update(cx, |pane, cx| {
@@ -2052,6 +2106,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_graph_view))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_quick_switch))
+            .on_action(cx.listener(Self::open_file_picker))
             .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_outline))
@@ -2292,6 +2347,9 @@ impl Render for MainWindow {
             })
             .when_some(self.quick_switch.clone(), |root, qs| {
                 root.child(gpui::deferred(qs).with_priority(100))
+            })
+            .when_some(self.file_picker.clone(), |root, fp| {
+                root.child(gpui::deferred(fp).with_priority(100))
             })
             .when_some(self.template_picker.clone(), |root, picker| {
                 root.child(gpui::deferred(picker).with_priority(100))

@@ -136,6 +136,7 @@ fn main() {
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("ctrl-cmd-z", ToggleZenMode, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
+            KeyBinding::new("ctrl-p", OpenFilePicker, None),
             KeyBinding::new("cmd-shift-r", OpenRecentFiles, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
             KeyBinding::new("cmd-shift-o", OpenOutline, None),
@@ -219,6 +220,7 @@ fn main() {
                 name: "Go".into(),
                 items: vec![
                     MenuItem::action("Quick Switch", OpenQuickSwitch),
+                    MenuItem::action("Open File…", OpenFilePicker),
                     MenuItem::action("Recent Files", OpenRecentFiles),
                     MenuItem::action("Daily Note", OpenDailyNote),
                     MenuItem::separator(),
@@ -287,6 +289,9 @@ fn main() {
         });
         cx.on_action(|_: &OpenQuickSwitch, _cx| {
             // Story 11: quick note switcher
+        });
+        cx.on_action(|_: &OpenFilePicker, _cx| {
+            // Path-based fuzzy file picker (Ctrl-P).
         });
         cx.on_action(|_: &OpenRecentFiles, _cx| {
             // Story 44: recent files modal
@@ -449,6 +454,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
         ("switch-theme",          "Switch Theme",                     None),
         ("toggle-typewriter-mode", "Toggle Typewriter Mode",           None),
+        ("open-file-picker",      "Open File…  · fuzzy path search",  Some("^P")),
         ("noh",                   "noh  · clear search highlights",   Some(":noh")),
         ("nohlsearch",            "nohlsearch  · clear search highlights", Some(":nohlsearch")),
     ];
