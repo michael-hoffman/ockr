@@ -2,6 +2,7 @@ mod actions;
 mod command;
 mod compiler;
 mod editor;
+mod lsp;
 mod plugin;
 mod session;
 mod settings;

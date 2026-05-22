@@ -199,6 +199,8 @@ impl KeymapHandler for HelixKeymap {
                     // Buffer navigation.
                     "n" => Some(KeymapResult::BufferNav { forward: true }),
                     "p" => Some(KeymapResult::BufferNav { forward: false }),
+                    // LSP go-to-definition.
+                    "d" => Some(KeymapResult::GotoDefinition),
                     _ => None,
                 };
                 if let Some(result) = cmd {
@@ -484,6 +486,10 @@ impl KeymapHandler for HelixKeymap {
             }
             if key_ch == "#" {
                 return KeymapResult::SearchWordBackward;
+            }
+            // LSP hover popup.
+            if k.key == "K" || k.key_char.as_deref() == Some("K") {
+                return KeymapResult::ShowHover;
             }
         }
 

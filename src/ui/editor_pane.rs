@@ -51,6 +51,7 @@ use gpui::{
 
 use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenReplace, OpenSearch, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode};
+use crate::lsp::{LspDiagnostic, LspHandle, LspSeverity};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -257,6 +258,26 @@ pub struct EditorPane {
     /// Each entry is `(line, byte_start, byte_end)`.  Invalidated whenever
     /// the buffer changes.  Built on demand in `render()`.
     spell_errors: Option<Vec<(usize, usize, usize)>>,
+
+    // ── LSP (tinymist) ────────────────────────────────────────────────────────
+
+    /// Handle to the `tinymist` LSP background thread.  `None` when tinymist
+    /// is not installed or has not been connected yet.
+    lsp: Option<LspHandle>,
+    /// Diagnostics received from the language server for the current file.
+    /// Rendered as gutter stripes alongside the compiler diagnostics.
+    lsp_diagnostics: Vec<LspDiagnostic>,
+    /// Document version counter sent with every `textDocument/didChange`.
+    /// Starts at 1 (sent with `didOpen`) and increments on every edit.
+    lsp_doc_version: i32,
+    /// Whether `textDocument/didOpen` has been sent for the current file path.
+    lsp_doc_opened: bool,
+    /// Hover popup content, shown until the next keypress.
+    hover_popup: Option<String>,
+    /// Request ID of the most recent hover request (to discard stale results).
+    hover_request_id: Option<i64>,
+    /// Request ID of the most recent go-to-definition request.
+    def_request_id: Option<i64>,
 }
 
 impl EditorPane {
@@ -310,6 +331,13 @@ impl EditorPane {
             typewriter_mode: false,
             word_target: None,
             spell_errors: None,
+            lsp: None,
+            lsp_diagnostics: Vec::new(),
+            lsp_doc_version: 0,
+            lsp_doc_opened: false,
+            hover_popup: None,
+            hover_request_id: None,
+            def_request_id: None,
         }
     }
 
@@ -377,6 +405,53 @@ impl EditorPane {
         self.preview = Some(preview);
     }
 
+    // ── LSP ───────────────────────────────────────────────────────────────────
+
+    /// Attach a language-server handle.  Called once after the LSP spawns.
+    pub fn set_lsp(&mut self, handle: LspHandle) {
+        self.lsp = Some(handle);
+    }
+
+    /// Replace the LSP diagnostics for the current file and redraw.
+    pub fn set_lsp_diagnostics(&mut self, diags: Vec<LspDiagnostic>) {
+        self.lsp_diagnostics = diags;
+    }
+
+    /// Deliver a hover result.  If `request_id` matches our pending hover
+    /// request, show the popup; otherwise discard (stale response).
+    pub fn set_hover_result(&mut self, request_id: i64, result: Option<crate::lsp::HoverResult>) {
+        if self.hover_request_id == Some(request_id) {
+            self.hover_popup = result.map(|h| h.content);
+            self.hover_request_id = None;
+        }
+    }
+
+    /// Whether this pane is waiting for a go-to-definition result with `id`.
+    pub fn is_waiting_for_definition(&self, request_id: i64) -> bool {
+        self.def_request_id == Some(request_id)
+    }
+
+    /// Consume the pending definition request (called after navigating).
+    pub fn take_def_request(&mut self, request_id: i64) -> bool {
+        if self.def_request_id == Some(request_id) {
+            self.def_request_id = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move the cursor to `pos` and scroll the viewport to keep it visible.
+    pub fn jump_to_pos(&mut self, pos: Pos) {
+        self.state.move_cursor_to(pos);
+        self.update_viewport();
+    }
+
+    /// Current absolute file URI (for LSP requests), or `None` if unsaved.
+    pub fn current_uri(&self) -> Option<String> {
+        self.state.path.as_deref().map(crate::lsp::path_to_uri)
+    }
+
 
     pub fn open_file_no_focus(
         &mut self,
@@ -402,6 +477,18 @@ impl EditorPane {
         self.cached_doc_stats = None;
         self.spell_errors = None;
         self.refresh_word_target();
+        // Notify LSP that a new document was opened.
+        self.lsp_doc_opened = false;
+        self.lsp_doc_version = 0;
+        self.lsp_diagnostics.clear();
+        self.hover_popup = None;
+        if let (Some(ref lsp), Some(ref path)) = (&self.lsp, &self.state.path) {
+            let uri = crate::lsp::path_to_uri(path);
+            let text = self.buffer.text().to_string();
+            lsp.notify_open(uri, text);
+            self.lsp_doc_opened = true;
+            self.lsp_doc_version = 1;
+        }
         self.trigger_compile(cx);
         cx.notify();
     }
@@ -417,6 +504,17 @@ impl EditorPane {
     /// Also marks the preview pane as stale immediately so the UI shows
     /// visual feedback that a compile is pending.
     pub(crate) fn trigger_compile(&mut self, cx: &mut Context<Self>) {
+        // Notify LSP of the changed document content.
+        if self.lsp_doc_opened {
+            if let (Some(ref lsp), Some(ref path)) = (&self.lsp, &self.state.path) {
+                self.lsp_doc_version += 1;
+                let uri = crate::lsp::path_to_uri(path);
+                let version = self.lsp_doc_version;
+                let text = self.buffer.text().to_string();
+                lsp.notify_change(uri, version, text);
+            }
+        }
+
         let Some(compiler) = self.compiler.clone() else { return };
 
         // Bump sequence — the old task will see a mismatch and drop.
@@ -546,6 +644,51 @@ impl EditorPane {
 
     /// Compute (word_count, char_count) by iterating lines directly.
     /// Avoids allocating a full buffer join string — O(N) chars but no heap join.
+    /// Return the highest-severity diagnostic (compiler + LSP) on `line`,
+    /// or `None` if the line is clean.  Error beats Warning.
+    fn merged_diag_sev(&self, line: usize) -> Option<DiagnosticSeverity> {
+        let compiler = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.line == Some(line))
+            .fold(None, |acc, d| {
+                Some(match acc {
+                    None => d.severity.clone(),
+                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
+                    Some(DiagnosticSeverity::Warning) => d.severity.clone(),
+                })
+            });
+
+        let lsp = self
+            .lsp_diagnostics
+            .iter()
+            .filter(|d| d.range.start.line == line)
+            .fold(None, |acc, d| {
+                let s = match d.severity {
+                    LspSeverity::Error => DiagnosticSeverity::Error,
+                    _ => DiagnosticSeverity::Warning,
+                };
+                Some(match acc {
+                    None => s,
+                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
+                    Some(DiagnosticSeverity::Warning) => s,
+                })
+            });
+
+        match (compiler, lsp) {
+            (None, None) => None,
+            (Some(s), None) | (None, Some(s)) => Some(s),
+            (Some(a), Some(b)) => Some(
+                match (&a, &b) {
+                    (DiagnosticSeverity::Error, _) | (_, DiagnosticSeverity::Error) => {
+                        DiagnosticSeverity::Error
+                    }
+                    _ => DiagnosticSeverity::Warning,
+                },
+            ),
+        }
+    }
+
     fn compute_doc_stats(&self) -> (usize, usize) {
         let mut words = 0usize;
         let mut chars = 0usize;
@@ -1356,6 +1499,12 @@ impl EditorPane {
         result: KeymapResult,
         cx: &mut Context<Self>,
     ) {
+        // Dismiss the hover popup on any action except ShowHover itself.
+        if !matches!(result, KeymapResult::ShowHover | KeymapResult::Pending | KeymapResult::Passthrough) {
+            if self.hover_popup.is_some() {
+                self.hover_popup = None;
+            }
+        }
         match result {
             KeymapResult::Passthrough => {}
             KeymapResult::Pending => {
@@ -1444,23 +1593,21 @@ impl EditorPane {
             KeymapResult::JumpDiagnostic { forward } => {
                 cx.stop_propagation();
                 let cursor_line = self.state.cursor().line;
+                // Collect lines from both compiler and LSP diagnostics.
+                let all_lines: Vec<usize> = self
+                    .diagnostics
+                    .iter()
+                    .filter_map(|d| d.line)
+                    .chain(self.lsp_diagnostics.iter().map(|d| d.range.start.line))
+                    .collect();
                 let dest = if forward {
-                    // First diagnostic strictly after cursor line; wrap to first.
-                    self.diagnostics.iter()
-                        .filter_map(|d| d.line)
-                        .filter(|&l| l > cursor_line)
-                        .min()
-                        .or_else(|| self.diagnostics.iter().filter_map(|d| d.line).min())
+                    all_lines.iter().copied().filter(|&l| l > cursor_line).min()
+                        .or_else(|| all_lines.iter().copied().min())
                 } else {
-                    // Last diagnostic strictly before cursor line; wrap to last.
-                    self.diagnostics.iter()
-                        .filter_map(|d| d.line)
-                        .filter(|&l| l < cursor_line)
-                        .max()
-                        .or_else(|| self.diagnostics.iter().filter_map(|d| d.line).max())
+                    all_lines.iter().copied().filter(|&l| l < cursor_line).max()
+                        .or_else(|| all_lines.iter().copied().max())
                 };
                 if let Some(line) = dest {
-                    use crate::editor::state::Pos;
                     self.state.move_cursor_to(Pos::new(line, 0));
                     self.update_viewport();
                     cx.notify();
@@ -1552,6 +1699,29 @@ impl EditorPane {
                     cx.dispatch_action(&crate::actions::BufferNext);
                 } else {
                     cx.dispatch_action(&crate::actions::BufferPrevious);
+                }
+            }
+            KeymapResult::ShowHover => {
+                cx.stop_propagation();
+                self.hover_popup = None; // clear stale
+                if let Some(uri) = self.current_uri() {
+                    if let Some(ref lsp) = self.lsp {
+                        let cursor = self.state.cursor();
+                        let id = lsp.request_hover(uri, cursor.line, cursor.col);
+                        self.hover_request_id = Some(id);
+                    }
+                }
+                cx.notify();
+            }
+            KeymapResult::GotoDefinition => {
+                cx.stop_propagation();
+                self.hover_popup = None;
+                if let Some(uri) = self.current_uri() {
+                    if let Some(ref lsp) = self.lsp {
+                        let cursor = self.state.cursor();
+                        let id = lsp.request_definition(uri, cursor.line, cursor.col);
+                        self.def_request_id = Some(id);
+                    }
                 }
             }
             KeymapResult::PlayMacro(reg) => {
@@ -1995,14 +2165,8 @@ impl Render for EditorPane {
                     (None, vec![])
                 };
 
-            // Highest-severity diagnostic on this line (error beats warning).
-            let diag_sev: Option<DiagnosticSeverity> = self.diagnostics.iter()
-                .filter(|d| d.line == Some(i))
-                .fold(None, |acc, d| Some(match acc {
-                    None => d.severity.clone(),
-                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
-                    Some(DiagnosticSeverity::Warning) => d.severity.clone(),
-                }));
+            // Highest-severity diagnostic on this line (compiler + LSP; error beats warning).
+            let diag_sev = self.merged_diag_sev(i);
 
             // Bracket match highlight: byte range on this line (if any).
             let bracket_range: Option<(usize, usize)> = bracket_match
@@ -2388,6 +2552,50 @@ impl Render for EditorPane {
                 .children(items)
         });
 
+        // ── Hover popup ───────────────────────────────────────────────────────
+        // Shown when `K` returns a result from the LSP; dismissed on next key.
+        // Positioned above the cursor line, right-aligned within the pane.
+        let hover_popup = self.hover_popup.as_ref().map(|content| {
+            const LINE_H: f32 = 20.0;
+            const PADDING: f32 = 16.0;
+            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            // Position above the cursor line (or below line 0).
+            let cursor_row = cursor.line.saturating_sub(self.viewport_top) as f32;
+            let popup_bottom_above_cursor = search_h + PADDING + cursor_row * LINE_H;
+            // Clamp: if too close to top, show below the cursor line instead.
+            let popup_top = if popup_bottom_above_cursor < 80.0 {
+                px(search_h + PADDING + (cursor_row + 1.0) * LINE_H)
+            } else {
+                // We'll use `bottom` from a helper; but GPUI wants `top` — compute
+                // approximately from known cursor row.
+                px(popup_bottom_above_cursor - 4.0) // slight overlap with line
+            };
+
+            // Truncate extremely long content to 400 chars.
+            let display: String = if content.len() > 400 {
+                format!("{}…", &content[..400])
+            } else {
+                content.clone()
+            };
+
+            div()
+                .absolute()
+                .top(popup_top)
+                .right(px(PADDING))
+                .max_w(px(420.0))
+                .bg(gpui::rgba(0x1e1e2eee))
+                .border_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .rounded(px(6.0))
+                .shadow_lg()
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_xs()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text))
+                .child(display)
+        });
+
         div()
             .relative()
             .track_focus(&self.focus_handle)
@@ -2434,6 +2642,7 @@ impl Render for EditorPane {
             )
             .child(status_bar)
             .when_some(wikilink_popup, |root, popup| root.child(popup))
+            .when_some(hover_popup, |root, popup| root.child(popup))
             .when_some(
                 if self.perf_overlay { self.last_key_micros } else { None },
                 |root, micros| {

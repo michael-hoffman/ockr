@@ -100,6 +100,10 @@ pub enum KeymapResult {
     BufferNav { forward: bool },
     /// Reposition the viewport relative to the cursor without moving the cursor.
     ScrollViewport(ViewportAlign),
+    /// Request LSP hover info at the cursor and display a popup (`K`).
+    ShowHover,
+    /// Request LSP go-to-definition at the cursor (`gd`).
+    GotoDefinition,
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

@@ -43,6 +43,7 @@ use crate::actions::{
     SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
+use crate::lsp::{self, LspHandle, LspMessage};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
 use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
 use crate::ui::graph_view::{GraphView, GraphViewEvent};
@@ -194,6 +195,8 @@ pub struct MainWindow {
     plugin_manager: Option<gpui::Entity<PluginManager>>,
     /// True when `plugin_manager` was just created and needs focus on next render.
     plugin_manager_focus_pending: bool,
+    /// Handle to the `tinymist` LSP thread.  `None` if tinymist is not installed.
+    lsp: Option<LspHandle>,
 }
 
 impl MainWindow {
@@ -435,6 +438,30 @@ impl MainWindow {
             }
         }
 
+        // ── LSP (tinymist) ────────────────────────────────────────────────────
+        // Spawn a tinymist LSP client for the current vault root (if installed).
+        // Results arrive via an unbounded channel and are dispatched to the
+        // active editor pane on the GPUI UI thread.
+        let (lsp_tx, mut lsp_rx) =
+            futures::channel::mpsc::unbounded::<LspMessage>();
+        let lsp_handle = lsp::spawn_lsp(
+            vault.read(cx).root.clone(),
+            move |msg| { let _ = lsp_tx.unbounded_send(msg); },
+        );
+        // Wire the handle into the initial pane so it can send notifications.
+        if let Some(ref handle) = lsp_handle {
+            editor.update(cx, |pane, _| pane.set_lsp(handle.clone()));
+        }
+        // Drain LSP messages on the UI thread.
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = lsp_rx.next().await {
+                let _ = cx.update(|cx| {
+                    let _ = this.update(cx, |win, cx| win.handle_lsp_message(msg, cx));
+                });
+            }
+        })
+        .detach();
+
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
 
@@ -480,6 +507,7 @@ impl MainWindow {
             plugin_manager: None,
             plugin_manager_focus_pending: false,
             html_link_sender: link_tx,
+            lsp: lsp_handle,
         }
     }
 
@@ -500,13 +528,17 @@ impl MainWindow {
         }).detach();
     }
 
-    /// Spawn a new pane, wire compiler + vault, subscribe events. Returns entity.
+    /// Spawn a new pane, wire compiler + vault + LSP, subscribe events.
     fn new_pane(&mut self, cx: &mut Context<Self>) -> Entity<EditorPane> {
         let editor = cx.new(|cx| EditorPane::new(cx));
         editor.update(cx, |pane, _cx| pane.set_vault(self.vault.clone()));
         editor.update(cx, |pane, _cx| {
             pane.set_compiler(self.compiler_handle.clone(), self.preview.clone());
         });
+        if let Some(ref handle) = self.lsp {
+            let h = handle.clone();
+            editor.update(cx, |pane, _| pane.set_lsp(h));
+        }
         Self::subscribe_pane(cx, &editor);
         editor
     }
@@ -514,6 +546,68 @@ impl MainWindow {
     /// Returns the active editor entity.
     fn active_editor(&self) -> &Entity<EditorPane> {
         &self.panes[self.active_idx].editor
+    }
+
+    // ── LSP message dispatch ──────────────────────────────────────────────────
+
+    fn handle_lsp_message(&mut self, msg: LspMessage, cx: &mut Context<Self>) {
+        match msg {
+            LspMessage::Diagnostics { uri, diags } => {
+                // Forward to any pane whose current file matches the URI.
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, cx| {
+                        if pane.current_uri().as_deref() == Some(&uri) {
+                            pane.set_lsp_diagnostics(diags.clone());
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+            LspMessage::HoverResult { request_id, result } => {
+                // Route to whichever pane is waiting for this id.
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, cx| {
+                        pane.set_hover_result(request_id, result.clone());
+                        cx.notify();
+                    });
+                }
+            }
+            LspMessage::DefinitionResult { request_id, result } => {
+                if let Some(def) = result {
+                    // Find the pane that made this request.
+                    let matched = self.panes.iter().enumerate().find(|(_, e)| {
+                        e.editor.read(cx).is_waiting_for_definition(request_id)
+                    }).map(|(i, _)| i);
+
+                    if let Some(pane_idx) = matched {
+                        let current_path = self.panes[pane_idx]
+                            .editor
+                            .read(cx)
+                            .current_uri()
+                            .and_then(|u| Some(crate::lsp::path_to_uri(&def.path) == u));
+
+                        if current_path == Some(true) {
+                            // Same file: jump cursor directly.
+                            self.panes[pane_idx].editor.update(cx, |pane, cx| {
+                                pane.take_def_request(request_id);
+                                pane.jump_to_pos(Pos::new(def.line, def.col));
+                                cx.notify();
+                            });
+                        } else {
+                            // Different file: open it (cursor lands at top for now).
+                            self.panes[pane_idx].editor.update(cx, |pane, _| {
+                                pane.take_def_request(request_id);
+                            });
+                            self.open_path(def.path, cx);
+                        }
+                    }
+                }
+            }
+            LspMessage::Unavailable => {
+                // tinymist not found or crashed — clear the handle silently.
+                self.lsp = None;
+            }
+        }
     }
 
     /// Focus a pane by index, triggering a recompile so the preview updates.
