@@ -98,6 +98,23 @@ pub enum KeymapResult {
     FollowLink,
     /// Navigate to the next (`forward = true`) or previous buffer (`gn` / `gp`).
     BufferNav { forward: bool },
+    /// Reposition the viewport relative to the cursor without moving the cursor.
+    ScrollViewport(ViewportAlign),
+}
+
+/// How to align the cursor line within the visible viewport (`z` commands).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewportAlign {
+    /// Cursor line at the top of the viewport (`zt`, `z<Enter>`).
+    Top,
+    /// Cursor line centred in the viewport (`zz`, `z.`).
+    Center,
+    /// Cursor line at the bottom of the viewport (`zb`, `z-`).
+    Bottom,
+    /// Scroll the viewport down one line; cursor follows if it leaves view (`zj`).
+    LineDown,
+    /// Scroll the viewport up one line; cursor follows if it leaves view (`zk`).
+    LineUp,
 }
 
 // ── Trait ─────────────────────────────────────────────────────────────────────

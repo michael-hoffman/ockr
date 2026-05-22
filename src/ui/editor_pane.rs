@@ -1493,6 +1493,55 @@ impl EditorPane {
                 self.keymap.set_macro_recording(false);
                 cx.notify();
             }
+            KeymapResult::ScrollViewport(align) => {
+                use crate::editor::keymap::ViewportAlign;
+                cx.stop_propagation();
+                let cursor_line = self.state.cursor().line;
+                let line_count = self.buffer.line_count();
+                match align {
+                    ViewportAlign::Top => {
+                        self.viewport_top = cursor_line;
+                    }
+                    ViewportAlign::Center => {
+                        self.viewport_top = cursor_line.saturating_sub(VIEWPORT_LINES / 2);
+                    }
+                    ViewportAlign::Bottom => {
+                        self.viewport_top = cursor_line.saturating_sub(VIEWPORT_LINES.saturating_sub(1));
+                    }
+                    ViewportAlign::LineDown => {
+                        self.viewport_top = (self.viewport_top + 1)
+                            .min(line_count.saturating_sub(1));
+                        // If cursor scrolled above the viewport, pull it down.
+                        if cursor_line < self.viewport_top {
+                            let col = self.state.cursor().col;
+                            let new_col = {
+                                let line = self.buffer.line(self.viewport_top);
+                                col.min(line.len())
+                            };
+                            self.state.move_cursor_to(
+                                crate::editor::state::Pos::new(self.viewport_top, new_col)
+                            );
+                        }
+                    }
+                    ViewportAlign::LineUp => {
+                        self.viewport_top = self.viewport_top.saturating_sub(1);
+                        // If cursor scrolled below the viewport, push it up.
+                        let bottom = self.viewport_top + VIEWPORT_LINES;
+                        if cursor_line >= bottom {
+                            let new_line = bottom.saturating_sub(1);
+                            let col = self.state.cursor().col;
+                            let new_col = {
+                                let line = self.buffer.line(new_line);
+                                col.min(line.len())
+                            };
+                            self.state.move_cursor_to(
+                                crate::editor::state::Pos::new(new_line, new_col)
+                            );
+                        }
+                    }
+                }
+                cx.notify();
+            }
             KeymapResult::FollowLink => {
                 cx.stop_propagation();
                 self.follow_link_at_cursor(cx);

@@ -6,7 +6,7 @@
 use gpui::KeyDownEvent;
 
 use super::command::{EditorCommand, TextObjectKind};
-use super::keymap::{CursorStyle, KeymapHandler, KeymapResult, OperatorKind};
+use super::keymap::{CursorStyle, KeymapHandler, KeymapResult, OperatorKind, ViewportAlign};
 use super::state::{EditorState, Mode};
 
 // ── Pending-key state machine ────────────────────────────────────────────────
@@ -52,6 +52,8 @@ enum PendingKey {
     MacroRecord,
     /// `@` pressed; awaiting register character to play back.
     MacroPlay,
+    /// `z` pressed; awaiting scroll-alignment key.
+    Z,
 }
 
 // ── HelixKeymap ──────────────────────────────────────────────────────────────
@@ -401,6 +403,39 @@ impl KeymapHandler for HelixKeymap {
                 }
             }
             return KeymapResult::Passthrough;
+        }
+
+        // ── `z` scroll-alignment sequences ─────────────────────────────
+        if in_modal
+            && k.key == "z"
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && !k.modifiers.shift
+            && self.pending == PendingKey::None
+        {
+            self.pending = PendingKey::Z;
+            return KeymapResult::Pending;
+        }
+        if self.pending == PendingKey::Z {
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                let align = match k.key.as_str() {
+                    // Top
+                    "t" | "enter" => Some(ViewportAlign::Top),
+                    // Center
+                    "z" | "." => Some(ViewportAlign::Center),
+                    // Bottom
+                    "b" | "-" => Some(ViewportAlign::Bottom),
+                    // One-line scroll (cursor follows if it leaves view)
+                    "j" => Some(ViewportAlign::LineDown),
+                    "k" => Some(ViewportAlign::LineUp),
+                    _ => None,
+                };
+                if let Some(a) = align {
+                    return KeymapResult::ScrollViewport(a);
+                }
+            }
+            // Unknown z-sequence — fall through.
         }
 
         // ── Multi-cursor (`C` / `Alt-C` / `,` / `Alt-,`) ───────────────
