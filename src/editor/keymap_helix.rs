@@ -60,6 +60,11 @@ pub struct HelixKeymap {
     pending: PendingKey,
     /// `true` while a macro is actively being recorded.
     recording: bool,
+    /// Digits accumulated for a count prefix (e.g. `42` before `G`).
+    /// Cleared after every dispatched command.
+    count_buf: String,
+    /// Count saved when entering a `PendingKey::G` state, so `<N>gg` works.
+    pending_count: usize,
 }
 
 impl HelixKeymap {
@@ -67,6 +72,8 @@ impl HelixKeymap {
         Self {
             pending: PendingKey::None,
             recording: false,
+            count_buf: String::new(),
+            pending_count: 0,
         }
     }
 }
@@ -119,8 +126,30 @@ impl KeymapHandler for HelixKeymap {
             return KeymapResult::Passthrough;
         }
 
+        // ── Count prefix accumulation (Normal / Visual only) ────────────
+        // Digits build a repeat count consumed by G, gg, j, k.
+        // `0` alone is MoveStartOfLine; `0` after other digits extends the count.
+        if in_modal
+            && self.pending == PendingKey::None
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && !k.modifiers.alt
+        {
+            let d = k.key.as_str();
+            let starts_count = d.len() == 1
+                && d.chars().next().is_some_and(|c| c.is_ascii_digit() && c != '0');
+            let extends_count = d == "0" && !self.count_buf.is_empty();
+            if starts_count || extends_count {
+                self.count_buf.push_str(d);
+                return KeymapResult::Pending;
+            }
+        }
+        // Commit count — valid for the remainder of this keypress only.
+        let count = self.count_buf.parse::<usize>().unwrap_or(0);
+        self.count_buf.clear();
+
         // ── `g` prefix sequences ────────────────────────────────────────
-        if state.mode == Mode::Normal
+        if in_modal
             && k.key == "g"
             && !k.modifiers.platform
             && !k.modifiers.control
@@ -128,28 +157,50 @@ impl KeymapHandler for HelixKeymap {
         {
             if self.pending == PendingKey::G {
                 self.pending = PendingKey::None;
+                let saved = self.pending_count;
+                self.pending_count = 0;
+                if saved > 0 {
+                    return KeymapResult::Command(EditorCommand::GotoLine(saved));
+                }
                 return KeymapResult::Command(EditorCommand::MoveStartOfDocument);
             } else {
+                self.pending_count = count; // save for potential `gg`
                 self.pending = PendingKey::G;
                 return KeymapResult::Pending;
             }
         }
         if self.pending == PendingKey::G {
             self.pending = PendingKey::None;
+            self.pending_count = 0;
             if !k.modifiers.platform && !k.modifiers.control {
-                let cmd = match k.key.as_str() {
+                let cmd: Option<KeymapResult> = match k.key.as_str() {
                     "v" if state.mode == Mode::Normal => {
-                        Some(EditorCommand::ReselectLastVisual)
+                        Some(KeymapResult::Command(EditorCommand::ReselectLastVisual))
                     }
-                    "h" => Some(EditorCommand::MoveStartOfLine),
-                    "l" => Some(EditorCommand::MoveEndOfLine),
-                    "s" => Some(EditorCommand::MoveFirstNonWhitespace),
-                    "e" => Some(EditorCommand::MoveWordEnd),
-                    "c" => Some(EditorCommand::ToggleComment),
+                    "h" => Some(KeymapResult::Command(EditorCommand::MoveStartOfLine)),
+                    "l" => Some(KeymapResult::Command(EditorCommand::MoveEndOfLine)),
+                    "s" => Some(KeymapResult::Command(EditorCommand::MoveFirstNonWhitespace)),
+                    "e" => Some(KeymapResult::Command(EditorCommand::MoveWordEnd)),
+                    "E" => Some(KeymapResult::Command(EditorCommand::MoveWORDEnd)),
+                    "c" => Some(KeymapResult::Command(EditorCommand::ToggleComment)),
+                    // Visual-line movement (same as j/k for non-wrapped display).
+                    "j" => Some(KeymapResult::Command(EditorCommand::MoveDown)),
+                    "k" => Some(KeymapResult::Command(EditorCommand::MoveUp)),
+                    // Middle of line.
+                    "m" => Some(KeymapResult::Command(EditorCommand::GotoMiddleOfLine)),
+                    // Last insert position.
+                    "i" => Some(KeymapResult::Command(EditorCommand::GotoLastInsert)),
+                    // Last modification position.
+                    "." => Some(KeymapResult::Command(EditorCommand::GotoLastModified)),
+                    // Follow link / open file under cursor.
+                    "f" | "x" => Some(KeymapResult::FollowLink),
+                    // Buffer navigation.
+                    "n" => Some(KeymapResult::BufferNav { forward: true }),
+                    "p" => Some(KeymapResult::BufferNav { forward: false }),
                     _ => None,
                 };
-                if let Some(cmd) = cmd {
-                    return KeymapResult::Command(cmd);
+                if let Some(result) = cmd {
+                    return result;
                 }
             }
             // Unknown g-sequence — fall through.
@@ -457,6 +508,25 @@ impl KeymapHandler for HelixKeymap {
                 }
             }
             return KeymapResult::Passthrough;
+        }
+
+        // ── Count-qualified motions ──────────────────────────────────────
+        // `<N>G` → jump to line N; `<N>j`/`<N>k` → move N lines.
+        if in_modal && count > 0 && !k.modifiers.platform && !k.modifiers.control {
+            match k.key.as_str() {
+                "G" => {
+                    return KeymapResult::Command(EditorCommand::GotoLine(count));
+                }
+                "j" if count > 1 => {
+                    let cmds = vec![EditorCommand::MoveDown; count.min(500)];
+                    return KeymapResult::Commands(cmds);
+                }
+                "k" if count > 1 => {
+                    let cmds = vec![EditorCommand::MoveUp; count.min(500)];
+                    return KeymapResult::Commands(cmds);
+                }
+                _ => {} // fall through
+            }
         }
 
         // ── Map keystroke to EditorCommand ───────────────────────────────

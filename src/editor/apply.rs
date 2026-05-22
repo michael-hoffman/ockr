@@ -229,11 +229,13 @@ pub fn apply<B: Buffer>(
 
         // ── Insert-mode entry variants ─────────────────────────────────────
         EnterInsert => {
+            state.last_insert_pos = Some(state.cursor());
             state.mode = Mode::Insert;
             (state, None)
         }
 
         AppendAfterCursor => {
+            state.last_insert_pos = Some(state.cursor());
             let pos = state.cursor();
             let line_str = buf.line(pos.line);
             let new_col = if pos.col < line_str.len() {
@@ -247,6 +249,7 @@ pub fn apply<B: Buffer>(
         }
 
         InsertLineStart => {
+            state.last_insert_pos = Some(state.cursor());
             let line = state.cursor().line;
             state.move_cursor_to(Pos::new(line, 0));
             state.mode = Mode::Insert;
@@ -254,6 +257,7 @@ pub fn apply<B: Buffer>(
         }
 
         InsertLineEnd => {
+            state.last_insert_pos = Some(state.cursor());
             let line = state.cursor().line;
             let end = buf.line(line).len();
             state.move_cursor_to(Pos::new(line, end));
@@ -262,6 +266,7 @@ pub fn apply<B: Buffer>(
         }
 
         OpenLineBelow => {
+            state.last_insert_pos = Some(state.cursor());
             let line = state.cursor().line;
             let line_end = buf.line(line).len();
             buf.split_line(line, line_end);
@@ -272,6 +277,7 @@ pub fn apply<B: Buffer>(
         }
 
         OpenLineAbove => {
+            state.last_insert_pos = Some(state.cursor());
             let line = state.cursor().line;
             buf.split_line(line, 0);
             state.move_cursor_to(Pos::new(line, 0));
@@ -282,6 +288,7 @@ pub fn apply<B: Buffer>(
 
         // ── Change operators ───────────────────────────────────────────────
         ChangeLine => {
+            state.last_insert_pos = Some(state.cursor());
             let line = state.cursor().line;
             let len = buf.line(line).len();
             buf.delete_range(line, 0, len);
@@ -292,6 +299,7 @@ pub fn apply<B: Buffer>(
         }
 
         ChangeToLineEnd => {
+            state.last_insert_pos = Some(state.cursor());
             let pos = state.cursor();
             let line_len = buf.line(pos.line).len();
             buf.delete_range(pos.line, pos.col, line_len);
@@ -1230,6 +1238,42 @@ pub fn apply<B: Buffer>(
             if let Some(next) = state.extra_cursors.first().copied() {
                 state.extra_cursors.remove(0);
                 state.move_cursor_to(next);
+            }
+            (state, None)
+        }
+
+        // ── Goto motions ───────────────────────────────────────────────────
+        GotoMiddleOfLine => {
+            let cursor = state.cursor();
+            let line = buf.line(cursor.line);
+            let char_count = line.chars().count();
+            let mid = char_count / 2;
+            let mid_byte = line.char_indices().nth(mid).map(|(i, _)| i).unwrap_or(0);
+            state.move_cursor_to(Pos::new(cursor.line, mid_byte));
+            (state, None)
+        }
+
+        GotoLastInsert => {
+            if let Some(pos) = state.last_insert_pos {
+                let line = pos.line.min(buf.line_count().saturating_sub(1));
+                let col = byte_boundary_clamp(buf.line(line), pos.col);
+                state.move_cursor_to(Pos::new(line, col));
+            }
+            (state, None)
+        }
+
+        GotoLine(n) => {
+            // 1-indexed; clamp to buffer bounds.
+            let line = n.saturating_sub(1).min(buf.line_count().saturating_sub(1));
+            state.move_cursor_to(Pos::new(line, 0));
+            (state, None)
+        }
+
+        GotoLastModified => {
+            if let Some(pos) = state.last_modified_pos {
+                let line = pos.line.min(buf.line_count().saturating_sub(1));
+                let col = byte_boundary_clamp(buf.line(line), pos.col);
+                state.move_cursor_to(Pos::new(line, col));
             }
             (state, None)
         }
@@ -2480,5 +2524,94 @@ mod tests {
         let mut s = normal_state();
         let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::DoubleQuote }, s, &mut b);
         assert_eq!(s2.mode, Mode::Normal);
+    }
+
+    // ── Goto motion tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn goto_line_jumps_to_1indexed_line() {
+        let mut b = buf("line1\nline2\nline3\nline4");
+        let s = normal_state();
+        let (s2, _) = apply(GotoLine(3), s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(2, 0)); // 3rd line = index 2
+    }
+
+    #[test]
+    fn goto_line_clamps_past_end() {
+        let mut b = buf("a\nb\nc");
+        let s = normal_state();
+        let (s2, _) = apply(GotoLine(99), s, &mut b);
+        assert_eq!(s2.cursor().line, 2); // last line
+    }
+
+    #[test]
+    fn goto_line_zero_clamps_to_first() {
+        let mut b = buf("a\nb\nc");
+        let s = normal_state();
+        // GotoLine(0) → saturating_sub(1) = 0 → line 0
+        let (s2, _) = apply(GotoLine(0), s, &mut b);
+        assert_eq!(s2.cursor().line, 0);
+    }
+
+    #[test]
+    fn goto_middle_of_line() {
+        let mut b = buf("abcdefgh"); // 8 chars, mid = index 4 → 'e'
+        let s = normal_state();
+        let (s2, _) = apply(GotoMiddleOfLine, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 4));
+    }
+
+    #[test]
+    fn goto_middle_of_empty_line() {
+        let mut b = buf("");
+        let s = normal_state();
+        let (s2, _) = apply(GotoMiddleOfLine, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 0));
+    }
+
+    #[test]
+    fn goto_last_insert_returns_to_entry_pos() {
+        let mut b = buf("hello world");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 6));
+        // Entering Insert records the position.
+        let (s2, _) = apply(EnterInsert, s, &mut b);
+        assert_eq!(s2.last_insert_pos, Some(Pos::new(0, 6)));
+        assert_eq!(s2.mode, Mode::Insert);
+        // Move away then gi should return.
+        let mut s3 = s2;
+        s3.move_cursor_to(Pos::new(0, 0));
+        let (s4, _) = apply(GotoLastInsert, s3, &mut b);
+        assert_eq!(s4.cursor(), Pos::new(0, 6));
+    }
+
+    #[test]
+    fn goto_last_insert_noop_when_none() {
+        let mut b = buf("hello");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 3));
+        let (s2, _) = apply(GotoLastInsert, s, &mut b);
+        assert_eq!(s2.cursor(), Pos::new(0, 3)); // unchanged
+    }
+
+    #[test]
+    fn enter_insert_records_last_insert_pos() {
+        let mut b = buf("test");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 2));
+        let (s2, _) = apply(EnterInsert, s, &mut b);
+        assert_eq!(s2.last_insert_pos, Some(Pos::new(0, 2)));
+    }
+
+    #[test]
+    fn append_after_cursor_records_last_insert_pos() {
+        let mut b = buf("test");
+        let mut s = normal_state();
+        s.move_cursor_to(Pos::new(0, 1));
+        let (s2, _) = apply(AppendAfterCursor, s, &mut b);
+        // Records the *original* cursor pos (before the append advance).
+        assert_eq!(s2.last_insert_pos, Some(Pos::new(0, 1)));
+        // Mode switched to Insert.
+        assert_eq!(s2.mode, Mode::Insert);
     }
 }

@@ -94,6 +94,10 @@ pub enum KeymapResult {
     StopMacro,
     /// Replay the macro stored in register `reg`.
     PlayMacro(char),
+    /// Follow the link or file path under the cursor (`gf` / `gx`).
+    FollowLink,
+    /// Navigate to the next (`forward = true`) or previous buffer (`gn` / `gp`).
+    BufferNav { forward: bool },
 }
 
 // ── Trait ─────────────────────────────────────────────────────────────────────

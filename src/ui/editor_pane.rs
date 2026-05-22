@@ -1493,6 +1493,18 @@ impl EditorPane {
                 self.keymap.set_macro_recording(false);
                 cx.notify();
             }
+            KeymapResult::FollowLink => {
+                cx.stop_propagation();
+                self.follow_link_at_cursor(cx);
+            }
+            KeymapResult::BufferNav { forward } => {
+                cx.stop_propagation();
+                if forward {
+                    cx.dispatch_action(&crate::actions::BufferNext);
+                } else {
+                    cx.dispatch_action(&crate::actions::BufferPrevious);
+                }
+            }
             KeymapResult::PlayMacro(reg) => {
                 cx.stop_propagation();
                 // `@` (the at-sign char) means "replay last macro".
@@ -1769,6 +1781,8 @@ impl EditorPane {
 
         match effect {
             SideEffect::BufferChanged => {
+                // Record where the buffer was last mutated for `g.`.
+                self.state.last_modified_pos = Some(self.state.cursor());
                 self.cached_doc_stats = None;
                 self.spell_errors = None;
                 self.trigger_compile(cx);

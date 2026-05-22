@@ -204,6 +204,16 @@ pub enum EditorCommand {
     /// Remove the primary cursor and promote the first extra cursor (`Alt-,`).
     RemovePrimaryCursor,
 
+    // ── Goto motions ───────────────────────────────────────────────────────
+    /// Move cursor to the middle character of the current line (`gm`).
+    GotoMiddleOfLine,
+    /// Return to the position where Insert mode was last entered (`gi`).
+    GotoLastInsert,
+    /// Jump to a specific 1-indexed line number (`<N>G`, `<N>gg`).
+    GotoLine(usize),
+    /// Jump to the position of the last buffer mutation (`g.`).
+    GotoLastModified,
+
     // ── No-op ──────────────────────────────────────────────────────────────
     /// Discard the key with no effect (unknown binding in Normal mode, etc.).
     Noop,

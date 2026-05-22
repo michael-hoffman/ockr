@@ -114,6 +114,10 @@ pub struct EditorState {
     /// here is an independent secondary cursor.  Empty when not in
     /// multi-cursor mode.
     pub extra_cursors: Vec<Pos>,
+    /// Where Insert mode was most recently entered.  Restored by `gi`.
+    pub last_insert_pos: Option<Pos>,
+    /// Where the last buffer mutation left the cursor.  Jumped to by `g.`.
+    pub last_modified_pos: Option<Pos>,
 }
 
 impl EditorState {
@@ -127,6 +131,8 @@ impl EditorState {
             last_visual_selection: None,
             last_change: None,
             extra_cursors: Vec::new(),
+            last_insert_pos: None,
+            last_modified_pos: None,
         }
     }
 
