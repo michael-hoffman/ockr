@@ -449,6 +449,8 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
         ("switch-theme",          "Switch Theme",                     None),
         ("toggle-typewriter-mode", "Toggle Typewriter Mode",           None),
+        ("noh",                   "noh  · clear search highlights",   Some(":noh")),
+        ("nohlsearch",            "nohlsearch  · clear search highlights", Some(":nohlsearch")),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint, |_cx| {}));

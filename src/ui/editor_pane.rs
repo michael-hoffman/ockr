@@ -119,6 +119,8 @@ struct SearchState {
     /// When `Some`, only matches inside this (start, end) inclusive line range
     /// are considered (used by Visual-mode `s` — select-within-selection).
     selection_bounds: Option<(Pos, Pos)>,
+    /// When `true`, only whole-word occurrences are highlighted/navigated.
+    whole_word: bool,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -191,6 +193,16 @@ pub struct EditorPane {
     last_search: Option<String>,
     /// Direction of the last completed search (`true` = backward / `?`).
     last_search_backward: bool,
+    /// When `true`, `n`/`N` and `*`/`#` perform whole-word matching.
+    last_search_whole_word: bool,
+    /// Persistent match positions for the last committed search.
+    ///
+    /// Populated when the search bar is closed (Enter) or when `*`/`#` fires.
+    /// Rendered as dimmed highlights even after the bar is closed; `n`/`N`
+    /// navigate through them.  Cleared by `:noh` or opening a new search.
+    search_highlight_matches: Vec<Pos>,
+    /// Index of the current (focused) match within `search_highlight_matches`.
+    search_highlight_current: usize,
     /// Match position from the last `n`/`N` navigation: (current 1-indexed, total, wrapped).
     /// Shown in the status bar while the search bar is closed.
     search_nav_status: Option<(usize, usize, bool)>,
@@ -278,6 +290,9 @@ impl EditorPane {
             search: None,
             last_search: None,
             last_search_backward: false,
+            last_search_whole_word: false,
+            search_highlight_matches: Vec::new(),
+            search_highlight_current: 0,
             search_nav_status: None,
             line_number_mode: LineNumberMode::Relative,
             plugin_packages: None,
@@ -676,6 +691,9 @@ impl EditorPane {
     pub fn open_search(&mut self, backward: bool) {
         let saved = self.state.cursor();
         self.search_nav_status = None;
+        // Clear persistent highlights — new search takes over.
+        self.search_highlight_matches.clear();
+        self.search_highlight_current = 0;
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
@@ -686,6 +704,7 @@ impl EditorPane {
             replace_focused: false,
             wrapped: false,
             selection_bounds: None,
+            whole_word: false,
         });
     }
 
@@ -705,6 +724,8 @@ impl EditorPane {
             None
         };
         self.search_nav_status = None;
+        self.search_highlight_matches.clear();
+        self.search_highlight_current = 0;
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
@@ -715,6 +736,7 @@ impl EditorPane {
             replace_focused: false,
             wrapped: false,
             selection_bounds: bounds,
+            whole_word: false,
         });
     }
 
@@ -722,6 +744,8 @@ impl EditorPane {
     pub fn open_replace(&mut self) {
         let saved = self.state.cursor();
         self.search_nav_status = None;
+        self.search_highlight_matches.clear();
+        self.search_highlight_current = 0;
         self.search = Some(SearchState {
             query: String::new(),
             matches: Vec::new(),
@@ -732,11 +756,19 @@ impl EditorPane {
             replace_focused: false,
             wrapped: false,
             selection_bounds: None,
+            whole_word: false,
         });
     }
 
     pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
         self.line_number_mode = mode;
+    }
+
+    /// Clear the persistent search highlights and nav status (`:noh`).
+    pub fn clear_search_highlight(&mut self) {
+        self.search_highlight_matches.clear();
+        self.search_highlight_current = 0;
+        self.search_nav_status = None;
     }
 
     /// Route a keystroke to the search bar (or its replace row) while it is open.
@@ -768,11 +800,15 @@ impl EditorPane {
                     // Enter in replace row: replace current match and advance.
                     self.replace_current(cx);
                 } else {
-                    // Enter in query row: close bar, persist for n/N.
+                    // Enter in query row: close bar, persist highlights for n/N.
                     if let Some(ref s) = self.search {
                         if !s.query.is_empty() {
                             self.last_search = Some(s.query.clone());
                             self.last_search_backward = s.backward;
+                            self.last_search_whole_word = s.whole_word;
+                            // Keep matches visible after bar closes.
+                            self.search_highlight_matches = s.matches.clone();
+                            self.search_highlight_current = s.current_idx;
                         }
                     }
                     self.search = None;
@@ -815,12 +851,12 @@ impl EditorPane {
 
     /// Recompute match positions from the current query and jump to the best one.
     fn update_search_matches(&mut self, _cx: &mut Context<Self>) {
-        let (query, saved, backward, bounds) = match &self.search {
-            Some(s) => (s.query.clone(), s.saved_cursor, s.backward, s.selection_bounds),
+        let (query, saved, backward, bounds, whole_word) = match &self.search {
+            Some(s) => (s.query.clone(), s.saved_cursor, s.backward, s.selection_bounds, s.whole_word),
             None => return,
         };
 
-        let all_matches = find_all_matches(&self.buffer, &query);
+        let all_matches = find_all_matches(&self.buffer, &query, whole_word);
         // Filter to selection bounds if this is a scoped search.
         let matches: Vec<Pos> = if let Some((lo, hi)) = bounds {
             all_matches.into_iter()
@@ -878,7 +914,8 @@ impl EditorPane {
             None => return,
         };
         let backward = self.last_search_backward;
-        let matches = find_all_matches(&self.buffer, &query);
+        let whole_word = self.last_search_whole_word;
+        let matches = find_all_matches(&self.buffer, &query, whole_word);
         if matches.is_empty() {
             return;
         }
@@ -895,7 +932,10 @@ impl EditorPane {
             (found.unwrap_or(0), found.is_none())
         };
         self.state.move_cursor_to(matches[idx]);
-        self.search_nav_status = Some((idx + 1, matches.len(), wrapped));
+        // Persist highlights so they remain visible after the bar closes.
+        self.search_highlight_current = idx;
+        self.search_highlight_matches = matches;
+        self.search_nav_status = Some((idx + 1, self.search_highlight_matches.len(), wrapped));
         self.update_viewport();
         cx.notify();
     }
@@ -907,7 +947,8 @@ impl EditorPane {
             None => return,
         };
         let backward = self.last_search_backward;
-        let matches = find_all_matches(&self.buffer, &query);
+        let whole_word = self.last_search_whole_word;
+        let matches = find_all_matches(&self.buffer, &query, whole_word);
         if matches.is_empty() {
             return;
         }
@@ -925,7 +966,10 @@ impl EditorPane {
             (found.unwrap_or(matches.len() - 1), found.is_none())
         };
         self.state.move_cursor_to(matches[idx]);
-        self.search_nav_status = Some((idx + 1, matches.len(), wrapped));
+        // Persist highlights so they remain visible after the bar closes.
+        self.search_highlight_current = idx;
+        self.search_highlight_matches = matches;
+        self.search_nav_status = Some((idx + 1, self.search_highlight_matches.len(), wrapped));
         self.update_viewport();
         cx.notify();
     }
@@ -1344,6 +1388,9 @@ impl EditorPane {
                 if let Some(word) = self.word_under_cursor() {
                     self.last_search = Some(word);
                     self.last_search_backward = false;
+                    self.last_search_whole_word = true;
+                    // Clear bar-open state before navigating.
+                    self.search_highlight_matches.clear();
                     self.search_next(cx);
                     cx.stop_propagation();
                 }
@@ -1352,6 +1399,8 @@ impl EditorPane {
                 if let Some(word) = self.word_under_cursor() {
                     self.last_search = Some(word);
                     self.last_search_backward = true;
+                    self.last_search_whole_word = true;
+                    self.search_highlight_matches.clear();
                     self.search_prev(cx);
                     cx.stop_propagation();
                 }
@@ -1835,12 +1884,17 @@ impl Render for EditorPane {
         let first = self.viewport_top;
         let last = (first + VIEWPORT_LINES).min(line_count);
 
-        // Per-line search highlight data (only computed when search bar is open).
-        let (search_query_len, search_matches_ref) = if let Some(ref s) = self.search {
-            (s.query.len(), Some((&s.matches, s.current_idx)))
-        } else {
-            (0, None)
-        };
+        // Per-line search highlight data: bar-open takes precedence, otherwise
+        // use the persistent highlights left over from the last completed search.
+        let (search_query_len, search_matches_ref): (usize, Option<(&Vec<Pos>, usize)>) =
+            if let Some(ref s) = self.search {
+                (s.query.len(), Some((&s.matches, s.current_idx)))
+            } else if !self.search_highlight_matches.is_empty() {
+                let qlen = self.last_search.as_deref().map(|q| q.len()).unwrap_or(0);
+                (qlen, Some((&self.search_highlight_matches, self.search_highlight_current)))
+            } else {
+                (0, None)
+            };
 
         let lnm = self.line_number_mode;
 
@@ -2616,9 +2670,23 @@ fn check_spelling(
     { let _ = (buf, first_line, last_line); Vec::new() }
 }
 
+/// Return `true` when the byte range `[start, end)` within `line` is bounded
+/// by non-word characters (or the string edge) on both sides.
+///
+/// Used by `*`/`#` whole-word matching.
+fn is_whole_word_match(line: &str, start: usize, end: usize) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let before_ok = start == 0
+        || !is_word(line[..start].chars().next_back().unwrap_or(' '));
+    let after_ok = end >= line.len()
+        || !is_word(line[end..].chars().next().unwrap_or(' '));
+    before_ok && after_ok
+}
+
 /// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
 /// Returns an empty vec if `query` is empty.
-fn find_all_matches(buf: &InMemoryBuffer, query: &str) -> Vec<Pos> {
+/// When `whole_word` is `true`, only matches bounded by non-word characters are returned.
+fn find_all_matches(buf: &InMemoryBuffer, query: &str, whole_word: bool) -> Vec<Pos> {
     let mut out = Vec::new();
     if query.is_empty() {
         return out;
@@ -2627,7 +2695,10 @@ fn find_all_matches(buf: &InMemoryBuffer, query: &str) -> Vec<Pos> {
         let line = buf.line(line_idx);
         let mut offset = 0usize;
         while let Some(rel) = line[offset..].find(query) {
-            out.push(Pos::new(line_idx, offset + rel));
+            let abs = offset + rel;
+            if !whole_word || is_whole_word_match(line, abs, abs + query.len()) {
+                out.push(Pos::new(line_idx, abs));
+            }
             // Advance by at least 1 to avoid infinite loops on zero-width matches.
             offset += rel + query.len().max(1);
         }

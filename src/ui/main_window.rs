@@ -1392,6 +1392,12 @@ impl MainWindow {
             }
             "quit" | "quit-force" => cx.quit(),
             "reload" => cx.dispatch_action(&ReloadFile),
+            "noh" | "nohlsearch" | "clear-search-highlight" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.clear_search_highlight();
+                    cx.notify();
+                });
+            }
             "open" | "open-vault" => cx.dispatch_action(&OpenVault),
             "new" | "new-note" => cx.dispatch_action(&NewNote),
             "buffer-next" => cx.dispatch_action(&BufferNext),
