@@ -2089,12 +2089,77 @@ impl Focusable for MainWindow {
     }
 }
 
+impl MainWindow {
+    /// First-run welcome pane, shown when no vault is open (`vault.root` is
+    /// `None`).  Without it the window renders an empty editor that looks
+    /// broken to a new user.  The "Open Vault" button dispatches the existing
+    /// `OpenVault` action (folder picker); `Cmd-O` does the same globally.
+    fn render_welcome(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let open_btn = div()
+            .id("welcome-open-vault")
+            .px(px(20.0))
+            .py(px(10.0))
+            .rounded(px(8.0))
+            .bg(gpui::rgb(t.ochre))
+            .text_color(gpui::rgb(t.cursor_fg))
+            .text_sm()
+            .font_family("Menlo")
+            .cursor_pointer()
+            .hover(|s| s.bg(gpui::rgb(t.ochre_border)))
+            .child("Open Vault…  ⌘O")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _window, cx| {
+                    cx.stop_propagation();
+                    cx.dispatch_action(&OpenVault);
+                }),
+            );
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(gpui::rgb(t.bg_panel))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(14.0))
+            .child(
+                div()
+                    .text_color(gpui::rgb(t.text))
+                    .text_2xl()
+                    .font_family("Menlo")
+                    .child("ockr"),
+            )
+            .child(
+                div()
+                    .text_color(gpui::rgb(t.text_muted))
+                    .text_sm()
+                    .font_family("Menlo")
+                    .child("A Typst-native note editor."),
+            )
+            .child(div().h(px(8.0)))
+            .child(open_btn)
+            .child(
+                div()
+                    .text_color(gpui::rgb(t.text_faint))
+                    .text_xs()
+                    .font_family("Menlo")
+                    .child("Open any folder of .typ files to begin."),
+            )
+            .into_any_element()
+    }
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.global::<ThemePalette>().clone();
         let preview_mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+        // First-run: no vault open → show the welcome pane instead of an empty editor.
+        let show_welcome = self.vault.read(cx).root.is_none();
 
         // Open the command palette if requested by a pane (deferred to render for Window access).
         if self.open_palette_pending {
@@ -2410,7 +2475,10 @@ impl Render for MainWindow {
             ).with_priority(150)
         });
 
-        let root = if self.zen_mode {
+        let root = if show_welcome {
+            // ── First run: welcome pane, full width, no preview ───────────────
+            root.child(self.render_welcome(&t, cx))
+        } else if self.zen_mode {
             // ── Zen Mode: centered editor, no preview ─────────────────────────
             // Cap the writing column at 800 px; centre it in the full window.
             let zen_col_w = (content_w as f32).min(800.0);
