@@ -9,8 +9,12 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Context, Entity, FocusHandle, Focusable, Render, Window, div, prelude::*};
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, Window, div, prelude::*, px,
+};
 
+use crate::actions::NewNote;
 use crate::plugin::panel::PanelPosition;
 use crate::plugin::registry::PluginRegistry;
 use crate::ui::theme::ThemePalette;
@@ -22,6 +26,10 @@ use crate::vault::VaultState;
 pub enum SidebarEvent {
     /// User clicked a file row.  Carries the absolute path of the file.
     OpenFile(PathBuf),
+    /// User chose "Delete" — move the file to the system Trash.
+    DeleteFile(PathBuf),
+    /// User chose "Reveal in Finder".
+    RevealFile(PathBuf),
     /// User clicked a plugin panel button in the sidebar.
     OpenPluginPanel {
         plugin_id: String,
@@ -29,9 +37,17 @@ pub enum SidebarEvent {
     },
 }
 
+/// Right-click context menu state: which file, anchored at which window point.
+struct ContextMenu {
+    path: PathBuf,
+    pos: Point<Pixels>,
+}
+
 pub struct Sidebar {
     pub focus_handle: FocusHandle,
     vault: Entity<VaultState>,
+    /// Open file context menu (right-click), if any.
+    context_menu: Option<ContextMenu>,
 }
 
 impl Sidebar {
@@ -39,6 +55,7 @@ impl Sidebar {
         Self {
             focus_handle: cx.focus_handle(),
             vault,
+            context_menu: None,
         }
     }
 }
@@ -64,13 +81,30 @@ impl Render for Sidebar {
             .unwrap_or("No vault")
             .to_owned();
 
+        let new_note_btn = div()
+            .id("sidebar-new-note")
+            .px_2()
+            .text_sm()
+            .text_color(gpui::rgb(t.text_faint))
+            .cursor_pointer()
+            .hover(|s| s.text_color(gpui::rgb(t.ochre)))
+            .child("＋")
+            .on_click(cx.listener(|_, _, _window, cx| {
+                cx.dispatch_action(&NewNote);
+            }));
+
         let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
             .px_3()
             .py_2()
             .text_sm()
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(gpui::rgb(t.text_subtle))
-            .child(vault_name);
+            .child(div().child(vault_name))
+            .when(vault.root.is_some(), |d| d.child(new_note_btn));
 
         let body = if vault.files.is_empty() {
             div()
@@ -88,6 +122,7 @@ impl Render for Sidebar {
             let mut rows = div().flex().flex_col();
             for (i, file) in vault.files.iter().enumerate() {
                 let abs_path = file.abs_path.clone();
+                let abs_path_ctx = file.abs_path.clone();
                 let bg_hover = t.bg_hover;
                 let text_muted = t.text_muted;
                 rows = rows.child(
@@ -102,6 +137,18 @@ impl Render for Sidebar {
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(SidebarEvent::OpenFile(abs_path.clone()));
                         }))
+                        // Right-click opens the file context menu at the cursor.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                this.context_menu = Some(ContextMenu {
+                                    path: abs_path_ctx.clone(),
+                                    pos: ev.position,
+                                });
+                                cx.notify();
+                            }),
+                        )
                         .child(file.title.clone()),
                 );
             }
@@ -191,8 +238,80 @@ impl Render for Sidebar {
             col.into_any_element()
         };
 
+        // ── Right-click context menu overlay ──────────────────────────────────
+        let context_menu = self.context_menu.as_ref().map(|menu| {
+            let path_del = menu.path.clone();
+            let path_rev = menu.path.clone();
+            let item = |label: &str, danger: bool, t: &ThemePalette| {
+                let color = if danger { 0xff6b6bu32 } else { t.text };
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .font_family("Menlo")
+                    .text_color(gpui::rgb(color))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(gpui::rgb(t.bg_hover)))
+                    .child(label.to_string())
+            };
+
+            // Backdrop: clicking anywhere (incl. left/right) dismisses.
+            let backdrop = div()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    }),
+                );
+
+            let menu_box = div()
+                .absolute()
+                .left(menu.pos.x)
+                .top(menu.pos.y)
+                .min_w(px(160.0))
+                .bg(gpui::rgb(t.bg_surface))
+                .border_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .rounded(px(6.0))
+                .shadow_lg()
+                .py(px(4.0))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    item("Reveal in Finder", false, &t)
+                        .id("ctx-reveal")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.emit(SidebarEvent::RevealFile(path_rev.clone()));
+                            this.context_menu = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    item("Delete to Trash", true, &t)
+                        .id("ctx-delete")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.emit(SidebarEvent::DeleteFile(path_del.clone()));
+                            this.context_menu = None;
+                            cx.notify();
+                        })),
+                );
+
+            gpui::deferred(div().absolute().inset_0().child(backdrop).child(menu_box))
+                .with_priority(200)
+        });
+
         div()
             .track_focus(&self.focus_handle)
+            .relative()
             .flex()
             .flex_col()
             .h_full()
@@ -204,5 +323,6 @@ impl Render for Sidebar {
             .child(indexing_banner)
             .child(body)
             .child(plugin_section)
+            .when_some(context_menu, |root, menu| root.child(menu))
     }
 }

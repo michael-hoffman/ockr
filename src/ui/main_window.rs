@@ -387,6 +387,16 @@ impl MainWindow {
                 SidebarEvent::OpenFile(abs_path) => {
                     this.open_path(abs_path.clone(), cx);
                 }
+                SidebarEvent::DeleteFile(abs_path) => {
+                    this.delete_file(abs_path.clone(), cx);
+                }
+                SidebarEvent::RevealFile(abs_path) => {
+                    // Reveal in Finder (best-effort; ignore failures).
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(abs_path)
+                        .spawn();
+                }
                 SidebarEvent::OpenPluginPanel { plugin_id, panel_id } => {
                     // Look up the RegisteredPanel from the registry and open it.
                     let panel = cx
@@ -1052,6 +1062,48 @@ impl MainWindow {
         // Re-focus the editor after closing.
         editor.read(cx).focus_handle(cx).focus(window);
         self.persist_tabs();
+        cx.notify();
+    }
+
+    /// Move a vault file to the system Trash, drop any tabs showing it, and
+    /// rescan the vault so the sidebar + backlinks reflect the removal.
+    /// Trash (not `rm`) keeps the operation recoverable.
+    fn delete_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if trash::delete(&path).is_err() {
+            // Couldn't trash (e.g. permissions) — leave everything untouched.
+            return;
+        }
+
+        // Drop tabs pointing at the deleted file; reload the active tab if its
+        // pane changed.
+        for pane_idx in 0..self.panes.len() {
+            let before = self.panes[pane_idx].tabs.len();
+            self.panes[pane_idx].tabs.retain(|t| t.path != path);
+            if self.panes[pane_idx].tabs.len() == before {
+                continue; // this pane wasn't showing the file
+            }
+            let pane = &mut self.panes[pane_idx];
+            if pane.tabs.is_empty() {
+                pane.active_tab = 0;
+            } else {
+                if pane.active_tab >= pane.tabs.len() {
+                    pane.active_tab = pane.tabs.len() - 1;
+                }
+                let tab_path = pane.tabs[pane.active_tab].path.clone();
+                let editor = pane.editor.clone();
+                open_file_in_editor(&tab_path, &editor, &self.vault, cx);
+            }
+        }
+        self.persist_tabs();
+
+        // Rescan the vault (rebuilds the file list; backlink cache self-heals).
+        if let Some(root) = self.vault.read(cx).root.clone() {
+            self.vault.update(cx, |vs, cx| {
+                *vs = VaultState::open(root);
+                cx.notify();
+            });
+            self.spawn_backlink_build_if_needed(cx);
+        }
         cx.notify();
     }
 
