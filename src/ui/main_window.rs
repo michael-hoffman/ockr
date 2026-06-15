@@ -472,6 +472,12 @@ impl MainWindow {
         })
         .detach();
 
+        // NOTE: spell-check is intentionally left disabled.  The synchronous
+        // NSSpellChecker.checkSpellingOfString call blocks the main thread
+        // (XPC round-trip that never returns when invoked on the render
+        // thread), which froze the window on launch.  Re-enable only once it
+        // is reimplemented off the main thread.  See editor_pane::check_spelling.
+
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
 

@@ -76,6 +76,25 @@ const VIEWPORT_LINES: usize = 80;
 /// the wikilink popup and the insert-mode cursor bar overlay.
 const CHAR_W: f32 = 8.4;
 
+/// Whether spell-checking via `NSSpellChecker` is allowed to run.
+///
+/// `NSSpellChecker` performs a synchronous XPC round-trip that needs the main
+/// run loop to be pumping.  Calling it from inside AppKit's
+/// `didFinishLaunching` (which is where restored tabs first render) deadlocks
+/// the main thread — the window never appears.  We therefore keep spell-check
+/// disabled until `enable_spellcheck()` is called from a post-launch task, by
+/// which point the run loop is live.
+static SPELLCHECK_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm spell-checking.  Currently never called — the synchronous
+/// `NSSpellChecker` path blocks the main thread (see `check_spelling`).
+/// Kept for a future off-main-thread reimplementation.
+#[allow(dead_code)]
+pub fn enable_spellcheck() {
+    SPELLCHECK_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// How line numbers are displayed in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineNumberMode {
@@ -2132,7 +2151,12 @@ impl Render for EditorPane {
         let lnm = self.line_number_mode;
 
         // ── Spell check (lazy, cached) ──────────────────────────────────────
-        if self.spell_errors.is_none() {
+        // Gated behind SPELLCHECK_READY: NSSpellChecker deadlocks if called
+        // during didFinishLaunching (see enable_spellcheck docs).  Until armed
+        // we leave spell_errors uncomputed so a later render fills it in.
+        if self.spell_errors.is_none()
+            && SPELLCHECK_READY.load(std::sync::atomic::Ordering::Relaxed)
+        {
             self.spell_errors = Some(check_spelling(&self.buffer, first, last));
         }
         let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);
