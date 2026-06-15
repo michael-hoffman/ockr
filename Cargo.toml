@@ -6,6 +6,12 @@ resolver = "2"
 name = "ockr"
 version = "0.1.0"
 edition = "2021"
+description = "A Typst-native, keyboard-driven note editor with a Helix-style modal interface."
+authors = ["Michael Hoffman <hoffman1512@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+keywords = ["typst", "editor", "notes", "helix", "markdown"]
+categories = ["text-editors"]
 
 [[bin]]
 name = "ockr"
