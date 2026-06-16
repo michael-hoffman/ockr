@@ -465,10 +465,37 @@ impl EditorPane {
         }
     }
 
-    /// Move the cursor to `pos` and scroll the viewport to keep it visible.
-    pub fn jump_to_pos(&mut self, pos: Pos) {
-        self.state.move_cursor_to(pos);
+    /// Move the cursor to an LSP position (`line`, UTF-16 `character`) and
+    /// scroll it into view.  The LSP protocol counts columns in UTF-16 code
+    /// units; the buffer indexes bytes, so convert (and land on a char
+    /// boundary, never mid-codepoint — otherwise later `line[..col]` slices
+    /// would panic).
+    pub fn jump_to_lsp_pos(&mut self, line: usize, utf16_col: usize) {
+        let line = line.min(self.buffer.line_count().saturating_sub(1));
+        let byte_col = utf16_to_byte(self.buffer.line(line), utf16_col);
+        self.state.move_cursor_to(Pos::new(line, byte_col));
         self.update_viewport();
+    }
+
+    /// Clear the pane to an empty, pathless buffer.  Used when the file a pane
+    /// was showing is deleted and no other tab remains, so the editor doesn't
+    /// keep displaying the now-gone document.
+    pub fn close_document(&mut self) {
+        self.buffer = InMemoryBuffer::empty();
+        self.state = EditorState::new();
+        self.file_rel_path = None;
+        self.diagnostics.clear();
+        self.lsp_diagnostics.clear();
+        self.spell_errors = None;
+        self.cached_doc_stats = None;
+        self.hover_popup = None;
+    }
+
+    /// Current cursor as an LSP position: `(line, UTF-16 character offset)`.
+    fn cursor_lsp_pos(&self) -> (usize, usize) {
+        let cur = self.state.cursor();
+        let u16_col = byte_to_utf16(self.buffer.line(cur.line), cur.col);
+        (cur.line, u16_col)
     }
 
     /// Current absolute file URI (for LSP requests), or `None` if unsaved.
@@ -1728,27 +1755,29 @@ impl EditorPane {
             KeymapResult::ShowHover => {
                 cx.stop_propagation();
                 self.hover_popup = None; // clear stale
-                if self.lsp.is_none() {
-                    self.hover_popup = Some(LSP_MISSING_HINT.to_string());
-                } else if let Some(uri) = self.current_uri() {
-                    let lsp = self.lsp.as_ref().unwrap();
-                    let cursor = self.state.cursor();
-                    let id = lsp.request_hover(uri, cursor.line, cursor.col);
-                    self.hover_request_id = Some(id);
+                match (self.lsp.clone(), self.current_uri()) {
+                    (None, _) => self.hover_popup = Some(LSP_MISSING_HINT.to_string()),
+                    (Some(lsp), Some(uri)) => {
+                        let (line, col) = self.cursor_lsp_pos();
+                        self.hover_request_id = Some(lsp.request_hover(uri, line, col));
+                    }
+                    _ => {}
                 }
                 cx.notify();
             }
             KeymapResult::GotoDefinition => {
                 cx.stop_propagation();
                 self.hover_popup = None;
-                if self.lsp.is_none() {
-                    self.hover_popup = Some(LSP_MISSING_HINT.to_string());
-                    cx.notify();
-                } else if let Some(uri) = self.current_uri() {
-                    let lsp = self.lsp.as_ref().unwrap();
-                    let cursor = self.state.cursor();
-                    let id = lsp.request_definition(uri, cursor.line, cursor.col);
-                    self.def_request_id = Some(id);
+                match (self.lsp.clone(), self.current_uri()) {
+                    (None, _) => {
+                        self.hover_popup = Some(LSP_MISSING_HINT.to_string());
+                        cx.notify();
+                    }
+                    (Some(lsp), Some(uri)) => {
+                        let (line, col) = self.cursor_lsp_pos();
+                        self.def_request_id = Some(lsp.request_definition(uri, line, col));
+                    }
+                    _ => {}
                 }
             }
             KeymapResult::PlayMacro(reg) => {
@@ -2591,16 +2620,15 @@ impl Render for EditorPane {
             const LINE_H: f32 = 20.0;
             const PADDING: f32 = 16.0;
             let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
-            // Position above the cursor line (or below line 0).
+            // Y of the cursor line within the pane.
             let cursor_row = cursor.line.saturating_sub(self.viewport_top) as f32;
-            let popup_bottom_above_cursor = search_h + PADDING + cursor_row * LINE_H;
-            // Clamp: if too close to top, show below the cursor line instead.
-            let popup_top = if popup_bottom_above_cursor < 80.0 {
+            let cursor_line_y = search_h + PADDING + cursor_row * LINE_H;
+            // Anchor the popup just above the cursor line; if too close to the
+            // top, drop it just below instead.
+            let popup_top = if cursor_line_y < 80.0 {
                 px(search_h + PADDING + (cursor_row + 1.0) * LINE_H)
             } else {
-                // We'll use `bottom` from a helper; but GPUI wants `top` — compute
-                // approximately from known cursor row.
-                px(popup_bottom_above_cursor - 4.0) // slight overlap with line
+                px(cursor_line_y - 4.0) // slight overlap with the cursor line
             };
 
             // Truncate extremely long content to 400 chars.
@@ -2972,6 +3000,29 @@ fn check_spelling(
     }
     #[cfg(not(target_os = "macos"))]
     { let _ = (buf, first_line, last_line); Vec::new() }
+}
+
+/// Byte offset within `line` → UTF-16 code-unit offset (LSP column).
+/// `byte` is clamped to the line length and floored to a char boundary.
+fn byte_to_utf16(line: &str, byte: usize) -> usize {
+    let mut b = byte.min(line.len());
+    while b > 0 && !line.is_char_boundary(b) {
+        b -= 1;
+    }
+    line[..b].chars().map(|c| c.len_utf16()).sum()
+}
+
+/// UTF-16 code-unit offset (LSP column) → byte offset within `line`.
+/// Always returns a char boundary; clamps past the end to `line.len()`.
+fn utf16_to_byte(line: &str, utf16_col: usize) -> usize {
+    let mut units = 0;
+    for (b, c) in line.char_indices() {
+        if units >= utf16_col {
+            return b;
+        }
+        units += c.len_utf16();
+    }
+    line.len()
 }
 
 /// Return `true` when the byte range `[start, end)` within `line` is bounded
@@ -3631,6 +3682,45 @@ mod tests {
         keymap_helix::HelixKeymap,
         state::Mode,
     };
+
+    #[test]
+    fn utf16_byte_roundtrip_ascii() {
+        let s = "hello world";
+        for byte in [0, 5, 11] {
+            let u16 = byte_to_utf16(s, byte);
+            assert_eq!(utf16_to_byte(s, u16), byte);
+        }
+    }
+
+    #[test]
+    fn utf16_byte_multibyte() {
+        // "é" = 2 bytes / 1 UTF-16 unit; "😀" = 4 bytes / 2 UTF-16 units.
+        let s = "aé😀b";
+        // byte offsets of char boundaries: a=0, é=1, 😀=3, b=7, end=8
+        assert_eq!(byte_to_utf16(s, 0), 0);
+        assert_eq!(byte_to_utf16(s, 1), 1); // after 'a'
+        assert_eq!(byte_to_utf16(s, 3), 2); // after 'é' (1 unit)
+        assert_eq!(byte_to_utf16(s, 7), 4); // after '😀' (2 units)
+        // Reverse.
+        assert_eq!(utf16_to_byte(s, 0), 0);
+        assert_eq!(utf16_to_byte(s, 2), 3);
+        assert_eq!(utf16_to_byte(s, 4), 7);
+    }
+
+    #[test]
+    fn utf16_to_byte_lands_on_boundary_when_out_of_range() {
+        let s = "aé"; // 3 bytes
+        // A UTF-16 col past the end clamps to len, never mid-codepoint.
+        let b = utf16_to_byte(s, 99);
+        assert_eq!(b, s.len());
+        assert!(s.is_char_boundary(b));
+    }
+
+    #[test]
+    fn byte_to_utf16_floors_mid_codepoint() {
+        let s = "é"; // 2 bytes, 1 unit; byte 1 is mid-codepoint
+        assert_eq!(byte_to_utf16(s, 1), 0); // floors to char start → 0 units
+    }
 
     fn make_key(key: &str) -> KeyDownEvent {
         use gpui::{Keystroke, Modifiers};

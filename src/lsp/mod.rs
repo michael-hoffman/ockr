@@ -441,8 +441,11 @@ fn lsp_reader(mut reader: BufReader<ChildStdout>, tx: std::sync::mpsc::Sender<Va
             }
         }
 
+        // Cap the body size so a garbled Content-Length can't trigger a
+        // multi-GB allocation (tinymist is trusted, but a corrupt frame isn't).
+        const MAX_BODY: usize = 64 * 1024 * 1024;
         let len = match content_length {
-            Some(l) if l > 0 => l,
+            Some(l) if l > 0 && l <= MAX_BODY => l,
             _ => continue,
         };
 

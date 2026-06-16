@@ -596,25 +596,30 @@ impl MainWindow {
                     }).map(|(i, _)| i);
 
                     if let Some(pane_idx) = matched {
-                        let current_path = self.panes[pane_idx]
+                        let target_uri = crate::lsp::path_to_uri(&def.path);
+                        let same_file = self.panes[pane_idx]
                             .editor
                             .read(cx)
                             .current_uri()
-                            .and_then(|u| Some(crate::lsp::path_to_uri(&def.path) == u));
+                            .is_some_and(|u| u == target_uri);
 
-                        if current_path == Some(true) {
-                            // Same file: jump cursor directly.
+                        self.panes[pane_idx].editor.update(cx, |pane, _| {
+                            pane.take_def_request(request_id);
+                        });
+
+                        if same_file {
                             self.panes[pane_idx].editor.update(cx, |pane, cx| {
-                                pane.take_def_request(request_id);
-                                pane.jump_to_pos(Pos::new(def.line, def.col));
+                                pane.jump_to_lsp_pos(def.line, def.col);
                                 cx.notify();
                             });
                         } else {
-                            // Different file: open it (cursor lands at top for now).
-                            self.panes[pane_idx].editor.update(cx, |pane, _| {
-                                pane.take_def_request(request_id);
-                            });
+                            // Open the target file, then position at the definition.
                             self.open_path(def.path, cx);
+                            let editor = self.active_editor().clone();
+                            editor.update(cx, |pane, cx| {
+                                pane.jump_to_lsp_pos(def.line, def.col);
+                                cx.notify();
+                            });
                         }
                     }
                 }
@@ -1091,6 +1096,8 @@ impl MainWindow {
             let pane = &mut self.panes[pane_idx];
             if pane.tabs.is_empty() {
                 pane.active_tab = 0;
+                let editor = pane.editor.clone();
+                editor.update(cx, |p, c| { p.close_document(); c.notify(); });
             } else {
                 if pane.active_tab >= pane.tabs.len() {
                     pane.active_tab = pane.tabs.len() - 1;
