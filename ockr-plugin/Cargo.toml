@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+# rlib lets host-side `cargo build --workspace` compile this SDK as a normal
+# library; cdylib is the wasm plugin artifact. (Plugins build for wasm32.)
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
