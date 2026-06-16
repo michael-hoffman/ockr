@@ -1,6 +1,7 @@
 # Rust
 /target/
-Cargo.lock
+# Cargo.lock is committed — ockr ships as a binary, so a locked,
+# reproducible dependency set matters for anyone building from source.
 
 # macOS
 .DS_Store
