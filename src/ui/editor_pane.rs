@@ -87,6 +87,11 @@ const CHAR_W: f32 = 8.4;
 static SPELLCHECK_READY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Shown in the hover popup when the user invokes `K`/`gd` but no language
+/// server is connected — turns a silent no-op into an actionable hint.
+const LSP_MISSING_HINT: &str =
+    "LSP off — tinymist not found on PATH. Install it (e.g. `brew install tinymist`) and restart for hover, go-to-definition, and diagnostics.";
+
 /// Arm spell-checking.  Currently never called — the synchronous
 /// `NSSpellChecker` path blocks the main thread (see `check_spelling`).
 /// Kept for a future off-main-thread reimplementation.
@@ -1723,24 +1728,27 @@ impl EditorPane {
             KeymapResult::ShowHover => {
                 cx.stop_propagation();
                 self.hover_popup = None; // clear stale
-                if let Some(uri) = self.current_uri() {
-                    if let Some(ref lsp) = self.lsp {
-                        let cursor = self.state.cursor();
-                        let id = lsp.request_hover(uri, cursor.line, cursor.col);
-                        self.hover_request_id = Some(id);
-                    }
+                if self.lsp.is_none() {
+                    self.hover_popup = Some(LSP_MISSING_HINT.to_string());
+                } else if let Some(uri) = self.current_uri() {
+                    let lsp = self.lsp.as_ref().unwrap();
+                    let cursor = self.state.cursor();
+                    let id = lsp.request_hover(uri, cursor.line, cursor.col);
+                    self.hover_request_id = Some(id);
                 }
                 cx.notify();
             }
             KeymapResult::GotoDefinition => {
                 cx.stop_propagation();
                 self.hover_popup = None;
-                if let Some(uri) = self.current_uri() {
-                    if let Some(ref lsp) = self.lsp {
-                        let cursor = self.state.cursor();
-                        let id = lsp.request_definition(uri, cursor.line, cursor.col);
-                        self.def_request_id = Some(id);
-                    }
+                if self.lsp.is_none() {
+                    self.hover_popup = Some(LSP_MISSING_HINT.to_string());
+                    cx.notify();
+                } else if let Some(uri) = self.current_uri() {
+                    let lsp = self.lsp.as_ref().unwrap();
+                    let cursor = self.state.cursor();
+                    let id = lsp.request_definition(uri, cursor.line, cursor.col);
+                    self.def_request_id = Some(id);
                 }
             }
             KeymapResult::PlayMacro(reg) => {
