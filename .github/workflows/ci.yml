@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    # ockr links against AppKit/WebKit via objc2, so it only builds on macOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Only the main `ockr` package builds on the host target; the
+      # ockr-plugin-example member targets wasm32 and is excluded here.
+      - name: Build
+        run: cargo build -p ockr --locked
+
+      - name: Test
+        run: cargo test -p ockr --locked
