@@ -51,6 +51,7 @@ use crate::ui::command_palette::{CommandPalette, PaletteEvent};
 use crate::ui::html_preview::HtmlWebView;
 use crate::ui::file_picker::{FilePicker, FilePickerEvent};
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
+use crate::ui::rename_modal::{RenameModal, RenameModalEvent};
 use crate::ui::template_picker::{
     TemplatePicker, TemplatePickerEvent, heading_to_filename_stem, scan_templates,
 };
@@ -197,6 +198,10 @@ pub struct MainWindow {
     plugin_manager_focus_pending: bool,
     /// Handle to the `tinymist` LSP thread.  `None` if tinymist is not installed.
     lsp: Option<LspHandle>,
+    /// Active file-rename modal, if any.
+    rename_modal: Option<Entity<RenameModal>>,
+    /// True when `rename_modal` was just created and needs focus on next render.
+    rename_modal_focus_pending: bool,
 }
 
 impl MainWindow {
@@ -387,6 +392,9 @@ impl MainWindow {
                 SidebarEvent::OpenFile(abs_path) => {
                     this.open_path(abs_path.clone(), cx);
                 }
+                SidebarEvent::RenameFile(abs_path) => {
+                    this.open_rename_modal(abs_path.clone(), cx);
+                }
                 SidebarEvent::DeleteFile(abs_path) => {
                     this.delete_file(abs_path.clone(), cx);
                 }
@@ -524,6 +532,8 @@ impl MainWindow {
             plugin_manager_focus_pending: false,
             html_link_sender: link_tx,
             lsp: lsp_handle,
+            rename_modal: None,
+            rename_modal_focus_pending: false,
         }
     }
 
@@ -1110,6 +1120,80 @@ impl MainWindow {
         self.persist_tabs();
 
         // Rescan the vault (rebuilds the file list; backlink cache self-heals).
+        if let Some(root) = self.vault.read(cx).root.clone() {
+            self.vault.update(cx, |vs, cx| {
+                *vs = VaultState::open(root);
+                cx.notify();
+            });
+            self.spawn_backlink_build_if_needed(cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the rename modal for `path` and wire its events.
+    fn open_rename_modal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let modal = cx.new(|cx| RenameModal::new(path, cx));
+        cx.subscribe(&modal, |this, _, event: &RenameModalEvent, cx| {
+            match event {
+                RenameModalEvent::Close => {
+                    this.rename_modal = None;
+                    cx.notify();
+                }
+                RenameModalEvent::Submit { original, new_stem } => {
+                    this.rename_modal = None;
+                    this.rename_file(original.clone(), new_stem.clone(), cx);
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        self.rename_modal = Some(modal);
+        self.rename_modal_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Rename a vault file to `new_stem` (extension + parent dir preserved),
+    /// update any open tab pointing at it, and rescan the vault.
+    fn rename_file(&mut self, original: PathBuf, new_stem: String, cx: &mut Context<Self>) {
+        let parent = original.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let ext = original.extension().and_then(|e| e.to_str()).unwrap_or("typ");
+        let dest = parent.join(format!("{new_stem}.{ext}"));
+
+        if dest == original {
+            return; // no change
+        }
+        if dest.exists() {
+            self.export_status = Some(format!("Rename failed: {new_stem}.{ext} already exists"));
+            cx.notify();
+            return;
+        }
+        if std::fs::rename(&original, &dest).is_err() {
+            self.export_status = Some("Rename failed".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Repoint any tab showing the old path; reload affected panes.
+        for pane_idx in 0..self.panes.len() {
+            let mut changed = false;
+            for tab in &mut self.panes[pane_idx].tabs {
+                if tab.path == original {
+                    tab.path = dest.clone();
+                    tab.title = new_stem.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                let pane = &self.panes[pane_idx];
+                let active_path = pane.tabs.get(pane.active_tab).map(|t| t.path.clone());
+                if active_path.as_deref() == Some(dest.as_path()) {
+                    let editor = pane.editor.clone();
+                    open_file_in_editor(&dest, &editor, &self.vault, cx);
+                }
+            }
+        }
+        self.persist_tabs();
+
         if let Some(root) = self.vault.read(cx).root.clone() {
             self.vault.update(cx, |vs, cx| {
                 *vs = VaultState::open(root);
@@ -2273,6 +2357,14 @@ impl Render for MainWindow {
             self.plugin_manager_focus_pending = false;
         }
 
+        // Focus the rename modal if it was just created.
+        if self.rename_modal_focus_pending {
+            if let Some(ref m) = self.rename_modal {
+                m.read(cx).focus_handle.clone().focus(window);
+            }
+            self.rename_modal_focus_pending = false;
+        }
+
         // ── Window dimensions ─────────────────────────────────────────────────
         // Use GPUI's viewport_size — always current, never stale, no AppKit query needed.
         let vp = window.viewport_size();
@@ -2598,6 +2690,9 @@ impl Render for MainWindow {
             })
             .when_some(self.plugin_manager.clone(), |root, pm| {
                 root.child(gpui::deferred(pm).with_priority(160))
+            })
+            .when_some(self.rename_modal.clone(), |root, m| {
+                root.child(gpui::deferred(m).with_priority(170))
             })
     }
 }

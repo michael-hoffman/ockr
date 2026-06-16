@@ -26,6 +26,8 @@ use crate::vault::VaultState;
 pub enum SidebarEvent {
     /// User clicked a file row.  Carries the absolute path of the file.
     OpenFile(PathBuf),
+    /// User chose "Rename" — open the rename modal for this file.
+    RenameFile(PathBuf),
     /// User chose "Delete" — move the file to the system Trash.
     DeleteFile(PathBuf),
     /// User chose "Reveal in Finder".
@@ -242,6 +244,7 @@ impl Render for Sidebar {
         let context_menu = self.context_menu.as_ref().map(|menu| {
             let path_del = menu.path.clone();
             let path_rev = menu.path.clone();
+            let path_ren = menu.path.clone();
             let item = |label: &str, danger: bool, t: &ThemePalette| {
                 let color = if danger { 0xff6b6bu32 } else { t.text };
                 div()
@@ -286,6 +289,15 @@ impl Render for Sidebar {
                 .shadow_lg()
                 .py(px(4.0))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    item("Rename…", false, &t)
+                        .id("ctx-rename")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.emit(SidebarEvent::RenameFile(path_ren.clone()));
+                            this.context_menu = None;
+                            cx.notify();
+                        })),
+                )
                 .child(
                     item("Reveal in Finder", false, &t)
                         .id("ctx-reveal")
