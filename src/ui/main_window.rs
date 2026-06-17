@@ -39,6 +39,7 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewNote, OpenBacklinks, OpenCommandPalette,
     OpenDailyNote, OpenFilePicker, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
+    LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative,
     OpenSettings, OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
     SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
@@ -801,22 +802,14 @@ impl MainWindow {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
-        let next = match current {
-            PreviewMode::Html => PreviewMode::Paged,
-            PreviewMode::Paged => PreviewMode::Html,
+        // Flip the canonical Settings value; set_preview_mode writes the
+        // PreviewMode global + Settings + persists, so they never drift.
+        let next = if cx.global::<crate::settings::Settings>().preview_mode == "paged" {
+            "html"
+        } else {
+            "paged"
         };
-        cx.set_global(next);
-        match next {
-            PreviewMode::Html => {
-                if let Some(ref wv) = self.html_webview { wv.set_hidden(false); }
-            }
-            PreviewMode::Paged => {
-                if let Some(ref wv) = self.html_webview { wv.set_hidden(true); }
-            }
-        }
-        self.active_editor().clone().update(cx, |pane, cx| pane.trigger_compile(cx));
-        cx.notify();
+        self.set_preview_mode(next, cx);
     }
 
     fn export_pdf(
@@ -1239,59 +1232,100 @@ impl MainWindow {
         cx.notify();
     }
 
-    /// Advance one setting to its next value, apply it live, and persist it to
-    /// the global settings file so it survives a restart.
+    /// Advance one setting to its next value (cycle), driven off the canonical
+    /// `Settings` global and applied via the shared `set_*` writers.
     fn apply_setting(&mut self, key: SettingKey, cx: &mut Context<Self>) {
+        let s = cx.global::<crate::settings::Settings>();
         match key {
             SettingKey::Keyboard => {
-                let next = if cx.global::<crate::settings::Settings>().keyboard_mode == "standard" {
-                    "helix"
-                } else {
-                    "standard"
-                };
-                let editor = self.panes[self.active_idx].editor.clone();
-                editor.update(cx, |pane, _| pane.switch_keyboard_mode());
-                cx.global_mut::<crate::settings::Settings>().keyboard_mode = next.to_string();
-                crate::settings::save_global_setting("keyboard_mode", next);
+                let next = if s.keyboard_mode == "standard" { "helix" } else { "standard" };
+                self.set_keyboard_mode(next, cx);
             }
             SettingKey::Theme => {
-                let next = if cx.global::<crate::settings::Settings>().theme == "ochre" {
-                    "oxide"
-                } else {
-                    "ochre"
-                };
-                *cx.global_mut::<ThemePalette>() = crate::load_theme_by_name(next);
-                cx.global_mut::<crate::settings::Settings>().theme = next.to_string();
-                crate::settings::save_global_setting("theme", next);
+                let next = if s.theme == "ochre" { "oxide" } else { "ochre" };
+                self.set_theme(next, cx);
             }
             SettingKey::LineNumbers => {
-                let next = match cx.global::<crate::settings::Settings>().line_number_mode.as_str() {
+                let next = match s.line_number_mode.as_str() {
                     "relative" => "absolute",
                     "absolute" => "off",
                     _ => "relative",
                 };
-                let mode = match next {
-                    "absolute" => crate::ui::editor_pane::LineNumberMode::Absolute,
-                    "off" => crate::ui::editor_pane::LineNumberMode::Off,
-                    _ => crate::ui::editor_pane::LineNumberMode::Relative,
-                };
-                for entry in &self.panes {
-                    entry.editor.update(cx, |pane, _| pane.set_line_number_mode(mode));
-                }
-                cx.global_mut::<crate::settings::Settings>().line_number_mode = next.to_string();
-                crate::settings::save_global_setting("line_number_mode", next);
+                self.set_line_number_mode(next, cx);
             }
             SettingKey::Preview => {
-                let next = if cx.global::<crate::settings::Settings>().preview_mode == "paged" {
-                    "html"
-                } else {
-                    "paged"
-                };
-                cx.dispatch_action(&TogglePreviewMode);
-                cx.global_mut::<crate::settings::Settings>().preview_mode = next.to_string();
-                crate::settings::save_global_setting("preview_mode", next);
+                let next = if s.preview_mode == "paged" { "html" } else { "paged" };
+                self.set_preview_mode(next, cx);
             }
         }
+    }
+
+    // ── Canonical setting writers ───────────────────────────────────────────────
+    //
+    // Every setting has exactly one writer.  Each applies the change live to all
+    // affected views, updates the `Settings` global (single source of truth), and
+    // persists to the global settings file.  All entry points — the settings
+    // panel, palette commands, menu actions, keybindings — funnel through these,
+    // so the displayed value, the live state, and the saved value can never drift.
+
+    fn set_keyboard_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let mode = if mode == "standard" { "standard" } else { "helix" };
+        for entry in &self.panes {
+            entry.editor.update(cx, |pane, c| {
+                pane.set_keyboard_mode(mode);
+                c.notify();
+            });
+        }
+        cx.global_mut::<crate::settings::Settings>().keyboard_mode = mode.to_string();
+        crate::settings::save_global_setting("keyboard_mode", mode);
+        cx.notify();
+    }
+
+    fn set_theme(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = if name == "ochre" { "ochre" } else { "oxide" };
+        *cx.global_mut::<ThemePalette>() = crate::load_theme_by_name(name);
+        cx.global_mut::<crate::settings::Settings>().theme = name.to_string();
+        crate::settings::save_global_setting("theme", name);
+        // Panes read the theme at render time and aren't global observers, so
+        // nudge them (and self) to repaint with the new palette.
+        for entry in &self.panes {
+            entry.editor.update(cx, |_, c| c.notify());
+        }
+        cx.notify();
+    }
+
+    fn set_line_number_mode(&mut self, name: &str, cx: &mut Context<Self>) {
+        use crate::ui::editor_pane::LineNumberMode;
+        let (name, mode) = match name {
+            "absolute" => ("absolute", LineNumberMode::Absolute),
+            "off" => ("off", LineNumberMode::Off),
+            _ => ("relative", LineNumberMode::Relative),
+        };
+        for entry in &self.panes {
+            entry.editor.update(cx, |pane, c| {
+                pane.set_line_number_mode(mode);
+                c.notify();
+            });
+        }
+        cx.global_mut::<crate::settings::Settings>().line_number_mode = name.to_string();
+        crate::settings::save_global_setting("line_number_mode", name);
+        cx.notify();
+    }
+
+    fn set_preview_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let (name, pm) = if mode == "paged" {
+            ("paged", PreviewMode::Paged)
+        } else {
+            ("html", PreviewMode::Html)
+        };
+        cx.set_global(pm);
+        if let Some(ref wv) = self.html_webview {
+            wv.set_hidden(pm == PreviewMode::Paged);
+        }
+        cx.global_mut::<crate::settings::Settings>().preview_mode = name.to_string();
+        crate::settings::save_global_setting("preview_mode", name);
+        self.active_editor().clone().update(cx, |pane, cx| pane.trigger_compile(cx));
+        cx.notify();
     }
 
     // ── Story 18: Note Templates ──────────────────────────────────────────────
@@ -1834,44 +1868,29 @@ impl MainWindow {
                     cx.notify();
                 });
             }
-            "line-numbers-relative" => {
-                self.active_editor().clone().update(cx, |pane, cx| {
-                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Relative);
-                    cx.notify();
-                });
-            }
-            "line-numbers-absolute" => {
-                self.active_editor().clone().update(cx, |pane, cx| {
-                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Absolute);
-                    cx.notify();
-                });
-            }
-            "line-numbers-off" => {
-                self.active_editor().clone().update(cx, |pane, cx| {
-                    pane.set_line_number_mode(crate::ui::editor_pane::LineNumberMode::Off);
-                    cx.notify();
-                });
-            }
+            "line-numbers-relative" => self.set_line_number_mode("relative", cx),
+            "line-numbers-absolute" => self.set_line_number_mode("absolute", cx),
+            "line-numbers-off" => self.set_line_number_mode("off", cx),
             "reload-settings" => {
                 let vault_root = self.vault.read(cx).root.clone();
                 let new_settings = crate::settings::load_settings(vault_root.as_deref());
                 *cx.global_mut::<crate::settings::Settings>() = new_settings;
             }
             "switch-keyboard-mode" => {
-                let editor = self.panes[self.active_idx].editor.clone();
-                editor.update(cx, |pane, _cx| pane.switch_keyboard_mode());
+                let next = if cx.global::<crate::settings::Settings>().keyboard_mode == "standard" {
+                    "helix"
+                } else {
+                    "standard"
+                };
+                self.set_keyboard_mode(next, cx);
             }
             "switch-theme" => {
-                let settings = cx.global::<crate::settings::Settings>();
-                let new_name = match settings.theme.as_str() {
-                    "ochre" => "oxide",
-                    _ => "ochre",
+                let next = if cx.global::<crate::settings::Settings>().theme == "ochre" {
+                    "oxide"
+                } else {
+                    "ochre"
                 };
-                let new_theme = crate::load_theme_by_name(new_name);
-                *cx.global_mut::<ThemePalette>() = new_theme;
-                cx.global_mut::<crate::settings::Settings>().theme = new_name.to_string();
-                crate::settings::save_global_setting("theme", new_name);
-                cx.notify();
+                self.set_theme(next, cx);
             }
             _ => {
                 // Plugin command?
@@ -2523,6 +2542,9 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_file_picker))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| this.set_line_number_mode("relative", cx)))
+            .on_action(cx.listener(|this, _: &LineNumbersAbsolute, _, cx| this.set_line_number_mode("absolute", cx)))
+            .on_action(cx.listener(|this, _: &LineNumbersOff, _, cx| this.set_line_number_mode("off", cx)))
             .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_outline))

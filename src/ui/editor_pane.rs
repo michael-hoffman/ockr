@@ -49,7 +49,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px, rgba,
 };
 
-use crate::actions::{FollowLink, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, OpenReplace, OpenSearch, SaveFile};
+use crate::actions::{FollowLink, OpenReplace, OpenSearch, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode};
 use crate::lsp::{LspDiagnostic, LspHandle, LspSeverity};
 use crate::editor::buffer::Buffer as _;
@@ -319,6 +319,15 @@ impl EditorPane {
             // EditorState defaults to Insert; switch to Normal for Helix mode.
             // (We don't have a Noop path through apply for this, so set directly.)
         }
+        // Initial line-number mode from settings (canonical source of truth).
+        let line_number_mode = match cx
+            .try_global::<crate::settings::Settings>()
+            .map(|s| s.line_number_mode.as_str())
+        {
+            Some("absolute") => LineNumberMode::Absolute,
+            Some("off") => LineNumberMode::Off,
+            _ => LineNumberMode::Relative,
+        };
         Self {
             focus_handle: cx.focus_handle(),
             state,
@@ -339,7 +348,7 @@ impl EditorPane {
             search_highlight_matches: Vec::new(),
             search_highlight_current: 0,
             search_nav_status: None,
-            line_number_mode: LineNumberMode::Relative,
+            line_number_mode,
             plugin_packages: None,
             compile_sequence: 0,
             viewport_top: 0,
@@ -380,14 +389,20 @@ impl EditorPane {
     }
 
     /// Switch between Helix and Standard keyboard modes.
-    pub fn switch_keyboard_mode(&mut self) {
-        let current = self.keymap.mode_label(&self.state);
-        if current == "STANDARD" {
-            self.keymap = Box::new(crate::editor::keymap_helix::HelixKeymap::new());
-            self.state.mode = Mode::Normal;
-        } else {
+    /// Set the keyboard mode explicitly (`"standard"` or anything else = Helix).
+    /// Idempotent — no-op if already in the requested mode.
+    pub fn set_keyboard_mode(&mut self, mode: &str) {
+        let is_standard = self.keymap.mode_label(&self.state) == "STANDARD";
+        let want_standard = mode == "standard";
+        if is_standard == want_standard {
+            return;
+        }
+        if want_standard {
             self.keymap = Box::new(crate::editor::keymap_standard::StandardKeymap::new());
             self.state.mode = Mode::Insert;
+        } else {
+            self.keymap = Box::new(crate::editor::keymap_helix::HelixKeymap::new());
+            self.state.mode = Mode::Normal;
         }
     }
 
@@ -2675,18 +2690,8 @@ impl Render for EditorPane {
                 this.open_replace();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| {
-                this.line_number_mode = LineNumberMode::Relative;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &LineNumbersAbsolute, _, cx| {
-                this.line_number_mode = LineNumberMode::Absolute;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &LineNumbersOff, _, cx| {
-                this.line_number_mode = LineNumberMode::Off;
-                cx.notify();
-            }))
+            // Line-number actions are handled by MainWindow (single source of
+            // truth: applies to all panes + persists to Settings).
             .on_action(cx.listener(Self::follow_link))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
