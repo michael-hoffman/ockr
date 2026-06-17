@@ -138,6 +138,7 @@ fn main() {
             KeyBinding::new("ctrl-cmd-z", ToggleZenMode, None),
             KeyBinding::new("cmd-k", OpenQuickSwitch, None),
             KeyBinding::new("ctrl-p", OpenFilePicker, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-shift-r", OpenRecentFiles, None),
             KeyBinding::new("cmd-shift-k", OpenBacklinks, None),
             KeyBinding::new("cmd-shift-o", OpenOutline, None),
@@ -167,6 +168,8 @@ fn main() {
                 name: "ockr".into(),
                 items: vec![
                     MenuItem::action("About ockr", Quit), // placeholder
+                    MenuItem::separator(),
+                    MenuItem::action("Settings…", OpenSettings),
                     MenuItem::separator(),
                     MenuItem::action("Quit ockr", Quit),
                 ],
@@ -293,6 +296,9 @@ fn main() {
         });
         cx.on_action(|_: &OpenFilePicker, _cx| {
             // Path-based fuzzy file picker (Ctrl-P).
+        });
+        cx.on_action(|_: &OpenSettings, _cx| {
+            // Settings panel — handled by MainWindow (Cmd-,).
         });
         cx.on_action(|_: &OpenRecentFiles, _cx| {
             // Story 44: recent files modal
@@ -452,6 +458,7 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("line-numbers-off",      "Line Numbers: Off",               Some(":set nonu")),
         // Settings
         ("reload-settings",       "Reload Settings",                  None),
+        ("settings",              "Settings…",                        Some("Cmd-,")),
         ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
         ("switch-theme",          "Switch Theme",                     None),
         ("toggle-typewriter-mode", "Toggle Typewriter Mode",           None),

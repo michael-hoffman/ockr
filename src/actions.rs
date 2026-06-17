@@ -56,5 +56,7 @@ actions!(
         OpenReplace,
         // Plugin management
         OpenPluginManager,
+        // Settings
+        OpenSettings,
     ]
 );

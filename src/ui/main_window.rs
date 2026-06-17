@@ -39,7 +39,7 @@ use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewNote, OpenBacklinks, OpenCommandPalette,
     OpenDailyNote, OpenFilePicker, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
-    OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
+    OpenSettings, OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
     SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
@@ -52,6 +52,7 @@ use crate::ui::html_preview::HtmlWebView;
 use crate::ui::file_picker::{FilePicker, FilePickerEvent};
 use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
 use crate::ui::rename_modal::{RenameModal, RenameModalEvent};
+use crate::ui::settings_panel::{SettingKey, SettingsPanel, SettingsPanelEvent};
 use crate::ui::template_picker::{
     TemplatePicker, TemplatePickerEvent, heading_to_filename_stem, scan_templates,
 };
@@ -202,6 +203,10 @@ pub struct MainWindow {
     rename_modal: Option<Entity<RenameModal>>,
     /// True when `rename_modal` was just created and needs focus on next render.
     rename_modal_focus_pending: bool,
+    /// Active settings panel, if any.
+    settings_panel: Option<Entity<SettingsPanel>>,
+    /// True when `settings_panel` was just created and needs focus on next render.
+    settings_panel_focus_pending: bool,
 }
 
 impl MainWindow {
@@ -534,6 +539,8 @@ impl MainWindow {
             lsp: lsp_handle,
             rename_modal: None,
             rename_modal_focus_pending: false,
+            settings_panel: None,
+            settings_panel_focus_pending: false,
         }
     }
 
@@ -1204,6 +1211,89 @@ impl MainWindow {
         cx.notify();
     }
 
+    // ── Settings panel (S7) ────────────────────────────────────────────────────
+
+    fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        // Toggle.
+        if self.settings_panel.is_some() {
+            self.settings_panel = None;
+            self.refocus_editor_pending = true;
+            cx.notify();
+            return;
+        }
+        let panel = cx.new(|cx| SettingsPanel::new(cx));
+        cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| match event {
+            SettingsPanelEvent::Close => {
+                this.settings_panel = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
+            }
+            SettingsPanelEvent::Cycle(key) => {
+                this.apply_setting(*key, cx);
+                cx.notify();
+            }
+        })
+        .detach();
+        self.settings_panel = Some(panel);
+        self.settings_panel_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Advance one setting to its next value, apply it live, and persist it to
+    /// the global settings file so it survives a restart.
+    fn apply_setting(&mut self, key: SettingKey, cx: &mut Context<Self>) {
+        match key {
+            SettingKey::Keyboard => {
+                let next = if cx.global::<crate::settings::Settings>().keyboard_mode == "standard" {
+                    "helix"
+                } else {
+                    "standard"
+                };
+                let editor = self.panes[self.active_idx].editor.clone();
+                editor.update(cx, |pane, _| pane.switch_keyboard_mode());
+                cx.global_mut::<crate::settings::Settings>().keyboard_mode = next.to_string();
+                crate::settings::save_global_setting("keyboard_mode", next);
+            }
+            SettingKey::Theme => {
+                let next = if cx.global::<crate::settings::Settings>().theme == "ochre" {
+                    "oxide"
+                } else {
+                    "ochre"
+                };
+                *cx.global_mut::<ThemePalette>() = crate::load_theme_by_name(next);
+                cx.global_mut::<crate::settings::Settings>().theme = next.to_string();
+                crate::settings::save_global_setting("theme", next);
+            }
+            SettingKey::LineNumbers => {
+                let next = match cx.global::<crate::settings::Settings>().line_number_mode.as_str() {
+                    "relative" => "absolute",
+                    "absolute" => "off",
+                    _ => "relative",
+                };
+                let mode = match next {
+                    "absolute" => crate::ui::editor_pane::LineNumberMode::Absolute,
+                    "off" => crate::ui::editor_pane::LineNumberMode::Off,
+                    _ => crate::ui::editor_pane::LineNumberMode::Relative,
+                };
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, _| pane.set_line_number_mode(mode));
+                }
+                cx.global_mut::<crate::settings::Settings>().line_number_mode = next.to_string();
+                crate::settings::save_global_setting("line_number_mode", next);
+            }
+            SettingKey::Preview => {
+                let next = if cx.global::<crate::settings::Settings>().preview_mode == "paged" {
+                    "html"
+                } else {
+                    "paged"
+                };
+                cx.dispatch_action(&TogglePreviewMode);
+                cx.global_mut::<crate::settings::Settings>().preview_mode = next.to_string();
+                crate::settings::save_global_setting("preview_mode", next);
+            }
+        }
+    }
+
     // ── Story 18: Note Templates ──────────────────────────────────────────────
 
     fn new_note(
@@ -1712,6 +1802,7 @@ impl MainWindow {
             "open-command-palette" => cx.dispatch_action(&OpenCommandPalette),
             "open-quick-switch" => cx.dispatch_action(&OpenQuickSwitch),
             "open-file-picker" => cx.dispatch_action(&OpenFilePicker),
+            "settings" | "open-settings" => cx.dispatch_action(&OpenSettings),
             "open-recent-files" => cx.dispatch_action(&OpenRecentFiles),
             "follow-link" => {
                 self.active_editor().clone().update(cx, |pane, cx| {
@@ -2365,6 +2456,14 @@ impl Render for MainWindow {
             self.rename_modal_focus_pending = false;
         }
 
+        // Focus the settings panel if it was just created.
+        if self.settings_panel_focus_pending {
+            if let Some(ref p) = self.settings_panel {
+                p.read(cx).focus_handle.clone().focus(window);
+            }
+            self.settings_panel_focus_pending = false;
+        }
+
         // ── Window dimensions ─────────────────────────────────────────────────
         // Use GPUI's viewport_size — always current, never stale, no AppKit query needed.
         let vp = window.viewport_size();
@@ -2423,6 +2522,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_file_picker))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_outline))
@@ -2693,6 +2793,9 @@ impl Render for MainWindow {
             })
             .when_some(self.rename_modal.clone(), |root, m| {
                 root.child(gpui::deferred(m).with_priority(170))
+            })
+            .when_some(self.settings_panel.clone(), |root, p| {
+                root.child(gpui::deferred(p).with_priority(170))
             })
     }
 }
