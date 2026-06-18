@@ -39,7 +39,7 @@ pub fn request(text: &str, seq: u64, tx: UnboundedSender<SpellResult>) {
 
     let ns_text = NSString::from_str(text);
     let len_utf16 = ns_text.length(); // NSUInteger, UTF-16 units
-    let checker = unsafe { NSSpellChecker::sharedSpellChecker() };
+    let checker = NSSpellChecker::sharedSpellChecker();
 
     // Own a copy of the text inside the completion block so offset mapping is
     // self-consistent regardless of later edits.
