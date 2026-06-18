@@ -104,6 +104,10 @@ pub enum KeymapResult {
     ShowHover,
     /// Request LSP go-to-definition at the cursor (`gd`).
     GotoDefinition,
+    /// Jump backward in the jump list (`Ctrl-o`).
+    JumpBack,
+    /// Jump forward in the jump list (`Ctrl-i`).
+    JumpForward,
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

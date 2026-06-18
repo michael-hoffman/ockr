@@ -292,6 +292,12 @@ pub struct EditorPane {
     hover_request_id: Option<i64>,
     /// Request ID of the most recent go-to-definition request.
     def_request_id: Option<i64>,
+    /// Jump list for `Ctrl-o` / `Ctrl-i`.  Positions are pushed before a
+    /// jump-class motion (document ends, GotoLine, search, go-to-definition).
+    jump_list: Vec<Pos>,
+    /// Index into `jump_list`; equals `jump_list.len()` when at the live cursor
+    /// (not currently navigating history).
+    jump_cursor: usize,
 }
 
 impl EditorPane {
@@ -378,6 +384,8 @@ impl EditorPane {
             spell_tx: Some(spell_tx),
             spell_seq: 0,
             spell_pending: false,
+            jump_list: Vec::new(),
+            jump_cursor: 0,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -520,6 +528,46 @@ impl EditorPane {
         self.spell_pending = false;
         self.cached_doc_stats = None;
         self.hover_popup = None;
+    }
+
+    /// Record `from` as a jump origin (called before a jump-class motion).
+    /// Truncates any forward history and caps the list at 100 entries.
+    fn record_jump(&mut self, from: Pos) {
+        // Skip if it duplicates the most recent entry.
+        if self.jump_cursor > 0 && self.jump_list.get(self.jump_cursor - 1) == Some(&from) {
+            return;
+        }
+        self.jump_list.truncate(self.jump_cursor);
+        self.jump_list.push(from);
+        if self.jump_list.len() > 100 {
+            self.jump_list.remove(0);
+        }
+        self.jump_cursor = self.jump_list.len();
+    }
+
+    /// Jump backward in the jump list (`Ctrl-o`).
+    fn jump_back(&mut self) {
+        if self.jump_cursor == 0 {
+            return;
+        }
+        // Stepping back from the live cursor: stash it so Ctrl-i can return.
+        if self.jump_cursor == self.jump_list.len() {
+            self.jump_list.push(self.state.cursor());
+        }
+        self.jump_cursor -= 1;
+        let pos = self.jump_list[self.jump_cursor];
+        self.state.move_cursor_to(pos);
+        self.update_viewport();
+    }
+
+    /// Jump forward in the jump list (`Ctrl-i`).
+    fn jump_forward(&mut self) {
+        if self.jump_cursor + 1 < self.jump_list.len() {
+            self.jump_cursor += 1;
+            let pos = self.jump_list[self.jump_cursor];
+            self.state.move_cursor_to(pos);
+            self.update_viewport();
+        }
     }
 
     /// Current cursor as an LSP position: `(line, UTF-16 character offset)`.
@@ -1142,6 +1190,7 @@ impl EditorPane {
             Some(q) => q.clone(),
             None => return,
         };
+        self.record_jump(self.state.cursor());
         let backward = self.last_search_backward;
         let whole_word = self.last_search_whole_word;
         let matches = find_all_matches(&self.buffer, &query, whole_word);
@@ -1175,6 +1224,7 @@ impl EditorPane {
             Some(q) => q.clone(),
             None => return,
         };
+        self.record_jump(self.state.cursor());
         let backward = self.last_search_backward;
         let whole_word = self.last_search_whole_word;
         let matches = find_all_matches(&self.buffer, &query, whole_word);
@@ -1791,6 +1841,16 @@ impl EditorPane {
                     cx.dispatch_action(&crate::actions::BufferPrevious);
                 }
             }
+            KeymapResult::JumpBack => {
+                cx.stop_propagation();
+                self.jump_back();
+                cx.notify();
+            }
+            KeymapResult::JumpForward => {
+                cx.stop_propagation();
+                self.jump_forward();
+                cx.notify();
+            }
             KeymapResult::ShowHover => {
                 cx.stop_propagation();
                 self.hover_popup = None; // clear stale
@@ -1807,6 +1867,7 @@ impl EditorPane {
             KeymapResult::GotoDefinition => {
                 cx.stop_propagation();
                 self.hover_popup = None;
+                self.record_jump(self.state.cursor());
                 match (self.lsp.clone(), self.current_uri()) {
                     (None, _) => {
                         self.hover_popup = Some(LSP_MISSING_HINT.to_string());
@@ -2008,6 +2069,11 @@ impl EditorPane {
     ) {
         // We are handling this key — tell GPUI so macOS doesn't double-insert.
         cx.stop_propagation();
+
+        // Record the origin of a jump-class motion so Ctrl-o can return.
+        if is_jump_command(&cmd) {
+            self.record_jump(self.state.cursor());
+        }
 
         // ── Multi-cursor fan-out ──────────────────────────────────────────────
         // For mutation commands, `apply_to_extra_cursors` handles all cursors
@@ -2971,6 +3037,22 @@ fn parse_word_target_from_buffer(buf: &InMemoryBuffer) -> Option<usize> {
         }
     }
     None
+}
+
+/// Whether a command is a "jump" — a large, non-local motion worth recording
+/// in the jump list so `Ctrl-o` can return to where it started.
+fn is_jump_command(cmd: &EditorCommand) -> bool {
+    matches!(
+        cmd,
+        EditorCommand::MoveStartOfDocument
+            | EditorCommand::MoveEndOfDocument
+            | EditorCommand::GotoLine(_)
+            | EditorCommand::GotoLastInsert
+            | EditorCommand::GotoLastModified
+            | EditorCommand::MoveParagraphForward
+            | EditorCommand::MoveParagraphBack
+            | EditorCommand::SelectWholeFile
+    )
 }
 
 /// Byte offset within `line` → UTF-16 code-unit offset (LSP column).

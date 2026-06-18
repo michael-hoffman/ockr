@@ -106,6 +106,16 @@ impl KeymapHandler for HelixKeymap {
             return KeymapResult::Redo;
         }
 
+        // ── Jump list (Ctrl-o back / Ctrl-i forward) ────────────────────
+        if k.modifiers.control && !k.modifiers.platform && state.mode != Mode::Insert {
+            if k.key == "o" {
+                return KeymapResult::JumpBack;
+            }
+            if k.key == "i" {
+                return KeymapResult::JumpForward;
+            }
+        }
+
         // ── `r<c>` replace ──────────────────────────────────────────────
         if state.mode == Mode::Normal
             && k.key == "r"
