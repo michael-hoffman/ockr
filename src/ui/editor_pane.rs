@@ -314,10 +314,6 @@ pub struct EditorPane {
     completion: Option<CompletionState>,
     /// Request ID of the most recent completion request (to discard stale ones).
     completion_request_id: Option<i64>,
-    /// Pixel width of this pane, fed by `MainWindow` each layout.  Used to
-    /// compute the soft-wrap column so the insert caret lands on the right
-    /// wrapped row.
-    pane_width_px: f32,
 }
 
 impl EditorPane {
@@ -408,7 +404,6 @@ impl EditorPane {
             jump_cursor: 0,
             completion: None,
             completion_request_id: None,
-            pane_width_px: 700.0,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -1094,12 +1089,6 @@ impl EditorPane {
 
     pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
         self.line_number_mode = mode;
-    }
-
-    /// Tell the pane its current pixel width (from `MainWindow`'s layout) so the
-    /// insert caret can be positioned on the correct soft-wrapped row.
-    pub fn set_pane_width(&mut self, px: f32) {
-        self.pane_width_px = px;
     }
 
     /// Clear the persistent search highlights and nav status (`:noh`).
@@ -2409,17 +2398,6 @@ impl Render for EditorPane {
 
         let lnm = self.line_number_mode;
 
-        // Soft-wrap column width (chars) for positioning the insert caret on the
-        // correct wrapped row.  Mirrors the editor body's text column: pane width
-        // minus the gutter and the p_4 (16px) padding on each side.  Menlo is
-        // monospace, so char count × CHAR_W is exact.
-        let gutter_px = if lnm != LineNumberMode::Off {
-            gutter_digits(line_count) as f32 * CHAR_W + 12.0
-        } else {
-            0.0
-        };
-        let wrap_cols = (((self.pane_width_px - gutter_px - 32.0) / CHAR_W).floor() as usize).max(1);
-
         // ── Spell check (async, cached) ─────────────────────────────────────
         // Fire one async NSSpellChecker request per invalidation; the
         // completion handler delivers spans through the channel (drained in
@@ -2488,7 +2466,7 @@ impl Render for EditorPane {
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
                 lnm, line_count, &other_matches, focused_match, diag_sev,
-                bracket_range, &line_spell_errors, &line_extra_cursors, wrap_cols, &t,
+                bracket_range, &line_spell_errors, &line_extra_cursors, &t,
             ));
         }
 
@@ -3229,60 +3207,6 @@ fn parse_word_target_from_buffer(buf: &InMemoryBuffer) -> Option<usize> {
     None
 }
 
-/// Visual `(row, col)` of the caret on a soft-wrapped line, in character units.
-///
-/// Simulates greedy word-wrap at `wrap_cols` columns to match the renderer's
-/// `StyledText` wrapping (monospace, so columns map 1:1 to characters).
-/// `byte_caret` is the caret's byte offset within `line`.
-fn caret_visual_pos(line: &str, byte_caret: usize, wrap_cols: usize) -> (usize, usize) {
-    let target = line[..byte_caret.min(line.len())].chars().count();
-    if wrap_cols == 0 {
-        return (0, target);
-    }
-    let chars: Vec<char> = line.chars().collect();
-    let mut row = 0usize;
-    let mut col = 0usize;
-    let mut i = 0usize;
-    while i < chars.len() {
-        if i == target {
-            return (row, col);
-        }
-        if chars[i].is_whitespace() {
-            // A space at the wrap boundary is absorbed by the line break (the
-            // next row starts at the following word, col 0).  Otherwise it
-            // occupies a column like any character.
-            if col >= wrap_cols {
-                row += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-            i += 1;
-            continue;
-        }
-        // Length of the upcoming word (run of non-whitespace).
-        let word_len = chars[i..].iter().take_while(|c| !c.is_whitespace()).count();
-        // Wrap before the word if it doesn't fit and we're mid-row.
-        if col > 0 && col + word_len > wrap_cols && word_len <= wrap_cols {
-            row += 1;
-            col = 0;
-        }
-        // Emit the word char by char, hard-breaking words longer than the row.
-        for _ in 0..word_len {
-            if i == target {
-                return (row, col);
-            }
-            if col >= wrap_cols {
-                row += 1;
-                col = 0;
-            }
-            col += 1;
-            i += 1;
-        }
-    }
-    (row, col)
-}
-
 /// Whether a command is a "jump" — a large, non-local motion worth recording
 /// in the jump list so `Ctrl-o` can return to where it started.
 fn is_jump_command(cmd: &EditorCommand) -> bool {
@@ -3374,8 +3298,6 @@ fn render_line(
     spell_errors: &[(usize, usize)],
     // Extra cursor byte-columns on this line (for multi-cursor display).
     extra_cursors: &[usize],
-    // Soft-wrap column width in characters (for caret row/col on wrapped lines).
-    wrap_cols: usize,
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -3507,10 +3429,11 @@ fn render_line(
         if a >= b { continue; }
         if text.get(a..b).is_none() { continue; }
 
-        // Inline block cursor for Normal/Visual (flows + wraps within the text
-        // layout).  Insert mode uses a thin bar overlay instead (below).
+        // Inline block cursor for every mode — including Insert, which uses the
+        // mode_insert colour via `cursor_bg`.  Rendering it inline (rather than
+        // as an absolute bar) keeps it correctly placed on soft-wrapped lines.
         let is_cursor_block =
-            is_cursor_line && a == cursor_col && cursor_col < text_len && mode != Mode::Insert;
+            is_cursor_line && a == cursor_col && cursor_col < text_len;
 
         // Foreground and font attributes from syntax spans (or default).
         let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
@@ -3538,8 +3461,7 @@ fn render_line(
         };
 
         // Extra cursor block — slightly dimmer than the primary cursor.
-        let is_extra_cursor_block =
-            mode != Mode::Insert && extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
+        let is_extra_cursor_block = extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
         let extra_cursor_bg: gpui::Hsla = {
             // 60% opacity version of cursor_bg — mix toward background.
             let mut c = cursor_bg;
@@ -3573,62 +3495,18 @@ fn render_line(
         });
     }
 
-    // End-of-line cursor run (over the appended trailing space).  Inline block
-    // for Normal/Visual; Insert shows a plain space and the thin bar overlay.
+    // End-of-line cursor run (over the appended trailing space) — inline block
+    // in every mode, so it stays correct on soft-wrapped lines.
     if eol_cursor {
-        let (fg, bg) = if mode != Mode::Insert {
-            (cursor_fg, Some(cursor_bg))
-        } else {
-            (gpui::rgb(t.text_muted).into(), None)
-        };
         runs.push(gpui::TextRun {
             len: 1, // the trailing space appended above
             font: base_font.clone(),
-            color: fg,
-            background_color: bg,
+            color: cursor_fg,
+            background_color: Some(cursor_bg),
             underline: None,
             strikethrough: None,
         });
     }
-
-    // ── Insert-mode thin caret (wrap-aware) ────────────────────────────────────
-    // A 2px vertical bar positioned at the caret's visual row/col.  The visual
-    // position is derived by simulating the soft-wrap (monospace → exact), so
-    // the bar lands correctly even on a wrapped line spanning several rows.
-    let insert_bar: Option<gpui::AnyElement> = if is_cursor_line && mode == Mode::Insert {
-        let (row, col) = caret_visual_pos(&text, cursor_col.min(text_len), wrap_cols);
-        Some(
-            div()
-                .absolute()
-                .left(px(col as f32 * CHAR_W))
-                .top(px(row as f32 * 20.0))
-                .w(px(2.0))
-                .h(px(20.0))
-                .bg(gpui::rgb(t.mode_insert))
-                .into_any_element(),
-        )
-    } else {
-        None
-    };
-    let extra_insert_bars: Vec<gpui::AnyElement> = if mode == Mode::Insert {
-        extra_cursors
-            .iter()
-            .map(|&ec| {
-                let (row, col) = caret_visual_pos(&text, ec.min(text_len), wrap_cols);
-                div()
-                    .absolute()
-                    .left(px(col as f32 * CHAR_W))
-                    .top(px(row as f32 * 20.0))
-                    .w(px(2.0))
-                    .h(px(20.0))
-                    .opacity(0.6)
-                    .bg(gpui::rgb(t.mode_insert))
-                    .into_any_element()
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     // ── Assemble content ──────────────────────────────────────────────────────
     // `StyledText` renders the whole line as a single text layout that wraps at
@@ -3645,27 +3523,23 @@ fn render_line(
     // constraint, producing proper soft word-wrap.
     let content = if runs.is_empty() {
         // Empty line — render a zero-width placeholder so the row has min_h.
-        let mut d = div()
+        div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child("");
-        d = d.when_some(insert_bar, |d, bar| d.child(bar));
-        for bar in extra_insert_bars { d = d.child(bar); }
-        d.into_any_element()
+            .child("")
+            .into_any_element()
     } else {
-        let mut d = div()
+        div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child(gpui::StyledText::new(text_content).with_runs(runs));
-        d = d.when_some(insert_bar, |d, bar| d.child(bar));
-        for bar in extra_insert_bars { d = d.child(bar); }
-        d.into_any_element()
+            .child(gpui::StyledText::new(text_content).with_runs(runs))
+            .into_any_element()
     };
 
     // ── Assemble row ──────────────────────────────────────────────────────────
@@ -3975,25 +3849,6 @@ mod tests {
         keymap_helix::HelixKeymap,
         state::Mode,
     };
-
-    #[test]
-    fn caret_visual_pos_basic() {
-        // No wrap needed: row 0, col = char count.
-        assert_eq!(caret_visual_pos("hello", 5, 80), (0, 5));
-        // wrap_cols 0 → degenerate, row 0.
-        assert_eq!(caret_visual_pos("hello world", 11, 0), (0, 11));
-    }
-
-    #[test]
-    fn caret_visual_pos_wraps_word() {
-        // "aaa bbb ccc" at width 7: "aaa bbb" fills 7, "ccc" wraps to row 1.
-        // caret after the second space (byte 8) sits at start of "ccc" on row 1.
-        let (row, col) = caret_visual_pos("aaa bbb ccc", 8, 7);
-        assert_eq!(row, 1);
-        assert_eq!(col, 0);
-        // caret at end of "ccc" → row 1, col 3.
-        assert_eq!(caret_visual_pos("aaa bbb ccc", 11, 7), (1, 3));
-    }
 
     #[test]
     fn utf16_byte_roundtrip_ascii() {
