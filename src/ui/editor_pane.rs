@@ -3429,10 +3429,11 @@ fn render_line(
         if a >= b { continue; }
         if text.get(a..b).is_none() { continue; }
 
+        // Inline block cursor for every mode — including Insert, which uses the
+        // mode_insert colour via `cursor_bg`.  Rendering it inline (rather than
+        // as an absolute bar) keeps it correctly placed on soft-wrapped lines.
         let is_cursor_block =
-            is_cursor_line && a == cursor_col && cursor_col < text_len && mode != Mode::Insert;
-        let is_cursor_bar =
-            is_cursor_line && a == cursor_col && mode == Mode::Insert;
+            is_cursor_line && a == cursor_col && cursor_col < text_len;
 
         // Foreground and font attributes from syntax spans (or default).
         let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
@@ -3460,9 +3461,7 @@ fn render_line(
         };
 
         // Extra cursor block — slightly dimmer than the primary cursor.
-        let is_extra_cursor_block = mode != Mode::Insert
-            && extra_cursors.iter().any(|&ec| ec == a)
-            && a < text_len;
+        let is_extra_cursor_block = extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
         let extra_cursor_bg: gpui::Hsla = {
             // 60% opacity version of cursor_bg — mix toward background.
             let mut c = cursor_bg;
@@ -3472,10 +3471,6 @@ fn render_line(
 
         let (fg, bg, underline) = if is_cursor_block {
             (cursor_fg, Some(cursor_bg), None)
-        } else if is_cursor_bar {
-            // Insert-mode cursor: render the character normally; the caret bar
-            // is painted as an absolute-positioned overlay below.
-            (syn_fg, None, spell_underline)
         } else if is_extra_cursor_block {
             (cursor_fg, Some(extra_cursor_bg), spell_underline)
         } else if focused_match.map(|(s, e)| s <= a && a < e).unwrap_or(false) {
@@ -3500,63 +3495,18 @@ fn render_line(
         });
     }
 
-    // End-of-line cursor run (over the appended trailing space).
+    // End-of-line cursor run (over the appended trailing space) — inline block
+    // in every mode, so it stays correct on soft-wrapped lines.
     if eol_cursor {
-        let (fg, bg) = if mode != Mode::Insert {
-            (cursor_fg, Some(cursor_bg))
-        } else {
-            // Insert cursor at EOL: show a plain space; the bar overlay below
-            // handles the visual caret.
-            (gpui::rgb(t.text_muted).into(), None)
-        };
         runs.push(gpui::TextRun {
             len: 1, // the trailing space appended above
             font: base_font.clone(),
-            color: fg,
-            background_color: bg,
+            color: cursor_fg,
+            background_color: Some(cursor_bg),
             underline: None,
             strikethrough: None,
         });
     }
-
-    // ── Insert-mode cursor bar ────────────────────────────────────────────────
-    // Overlay a 2 px vertical bar at the cursor's character position.
-    // The bar is absolutely positioned relative to the content div so it sits
-    // exactly at the left edge of the character under the caret.
-    let insert_bar: Option<gpui::AnyElement> = if is_cursor_line && mode == Mode::Insert {
-        // Convert byte cursor to character column for pixel positioning.
-        let char_col = text[..cursor_col.min(text_len)].chars().count();
-        Some(
-            div()
-                .absolute()
-                .left(px(char_col as f32 * CHAR_W))
-                .top(px(0.0))
-                .w(px(2.0))
-                .h(px(20.0)) // line_height
-                .bg(gpui::rgb(t.mode_insert))
-                .into_any_element(),
-        )
-    } else {
-        None
-    };
-
-    // Extra cursor bars (Insert mode, semi-transparent).
-    let extra_insert_bars: Vec<gpui::AnyElement> = if mode == Mode::Insert {
-        extra_cursors.iter().map(|&ec| {
-            let char_col = text[..ec.min(text_len)].chars().count();
-            div()
-                .absolute()
-                .left(px(char_col as f32 * CHAR_W))
-                .top(px(0.0))
-                .w(px(2.0))
-                .h(px(20.0))
-                .opacity(0.6)
-                .bg(gpui::rgb(t.mode_insert))
-                .into_any_element()
-        }).collect()
-    } else {
-        Vec::new()
-    };
 
     // ── Assemble content ──────────────────────────────────────────────────────
     // `StyledText` renders the whole line as a single text layout that wraps at
@@ -3573,27 +3523,23 @@ fn render_line(
     // constraint, producing proper soft word-wrap.
     let content = if runs.is_empty() {
         // Empty line — render a zero-width placeholder so the row has min_h.
-        let mut d = div()
+        div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child("");
-        d = d.when_some(insert_bar, |d, bar| d.child(bar));
-        for bar in extra_insert_bars { d = d.child(bar); }
-        d.into_any_element()
+            .child("")
+            .into_any_element()
     } else {
-        let mut d = div()
+        div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child(gpui::StyledText::new(text_content).with_runs(runs));
-        d = d.when_some(insert_bar, |d, bar| d.child(bar));
-        for bar in extra_insert_bars { d = d.child(bar); }
-        d.into_any_element()
+            .child(gpui::StyledText::new(text_content).with_runs(runs))
+            .into_any_element()
     };
 
     // ── Assemble row ──────────────────────────────────────────────────────────

@@ -50,7 +50,7 @@ impl Default for Settings {
             font_size: 14.0,
             line_number_mode: "relative".into(),
             preview_mode: "html".into(),
-            soft_wrap: false,
+            soft_wrap: true,
             tab_size: 2,
             auto_save: false,
             show_word_count: true,
