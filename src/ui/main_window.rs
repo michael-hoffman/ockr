@@ -2711,6 +2711,8 @@ impl Render for MainWindow {
                     }
                 }
 
+                self.panes[0].editor.update(cx, |p, _| p.set_pane_width(w0));
+                self.panes[1].editor.update(cx, |p, _| p.set_pane_width(w1));
                 let col0 = pane_col(0, self, cx);
                 let col1 = pane_col(1, self, cx);
                 div().flex_1().min_w_0().h_full().flex().flex_row()
@@ -2723,6 +2725,8 @@ impl Render for MainWindow {
                 let h0 = (content_h as f32 * self.pane_split_frac).round();
                 let h1 = content_h as f32 - h0 - 4.0;
 
+                self.panes[0].editor.update(cx, |p, _| p.set_pane_width(editor_area_w));
+                self.panes[1].editor.update(cx, |p, _| p.set_pane_width(editor_area_w));
                 let col0 = pane_col(0, self, cx);
                 let col1 = pane_col(1, self, cx);
                 div().flex_1().min_w_0().h_full().flex().flex_col()
@@ -2732,6 +2736,7 @@ impl Render for MainWindow {
                     .into_any_element()
             }
             _ => {
+                self.panes[0].editor.update(cx, |p, _| p.set_pane_width(editor_area_w));
                 let col0 = pane_col(0, self, cx);
                 div().flex_1().min_w_0().h_full().overflow_hidden()
                     .child(col0)
