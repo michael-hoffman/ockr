@@ -670,12 +670,73 @@ fn parse_definition_result(result: &Value) -> Option<DefinitionResult> {
 
 // ── URI helpers ────────────────────────────────────────────────────────────────
 
-/// Convert an absolute file-system path to a `file://` URI.
+/// Convert an absolute file-system path to a `file://` URI, percent-encoding
+/// path segments so spaces/unicode survive the round-trip through the server.
 pub fn path_to_uri(path: &std::path::Path) -> String {
     // On Unix paths start with `/`, giving `file:///…`.
-    format!("file://{}", path.to_string_lossy())
+    format!("file://{}", percent_encode_path(&path.to_string_lossy()))
 }
 
+/// Convert a `file://` URI back to a path, percent-decoding the body.
 fn uri_to_path(uri: &str) -> PathBuf {
-    PathBuf::from(uri.trim_start_matches("file://"))
+    PathBuf::from(percent_decode(uri.trim_start_matches("file://")))
+}
+
+/// Percent-encode everything except RFC 3986 unreserved chars and `/`.
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decode `%XX` escapes; leaves malformed sequences and other bytes untouched.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn uri_path_roundtrip_with_spaces_and_unicode() {
+        let p = Path::new("/Users/me/My Notes/café.typ");
+        let uri = path_to_uri(p);
+        assert!(uri.starts_with("file:///Users/me/My%20Notes/caf"));
+        assert_eq!(uri_to_path(&uri), p.to_path_buf());
+    }
+
+    #[test]
+    fn uri_to_path_decodes_escapes() {
+        assert_eq!(uri_to_path("file:///a%20b/c.typ"), Path::new("/a b/c.typ"));
+    }
+
+    #[test]
+    fn percent_decode_leaves_malformed_untouched() {
+        assert_eq!(percent_decode("100%done"), "100%done");
+    }
 }
