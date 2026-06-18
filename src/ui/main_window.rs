@@ -642,6 +642,14 @@ impl MainWindow {
                     }
                 }
             }
+            LspMessage::CompletionResult { request_id, items } => {
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, cx| {
+                        pane.set_completion_result(request_id, items.clone());
+                        cx.notify();
+                    });
+                }
+            }
             LspMessage::Unavailable => {
                 // tinymist not found or crashed — clear the handle silently.
                 self.lsp = None;

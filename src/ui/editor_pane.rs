@@ -51,7 +51,7 @@ use gpui::{
 
 use crate::actions::{FollowLink, OpenReplace, OpenSearch, SaveFile};
 use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode};
-use crate::lsp::{LspDiagnostic, LspHandle, LspSeverity};
+use crate::lsp::{CompletionItem, LspDiagnostic, LspHandle, LspSeverity};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -102,6 +102,18 @@ struct WikilinkState {
     candidates: Vec<String>,
     /// Currently highlighted candidate (0-based index into `candidates`).
     selected: usize,
+}
+
+/// Active LSP completion popup state.
+struct CompletionState {
+    /// Candidates returned by the server.
+    items: Vec<CompletionItem>,
+    /// Highlighted index into `items`.
+    selected: usize,
+    /// Cursor line when the popup opened (for placing the popup).
+    anchor_line: usize,
+    /// Cursor byte column when the popup opened (for placing the popup).
+    anchor_col: usize,
 }
 
 /// State for the in-buffer `/` or `?` search bar (and optional replace row).
@@ -298,6 +310,10 @@ pub struct EditorPane {
     /// Index into `jump_list`; equals `jump_list.len()` when at the live cursor
     /// (not currently navigating history).
     jump_cursor: usize,
+    /// Active LSP completion popup, if any.
+    completion: Option<CompletionState>,
+    /// Request ID of the most recent completion request (to discard stale ones).
+    completion_request_id: Option<i64>,
 }
 
 impl EditorPane {
@@ -386,6 +402,8 @@ impl EditorPane {
             spell_pending: false,
             jump_list: Vec::new(),
             jump_cursor: 0,
+            completion: None,
+            completion_request_id: None,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -484,6 +502,38 @@ impl EditorPane {
         if self.hover_request_id == Some(request_id) {
             self.hover_popup = result.map(|h| h.content);
             self.hover_request_id = None;
+        }
+    }
+
+    /// Deliver a completion result.  Opens the popup if the request is current
+    /// and produced any items; otherwise leaves things as they are.
+    pub fn set_completion_result(&mut self, request_id: i64, items: Vec<CompletionItem>) {
+        if self.completion_request_id != Some(request_id) {
+            return; // stale
+        }
+        self.completion_request_id = None;
+        if items.is_empty() {
+            return;
+        }
+        let cur = self.state.cursor();
+        self.completion = Some(CompletionState {
+            items,
+            selected: 0,
+            anchor_line: cur.line,
+            anchor_col: cur.col,
+        });
+    }
+
+    /// Insert the selected completion item at the cursor and close the popup.
+    fn accept_completion(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .completion
+            .as_ref()
+            .and_then(|c| c.items.get(c.selected))
+            .map(|i| i.insert_text.clone());
+        self.completion = None;
+        if let Some(text) = text {
+            self.execute_command(EditorCommand::Insert(text), cx);
         }
     }
 
@@ -1600,6 +1650,50 @@ impl EditorPane {
             }
         }
 
+        // LSP completion popup navigation.
+        if self.completion.is_some() && !k.modifiers.platform {
+            let ctrl_p = k.modifiers.control && k.key == "p";
+            let ctrl_n = k.modifiers.control && k.key == "n";
+            if k.key == "up" || ctrl_p {
+                if let Some(ref mut c) = self.completion {
+                    c.selected = if c.selected == 0 {
+                        c.items.len().saturating_sub(1)
+                    } else {
+                        c.selected - 1
+                    };
+                }
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            if k.key == "down" || ctrl_n {
+                if let Some(ref mut c) = self.completion {
+                    c.selected = (c.selected + 1) % c.items.len().max(1);
+                }
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            if !k.modifiers.control {
+                match k.key.as_str() {
+                    "tab" | "enter" => {
+                        self.accept_completion(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "escape" => {
+                        self.completion = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    // Any other key dismisses the popup and falls through so the
+                    // keystroke is processed normally (e.g. keep typing).
+                    _ => self.completion = None,
+                }
+            }
+        }
+
         // Cmd-C / Cmd-X: copy / cut to OS clipboard.
         if k.modifiers.platform && (k.key == "c" || k.key == "x") {
             let text = match self.state.mode {
@@ -1850,6 +1944,14 @@ impl EditorPane {
                 cx.stop_propagation();
                 self.jump_forward();
                 cx.notify();
+            }
+            KeymapResult::RequestCompletion => {
+                cx.stop_propagation();
+                self.completion = None;
+                if let (Some(lsp), Some(uri)) = (self.lsp.clone(), self.current_uri()) {
+                    let (line, col) = self.cursor_lsp_pos();
+                    self.completion_request_id = Some(lsp.request_completion(uri, line, col));
+                }
             }
             KeymapResult::ShowHover => {
                 cx.stop_propagation();
@@ -2723,6 +2825,71 @@ impl Render for EditorPane {
                 .children(items)
         });
 
+        // ── LSP completion popup ────────────────────────────────────────────────
+        let completion_popup = self.completion.as_ref().map(|c| {
+            const LINE_H: f32 = 20.0;
+            const PADDING: f32 = 16.0;
+            let gutter_w = if lnm != LineNumberMode::Off {
+                gutter_digits(line_count) as f32 * CHAR_W + 12.0
+            } else {
+                0.0
+            };
+            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let left = px(PADDING + gutter_w + c.anchor_col as f32 * CHAR_W);
+            let top = px(
+                search_h
+                    + PADDING
+                    + (c.anchor_line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H,
+            );
+
+            let rows: Vec<gpui::AnyElement> = c
+                .items
+                .iter()
+                .take(12)
+                .enumerate()
+                .map(|(i, item)| {
+                    let is_sel = i == c.selected;
+                    let mut row = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px_2()
+                        .py(px(3.0))
+                        .text_sm()
+                        .font_family("Menlo")
+                        .when(is_sel, |d| d.bg(gpui::rgb(t.ochre)))
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(if is_sel { t.cursor_fg } else { t.text }))
+                                .child(item.label.clone()),
+                        );
+                    if let Some(ref detail) = item.detail {
+                        row = row.child(
+                            div()
+                                .text_color(gpui::rgb(t.text_faint))
+                                .child(detail.clone()),
+                        );
+                    }
+                    row.into_any_element()
+                })
+                .collect();
+
+            div()
+                .absolute()
+                .top(top)
+                .left(left)
+                .min_w(px(180.0))
+                .max_w(px(360.0))
+                .bg(gpui::rgb(t.bg_surface))
+                .border_1()
+                .border_color(gpui::rgb(t.ochre_border))
+                .rounded(px(6.0))
+                .shadow_lg()
+                .overflow_hidden()
+                .children(rows)
+        });
+
         // ── Hover popup ───────────────────────────────────────────────────────
         // Shown when `K` returns a result from the LSP; dismissed on next key.
         // Positioned above the cursor line, right-aligned within the pane.
@@ -2802,6 +2969,7 @@ impl Render for EditorPane {
             )
             .child(status_bar)
             .when_some(wikilink_popup, |root, popup| root.child(popup))
+            .when_some(completion_popup, |root, popup| root.child(popup))
             .when_some(hover_popup, |root, popup| root.child(popup))
             .when_some(
                 if self.perf_overlay { self.last_key_micros } else { None },

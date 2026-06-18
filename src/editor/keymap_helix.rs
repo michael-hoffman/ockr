@@ -116,6 +116,14 @@ impl KeymapHandler for HelixKeymap {
             }
         }
 
+        // ── LSP completion (Ctrl-Space, any mode) ───────────────────────
+        if k.modifiers.control
+            && !k.modifiers.platform
+            && (k.key == " " || k.key == "space")
+        {
+            return KeymapResult::RequestCompletion;
+        }
+
         // ── `r<c>` replace ──────────────────────────────────────────────
         if state.mode == Mode::Normal
             && k.key == "r"

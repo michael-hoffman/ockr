@@ -108,6 +108,8 @@ pub enum KeymapResult {
     JumpBack,
     /// Jump forward in the jump list (`Ctrl-i`).
     JumpForward,
+    /// Request LSP completions at the cursor (`Ctrl-Space`).
+    RequestCompletion,
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

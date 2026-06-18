@@ -90,6 +90,17 @@ pub struct DefinitionResult {
     pub col: usize,
 }
 
+/// One completion candidate.
+#[derive(Debug, Clone)]
+pub struct CompletionItem {
+    /// Text shown in the popup.
+    pub label: String,
+    /// Text inserted on accept (falls back to `label` when the server omits it).
+    pub insert_text: String,
+    /// Optional type/detail shown dimmed beside the label.
+    pub detail: Option<String>,
+}
+
 /// A message produced by the LSP thread and delivered to the UI thread.
 pub enum LspMessage {
     /// Diagnostics for the given URI (may be empty = all clear).
@@ -107,6 +118,11 @@ pub enum LspMessage {
         request_id: i64,
         result: Option<DefinitionResult>,
     },
+    /// Result of a `textDocument/completion` request.
+    CompletionResult {
+        request_id: i64,
+        items: Vec<CompletionItem>,
+    },
     /// The language server was unavailable or crashed.
     Unavailable,
 }
@@ -118,6 +134,7 @@ enum LspRequest {
     DidChange { uri: String, version: i32, text: String },
     Hover { uri: String, line: usize, col: usize, id: i64 },
     Definition { uri: String, line: usize, col: usize, id: i64 },
+    Completion { uri: String, line: usize, col: usize, id: i64 },
     #[allow(dead_code)] // sent when LspHandle is explicitly shut down
     Shutdown,
 }
@@ -154,6 +171,13 @@ impl LspHandle {
     pub fn request_definition(&self, uri: String, line: usize, col: usize) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(LspRequest::Definition { uri, line, col, id });
+        id
+    }
+
+    /// Request completions at `(line, col)`.  Returns the request ID.
+    pub fn request_completion(&self, uri: String, line: usize, col: usize) -> i64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(LspRequest::Completion { uri, line, col, id });
         id
     }
 }
@@ -244,6 +268,9 @@ fn lsp_thread(
                 },
                 "definition": {
                     "linkSupport": false
+                },
+                "completion": {
+                    "completionItem": { "snippetSupport": false }
                 }
             }
         },
@@ -363,6 +390,14 @@ fn handle_outgoing(
             });
             let _ = send_request(stdin, id, "textDocument/definition", params);
         }
+        LspRequest::Completion { uri, line, col, id } => {
+            pending.insert(id, "completion");
+            let params = json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col }
+            });
+            let _ = send_request(stdin, id, "textDocument/completion", params);
+        }
         LspRequest::Shutdown => {
             let _ = send_request(stdin, 999, "shutdown", json!(null));
             let _ = send_notification(stdin, "exit", json!({}));
@@ -414,6 +449,14 @@ fn dispatch_incoming(
                 .filter(|r| !r.is_null())
                 .and_then(|r| parse_definition_result(r));
             on_message(LspMessage::DefinitionResult { request_id: id, result });
+        }
+        Some("completion") => {
+            let items = msg
+                .get("result")
+                .filter(|r| !r.is_null())
+                .map(parse_completion_items)
+                .unwrap_or_default();
+            on_message(LspMessage::CompletionResult { request_id: id, items });
         }
         _ => {} // initialize / shutdown / unknown
     }
@@ -566,6 +609,34 @@ fn extract_hover_content(contents: &Value) -> String {
         return parts.join("\n\n");
     }
     String::new()
+}
+
+/// Parse a `textDocument/completion` result — either a bare `CompletionItem[]`
+/// or a `CompletionList { items: [...] }`.  Caps at 200 items.
+fn parse_completion_items(result: &Value) -> Vec<CompletionItem> {
+    let arr = if let Some(a) = result.as_array() {
+        a
+    } else if let Some(a) = result.get("items").and_then(|v| v.as_array()) {
+        a
+    } else {
+        return Vec::new();
+    };
+
+    arr.iter()
+        .take(200)
+        .filter_map(|item| {
+            let label = item["label"].as_str()?.to_string();
+            // Prefer insertText, then textEdit.newText, then label.
+            let insert_text = item
+                .get("insertText")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.pointer("/textEdit/newText").and_then(|v| v.as_str()))
+                .unwrap_or(&label)
+                .to_string();
+            let detail = item.get("detail").and_then(|v| v.as_str()).map(str::to_string);
+            Some(CompletionItem { label, insert_text, detail })
+        })
+        .collect()
 }
 
 fn parse_definition_result(result: &Value) -> Option<DefinitionResult> {
