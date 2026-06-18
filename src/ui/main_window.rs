@@ -1214,6 +1214,10 @@ impl MainWindow {
             cx.notify();
             return;
         }
+        // Only one overlay at a time.
+        self.quick_switch = None;
+        self.file_picker = None;
+        self.rename_modal = None;
         let panel = cx.new(|cx| SettingsPanel::new(cx));
         cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| match event {
             SettingsPanelEvent::Close => {
