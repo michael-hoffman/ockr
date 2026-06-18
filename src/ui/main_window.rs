@@ -158,6 +158,8 @@ pub struct MainWindow {
     sidebar_visible: bool,
     sidebar_width: f32,
     preview_width: f32,
+    /// `false` until the first render seeds `preview_width` from the window size.
+    preview_width_set: bool,
     drag: Option<DragState>,
     /// Whether Zen Mode (distraction-free writing) is active.
     zen_mode: bool,
@@ -511,6 +513,7 @@ impl MainWindow {
             sidebar_visible: true,
             sidebar_width: 220.0,
             preview_width: 420.0,
+            preview_width_set: false,
             drag: None,
             zen_mode: false,
             zen_saved_sidebar: true,
@@ -2500,6 +2503,14 @@ impl Render for MainWindow {
         let vp = window.viewport_size();
         let content_w = f64::from(vp.width);
         let content_h = f64::from(vp.height);
+
+        // First-render default: give the preview ~45% of the window so the
+        // editor and preview share the space, instead of a fixed 420px slab.
+        // Stays drag-resizable afterwards.
+        if !self.preview_width_set {
+            self.preview_width = (content_w as f32 * 0.45).clamp(320.0, 900.0);
+            self.preview_width_set = true;
+        }
 
         // ── WKWebView lifecycle ───────────────────────────────────────────────
         let preview_x = content_w - self.preview_width as f64;
