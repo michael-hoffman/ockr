@@ -76,29 +76,10 @@ const VIEWPORT_LINES: usize = 80;
 /// the wikilink popup and the insert-mode cursor bar overlay.
 const CHAR_W: f32 = 8.4;
 
-/// Whether spell-checking via `NSSpellChecker` is allowed to run.
-///
-/// `NSSpellChecker` performs a synchronous XPC round-trip that needs the main
-/// run loop to be pumping.  Calling it from inside AppKit's
-/// `didFinishLaunching` (which is where restored tabs first render) deadlocks
-/// the main thread — the window never appears.  We therefore keep spell-check
-/// disabled until `enable_spellcheck()` is called from a post-launch task, by
-/// which point the run loop is live.
-static SPELLCHECK_READY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Shown in the hover popup when the user invokes `K`/`gd` but no language
 /// server is connected — turns a silent no-op into an actionable hint.
 const LSP_MISSING_HINT: &str =
     "LSP off — tinymist not found on PATH. Install it (e.g. `brew install tinymist`) and restart for hover, go-to-definition, and diagnostics.";
-
-/// Arm spell-checking.  Currently never called — the synchronous
-/// `NSSpellChecker` path blocks the main thread (see `check_spelling`).
-/// Kept for a future off-main-thread reimplementation.
-#[allow(dead_code)]
-pub fn enable_spellcheck() {
-    SPELLCHECK_READY.store(true, std::sync::atomic::Ordering::Relaxed);
-}
 
 /// How line numbers are displayed in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -280,8 +261,17 @@ pub struct EditorPane {
     /// Misspelled word spans on visible lines, cached between renders.
     ///
     /// Each entry is `(line, byte_start, byte_end)`.  Invalidated whenever
-    /// the buffer changes.  Built on demand in `render()`.
+    /// the buffer changes.  Filled asynchronously by the spell-check channel.
     spell_errors: Option<Vec<(usize, usize, usize)>>,
+    /// Sender handed to async spell-check requests; replies arrive tagged with
+    /// `spell_seq` and are applied by the drain task spawned in `new()`.
+    spell_tx: Option<futures::channel::mpsc::UnboundedSender<crate::ui::spellcheck::SpellResult>>,
+    /// Monotonic request tag; bumped on every buffer invalidation so stale
+    /// async replies (issued against older text) are discarded.
+    spell_seq: u64,
+    /// `true` while a spell-check request is in flight (avoids re-firing every
+    /// render until its reply lands).
+    spell_pending: bool,
 
     // ── LSP (tinymist) ────────────────────────────────────────────────────────
 
@@ -328,6 +318,27 @@ impl EditorPane {
             Some("off") => LineNumberMode::Off,
             _ => LineNumberMode::Relative,
         };
+
+        // Async spell-check: replies flow back over this channel and are applied
+        // on the UI thread by the drain task below (only if still current).
+        let (spell_tx, mut spell_rx) =
+            futures::channel::mpsc::unbounded::<crate::ui::spellcheck::SpellResult>();
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((seq, spans)) = spell_rx.next().await {
+                let _ = cx.update(|cx| {
+                    let _ = this.update(cx, |pane, c| {
+                        pane.spell_pending = false;
+                        if seq == pane.spell_seq {
+                            pane.spell_errors = Some(spans);
+                            c.notify();
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             state,
@@ -364,6 +375,9 @@ impl EditorPane {
             typewriter_mode: false,
             word_target: None,
             spell_errors: None,
+            spell_tx: Some(spell_tx),
+            spell_seq: 0,
+            spell_pending: false,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -502,6 +516,8 @@ impl EditorPane {
         self.diagnostics.clear();
         self.lsp_diagnostics.clear();
         self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
         self.cached_doc_stats = None;
         self.hover_popup = None;
     }
@@ -542,6 +558,8 @@ impl EditorPane {
         self.redo_history = redo;
         self.cached_doc_stats = None;
         self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
         self.refresh_word_target();
         // Notify LSP that a new document was opened.
         self.lsp_doc_opened = false;
@@ -674,6 +692,8 @@ impl EditorPane {
         self.redo_history.clear();
         self.cached_doc_stats = None;
         self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
         self.search = None;
         self.macro_buffer.clear();
         self.recording_macro = None;
@@ -1315,6 +1335,8 @@ impl EditorPane {
             if effect == SideEffect::BufferChanged {
                 self.cached_doc_stats = None;
                 self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
                 self.trigger_compile(cx);
             }
         }
@@ -1646,6 +1668,8 @@ impl EditorPane {
                 if effect == SideEffect::BufferChanged {
                     self.cached_doc_stats = None;
                 self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
                     self.trigger_compile(cx);
                 }
                 self.update_viewport();
@@ -2004,6 +2028,8 @@ impl EditorPane {
                 cx.stop_propagation();
                 self.cached_doc_stats = None;
                 self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
                 self.update_viewport();
                 self.trigger_compile(cx);
                 cx.notify();
@@ -2075,6 +2101,8 @@ impl EditorPane {
                 self.state.last_modified_pos = Some(self.state.cursor());
                 self.cached_doc_stats = None;
                 self.spell_errors = None;
+        self.spell_seq = self.spell_seq.wrapping_add(1);
+        self.spell_pending = false;
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -2202,14 +2230,15 @@ impl Render for EditorPane {
 
         let lnm = self.line_number_mode;
 
-        // ── Spell check (lazy, cached) ──────────────────────────────────────
-        // Gated behind SPELLCHECK_READY: NSSpellChecker deadlocks if called
-        // during didFinishLaunching (see enable_spellcheck docs).  Until armed
-        // we leave spell_errors uncomputed so a later render fills it in.
-        if self.spell_errors.is_none()
-            && SPELLCHECK_READY.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            self.spell_errors = Some(check_spelling(&self.buffer, first, last));
+        // ── Spell check (async, cached) ─────────────────────────────────────
+        // Fire one async NSSpellChecker request per invalidation; the
+        // completion handler delivers spans through the channel (drained in
+        // new()).  Never blocks the render/main thread.
+        if self.spell_errors.is_none() && !self.spell_pending {
+            if let Some(ref tx) = self.spell_tx {
+                self.spell_pending = true;
+                crate::ui::spellcheck::request(&self.buffer.text(), self.spell_seq, tx.clone());
+            }
         }
         let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);
 
@@ -2942,69 +2971,6 @@ fn parse_word_target_from_buffer(buf: &InMemoryBuffer) -> Option<usize> {
         }
     }
     None
-}
-
-/// Spell-check visible lines of `buf` using `NSSpellChecker` (macOS only).
-///
-/// Returns a vec of `(line, byte_start, byte_end)` for each misspelled word
-/// span within the lines `[first_line, last_line)`.  Short-word runs (1–2
-/// chars) and lines inside the frontmatter block are skipped.
-///
-/// On non-macOS platforms returns an empty vec.
-fn check_spelling(
-    buf: &InMemoryBuffer,
-    first_line: usize,
-    last_line: usize,
-) -> Vec<(usize, usize, usize)> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSSpellChecker;
-        use objc2_foundation::NSString;
-
-        let mut errors: Vec<(usize, usize, usize)> = Vec::new();
-        let checker = NSSpellChecker::sharedSpellChecker();
-
-        // Determine frontmatter range so we skip those lines.
-        let lc = buf.line_count();
-        let fm_end = if lc > 1 && buf.line(0).trim() == "---" {
-            (1..lc).find(|&i| buf.line(i).trim() == "---").unwrap_or(0)
-        } else {
-            0
-        };
-
-        let last = last_line.min(lc);
-        for line_idx in first_line..last {
-            // Skip frontmatter.
-            if line_idx <= fm_end && fm_end > 0 { continue; }
-
-            let line = buf.line(line_idx).to_string();
-            if line.trim().is_empty() { continue; }
-
-            let ns_line = NSString::from_str(&line);
-            let byte_len = line.len();
-            let mut pos: usize = 0;
-            loop {
-                let range = checker
-                    .checkSpellingOfString_startingAt(
-                        &ns_line,
-                        pos as isize,
-                    );
-                if range.length == 0 { break; }
-                let start = range.location as usize;
-                let end = (range.location + range.length) as usize;
-                if start >= byte_len { break; }
-                let end = end.min(byte_len);
-                // Skip 1–2-char "words" (likely markup or abbreviations).
-                if end - start > 2 {
-                    errors.push((line_idx, start, end));
-                }
-                pos = end;
-            }
-        }
-        errors
-    }
-    #[cfg(not(target_os = "macos"))]
-    { let _ = (buf, first_line, last_line); Vec::new() }
 }
 
 /// Byte offset within `line` → UTF-16 code-unit offset (LSP column).

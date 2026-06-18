@@ -9,6 +9,7 @@ pub mod file_picker;
 pub mod quick_switch;
 pub mod rename_modal;
 pub mod settings_panel;
+pub mod spellcheck;
 pub mod template_picker;
 pub mod vault_search;
 pub mod editor_pane;
