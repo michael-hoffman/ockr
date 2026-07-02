@@ -3415,10 +3415,12 @@ fn render_line(
     let base_font = gpui::font("Menlo");
     let mut runs: Vec<gpui::TextRun> = Vec::with_capacity(boundaries.len().saturating_sub(1));
 
-    // Append a trailing space when the cursor sits at end-of-line so the EOL
-    // cursor position is visible (the space gets the cursor highlight).
+    // Append a trailing space when a cursor sits at end-of-line so the EOL
+    // position is visible (block highlight in Normal/Visual; caret-bar anchor
+    // in Insert).  Extra cursors at EOL need the pad too.
     let eol_cursor = is_cursor_line && cursor_col >= text_len;
-    let text_content: String = if eol_cursor {
+    let extra_eol = extra_cursors.iter().any(|&ec| ec >= text_len);
+    let text_content: String = if eol_cursor || extra_eol {
         format!("{} ", text)
     } else {
         text.clone()
@@ -3429,11 +3431,11 @@ fn render_line(
         if a >= b { continue; }
         if text.get(a..b).is_none() { continue; }
 
-        // Inline block cursor for every mode — including Insert, which uses the
-        // mode_insert colour via `cursor_bg`.  Rendering it inline (rather than
-        // as an absolute bar) keeps it correctly placed on soft-wrapped lines.
+        // Inline block cursor for Normal/Visual (flows with the wrapped text
+        // layout).  Insert mode paints a thin bar via the caret canvas below,
+        // positioned by querying the real TextLayout — no block needed.
         let is_cursor_block =
-            is_cursor_line && a == cursor_col && cursor_col < text_len;
+            is_cursor_line && a == cursor_col && cursor_col < text_len && mode != Mode::Insert;
 
         // Foreground and font attributes from syntax spans (or default).
         let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
@@ -3461,7 +3463,10 @@ fn render_line(
         };
 
         // Extra cursor block — slightly dimmer than the primary cursor.
-        let is_extra_cursor_block = extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
+        // (Insert mode: extra carets are thin bars from the canvas instead.)
+        let is_extra_cursor_block = mode != Mode::Insert
+            && extra_cursors.iter().any(|&ec| ec == a)
+            && a < text_len;
         let extra_cursor_bg: gpui::Hsla = {
             // 60% opacity version of cursor_bg — mix toward background.
             let mut c = cursor_bg;
@@ -3495,14 +3500,20 @@ fn render_line(
         });
     }
 
-    // End-of-line cursor run (over the appended trailing space) — inline block
-    // in every mode, so it stays correct on soft-wrapped lines.
-    if eol_cursor {
+    // Run covering the appended trailing space (when a cursor is at EOL).
+    // Normal/Visual: block highlight.  Insert: plain space — the caret canvas
+    // draws the thin bar at this position instead.
+    if eol_cursor || extra_eol {
+        let (fg, bg) = if eol_cursor && mode != Mode::Insert {
+            (cursor_fg, Some(cursor_bg))
+        } else {
+            (gpui::rgb(t.text_muted).into(), None)
+        };
         runs.push(gpui::TextRun {
             len: 1, // the trailing space appended above
             font: base_font.clone(),
-            color: cursor_fg,
-            background_color: Some(cursor_bg),
+            color: fg,
+            background_color: bg,
             underline: None,
             strikethrough: None,
         });
@@ -3532,13 +3543,62 @@ fn render_line(
             .child("")
             .into_any_element()
     } else {
+        let styled = gpui::StyledText::new(text_content).with_runs(runs);
+
+        // ── Insert-mode thin caret(s) ───────────────────────────────────────
+        // Clone the StyledText's TextLayout handle (an Rc) and, after the text
+        // has been laid out, query `position_for_index` for the *actual* pixel
+        // position of each caret — including which soft-wrapped row it landed
+        // on.  A canvas sibling paints 2px bars at those window coordinates.
+        // No simulation: the layout that wrapped the text answers directly.
+        let caret_canvas: Option<gpui::AnyElement> = if mode == Mode::Insert
+            && (is_cursor_line || !extra_cursors.is_empty())
+        {
+            let layout = styled.layout().clone();
+            let mut carets: Vec<(usize, f32)> = Vec::new(); // (byte index, opacity)
+            if is_cursor_line {
+                carets.push((cursor_col.min(text_len), 1.0));
+            }
+            for &ec in extra_cursors {
+                carets.push((ec.min(text_len), 0.6));
+            }
+            let bar_color: gpui::Hsla = gpui::rgb(t.mode_insert).into();
+            Some(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let line_height = layout.line_height();
+                        for (ix, opacity) in carets {
+                            if let Some(pos) = layout.position_for_index(ix) {
+                                let mut color = bar_color;
+                                color.a *= opacity;
+                                window.paint_quad(gpui::fill(
+                                    gpui::Bounds {
+                                        origin: pos,
+                                        size: gpui::size(px(2.0), line_height),
+                                    },
+                                    color,
+                                ));
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .size_full()
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         div()
             .relative()
             .flex_1()
             .min_w_0()
             .text_sm()
             .font_family("Menlo")
-            .child(gpui::StyledText::new(text_content).with_runs(runs))
+            .child(styled)
+            .when_some(caret_canvas, |d, c| d.child(c))
             .into_any_element()
     };
 
