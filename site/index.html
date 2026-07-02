@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ockr — a Typst-native, keyboard-driven note editor</title>
+<meta name="description" content="ockr pairs Helix-style modal editing with live Typst compilation, wikilinks, and a sandboxed WASM plugin system. For people who'd rather keep their hands on the keyboard.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="logo" href="index.html">o</a>
+    <span class="spacer"></span>
+    <a href="keymap.html">Keymap</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/">GitHub</a>
+  </div>
+</nav>
+
+<div class="hero wrap">
+  <h1>Notes at the speed<br>of <em>thought</em>.</h1>
+  <p class="tag">ockr is a Typst-native, keyboard-driven note editor for macOS —
+  Helix-style modal editing, live preview, wikilinks, and a graph of everything you know.</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="#install">Download for macOS</a>
+    <a class="btn btn-ghost" href="keymap.html">See the keymap</a>
+  </div>
+  <p class="note">Free &amp; open source · MIT license</p>
+
+  <div class="mock">
+    <div class="bar">zettels/portal-gun-paradox.typ — NORMAL · 142 w · lsp</div>
+    <pre><span class="kw">=</span> The portal gun paradox
+
+Every universe contains a <span class="lk">[[Rick]]</span> who built the gun, which
+means the gun's origin is undefined in <span class="mt">$aleph_0$</span> timelines.
+
+<span class="kw">#note-meta(</span>type: "zettel", reviewed: "2026-02-11"<span class="kw">)</span>
+<span class="cm">// Related: [[infinite-versions]], [[Dr-Wong]]</span></pre>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Built for flow</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Modal editing</h3>
+        <p>Full Helix grammar — select-then-act motions, text objects, multi-cursor,
+        counts, macros, a jump list. A Standard (VS Code-style) mode is one toggle away.</p>
+      </div>
+      <div class="card">
+        <h3>Live Typst preview <span class="k">⌘⌥H</span></h3>
+        <p>Every keystroke recompiles in the background. HTML for speed, paged for
+        fidelity, PDF export with <code>⌘⇧E</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Wikilinks + graph <span class="k">⌘⇧G</span></h3>
+        <p><code>[[note name]]</code> with autocomplete, backlinks per note, and an
+        interactive graph of the whole vault.</p>
+      </div>
+      <div class="card">
+        <h3>Language intelligence</h3>
+        <p>Optional <a href="https://github.com/Myriad-Dreamin/tinymist" style="color:var(--ochre)">tinymist</a>
+        LSP: diagnostics in the gutter, hover docs on <code>K</code>,
+        go-to-definition on <code>gd</code>, completions on <code>⌃Space</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Fuzzy everything <span class="k">⌃P</span></h3>
+        <p>Path-based file picker, title-based quick switch (<code>⌘K</code>),
+        command palette (<code>⌘P</code>), vault-wide search (<code>⌘⇧F</code>).</p>
+      </div>
+      <div class="card">
+        <h3>Plugins</h3>
+        <p>Sandboxed WASM plugins with typed capability declarations — network,
+        filesystem, console, and Typst packages.</p>
+      </div>
+      <div class="card">
+        <h3>Zen mode <span class="k">⌃⌘Z</span></h3>
+        <p>Sidebar and preview vanish; your writing column centres at a comfortable
+        measure. Typewriter scrolling optional.</p>
+      </div>
+      <div class="card">
+        <h3>Plain files, no lock-in</h3>
+        <p>A vault is just a folder of <code>.typ</code> files. Tabs, undo history,
+        and settings persist locally. Nothing leaves your machine.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p><strong>Download:</strong> grab the latest <code>ockr-&lt;version&gt;.dmg</code> from
+    releases, open it, drag <strong>ockr</strong> to Applications. The app is ad-hoc signed —
+    on first launch, right-click → <em>Open</em> → <em>Open</em>.</p>
+    <p><strong>Build from source</strong> (Rust 1.96+, macOS 11+):</p>
+    <pre><span class="c"># clone, then:</span>
+cargo run --release
+<span class="c"># or produce a distributable .app + .dmg:</span>
+scripts/bundle.sh</pre>
+    <p><strong>Optional LSP:</strong> install
+    <a href="https://github.com/Myriad-Dreamin/tinymist">tinymist</a> and put it on your
+    <code>PATH</code> for diagnostics, hover, and go-to-definition. ockr runs fine without it.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    ockr · MIT license · © 2026 Michael Hoffman ·
+    <a href="keymap.html">keymap</a>
+  </div>
+</footer>
+
+</body>
+</html>

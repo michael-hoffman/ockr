@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keymap — ockr</title>
+<meta name="description" content="ockr keymap reference — Helix-style modal editing for Typst notes.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="logo" href="index.html">o</a>
+    <span class="spacer"></span>
+    <a href="keymap.html">Keymap</a>
+    <a href="index.html#install">Install</a>
+    <a href="https://github.com/">GitHub</a>
+  </div>
+</nav>
+
+<section class="kmap" style="border-top:none">
+  <div class="wrap">
+    <h2>Movement</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td>h j k l</td><td>Left / down / up / right</td></tr>
+      <tr><td>w b e · W B E</td><td>Word / WORD motions</td></tr>
+      <tr><td>0 ^ $</td><td>Line start / first non-blank / line end</td></tr>
+      <tr><td>gg · G · &lt;N&gt;G</td><td>Document start / end / go to line N</td></tr>
+      <tr><td>f F t T &lt;c&gt;</td><td>Find / till character</td></tr>
+      <tr><td>{ }</td><td>Paragraph back / forward</td></tr>
+      <tr><td>Ctrl-d/u · Ctrl-f/b</td><td>Half-page / page scroll</td></tr>
+      <tr><td>Ctrl-o · Ctrl-i</td><td>Jump list back / forward</td></tr>
+      <tr><td>zt zz zb · zj zk</td><td>Align viewport / scroll one line</td></tr>
+    </table>
+
+    <h2>Selection &amp; operators</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td>v V Ctrl-v</td><td>Visual char / line / block</td></tr>
+      <tr><td>x</td><td>Select line</td></tr>
+      <tr><td>mi&lt;obj&gt; ma&lt;obj&gt;</td><td>Select inner / around object — w p ( { [ " ' ` $ t</td></tr>
+      <tr><td>d c y</td><td>Delete / change / yank (+ motions, objects, dd cc yy)</td></tr>
+      <tr><td>p P · r&lt;c&gt; · ~</td><td>Paste / replace char / switch case</td></tr>
+      <tr><td>&gt; &lt; =</td><td>Indent / outdent / auto-indent</td></tr>
+      <tr><td>u · Ctrl-r · .</td><td>Undo / redo / repeat last change</td></tr>
+      <tr><td>C · Alt-C · ,</td><td>Add cursor below / above · collapse cursors</td></tr>
+      <tr><td>q&lt;reg&gt; … q · @&lt;reg&gt;</td><td>Record / play macro</td></tr>
+    </table>
+
+    <h2>Goto &amp; language</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td>gh gl gs ge</td><td>Line start / end / first non-blank / word end</td></tr>
+      <tr><td>gm · gi · g.</td><td>Middle of line / last insert / last edit</td></tr>
+      <tr><td>gf · gn gp</td><td>Follow link · next / previous buffer</td></tr>
+      <tr><td>gd</td><td>Go to definition (LSP)</td></tr>
+      <tr><td>K</td><td>Hover docs (LSP)</td></tr>
+      <tr><td>Ctrl-Space</td><td>Completions (LSP)</td></tr>
+      <tr><td>[d ]d · [p ]p</td><td>Previous / next diagnostic · paragraph</td></tr>
+    </table>
+
+    <h2>Search</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td>/ ? · n N</td><td>Search forward / back · repeat</td></tr>
+      <tr><td>* #</td><td>Search word under cursor (whole-word)</td></tr>
+      <tr><td>:noh</td><td>Clear search highlights</td></tr>
+      <tr><td>⌘F ⌘H · ⌘⇧F</td><td>In-buffer find / replace · vault-wide search</td></tr>
+    </table>
+
+    <h2>Application</h2>
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td>⌘P · :</td><td>Command palette</td></tr>
+      <tr><td>⌃P · ⌘K</td><td>Fuzzy file picker · quick switch by title</td></tr>
+      <tr><td>⌘O · ⌘S</td><td>Open vault · save</td></tr>
+      <tr><td>⌘⌥H · ⌘⇧E</td><td>Toggle preview mode · export PDF</td></tr>
+      <tr><td>⌘⇧G · ⌘⇧O</td><td>Graph view · outline</td></tr>
+      <tr><td>⌘\ · ⌘⇧\</td><td>Split vertical / horizontal</td></tr>
+      <tr><td>⌃H ⌃J ⌃K ⌃L</td><td>Focus pane left / down / up / right</td></tr>
+      <tr><td>⌃⌘Z · ⌘,</td><td>Zen mode · settings</td></tr>
+    </table>
+
+    <p style="color:var(--subtle); margin-top:24px; font-size:14px">
+      This is the working subset — the full reference lives in
+      <code>docs/keymap.md</code> in the repository.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    ockr · MIT license · © 2026 Michael Hoffman ·
+    <a href="index.html">home</a>
+  </div>
+</footer>
+
+</body>
+</html>
