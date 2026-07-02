@@ -97,8 +97,8 @@ const OXIDE_CSS: &str = r#"
 
 body {
     font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
-    background: #0A0A0A;
-    color: #F4F4F5;
+    background: #0B0907;
+    color: #F5F0EA;
     max-width: 740px;
     margin: 0 auto;
     padding: 2.2em 2em 4em;
@@ -107,7 +107,7 @@ body {
 }
 
 h1, h2, h3, h4, h5, h6 {
-    color: #F4F4F5;
+    color: #F5F0EA;
     font-weight: 600;
     margin-top: 1.6em;
     margin-bottom: 0.4em;
@@ -115,13 +115,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 h1 {
     font-size: 1.8em;
-    border-bottom: 1px solid #2A2A2A;
+    border-bottom: 1px solid #2C251C;
     padding-bottom: 0.35em;
     margin-top: 0.4em;
 }
 h2 { font-size: 1.4em; }
 h3 { font-size: 1.15em; }
-h4, h5, h6 { font-size: 1em; color: #A1A1AA; }
+h4, h5, h6 { font-size: 1em; color: #A89F93; }
 
 p { margin: 0.75em 0; }
 
@@ -130,8 +130,8 @@ a:hover { text-decoration: underline; color: #e8932e; }
 
 code, kbd {
     font-family: "SF Mono", "Menlo", monospace;
-    background: #151515;
-    border: 1px solid #2A2A2A;
+    background: #16120E;
+    border: 1px solid #2C251C;
     border-radius: 3px;
     padding: 0.1em 0.35em;
     font-size: 0.88em;
@@ -139,8 +139,8 @@ code, kbd {
 
 pre {
     font-family: "SF Mono", "Menlo", monospace;
-    background: #151515;
-    border: 1px solid #2A2A2A;
+    background: #16120E;
+    border: 1px solid #2C251C;
     border-radius: 5px;
     padding: 1em 1.25em;
     overflow-x: auto;
@@ -154,29 +154,29 @@ blockquote {
     border-left: 3px solid #CC7722;
     margin: 1.2em 0;
     padding: 0.3em 1.2em;
-    color: #A1A1AA;
-    background: #0f0f0f;
+    color: #A89F93;
+    background: #110E0B;
     border-radius: 0 4px 4px 0;
 }
 
-hr { border: none; border-top: 1px solid #2A2A2A; margin: 2em 0; }
+hr { border: none; border-top: 1px solid #2C251C; margin: 2em 0; }
 
 table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-th { background: #151515; color: #F4F4F5; font-weight: 600; }
-th, td { border: 1px solid #2A2A2A; padding: 0.5em 0.85em; text-align: left; }
-tr:nth-child(even) td { background: #0d0d0d; }
+th { background: #16120E; color: #F5F0EA; font-weight: 600; }
+th, td { border: 1px solid #2C251C; padding: 0.5em 0.85em; text-align: left; }
+tr:nth-child(even) td { background: #0E0B09; }
 
 ul, ol { padding-left: 1.6em; margin: 0.5em 0; }
 li { margin: 0.3em 0; }
 
-strong { color: #F4F4F5; font-weight: 600; }
-em { color: #d0d0d0; }
+strong { color: #F5F0EA; font-weight: 600; }
+em { color: #D6CFC5; }
 
-::selection { background: #4A2810; color: #F4F4F5; }
+::selection { background: #4A2810; color: #F5F0EA; }
 
 ::-webkit-scrollbar { width: 7px; height: 7px; }
-::-webkit-scrollbar-track { background: #0A0A0A; }
-::-webkit-scrollbar-thumb { background: #2A2A2A; border-radius: 4px; }
+::-webkit-scrollbar-track { background: #0B0907; }
+::-webkit-scrollbar-thumb { background: #2C251C; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #3A3A3A; }
 "#;
 

@@ -1,31 +1,33 @@
 # ockr · Oxide theme (dark)
 #
-# Palette: near-black volcanic darks with ochre (#CC7722) accent.
+# Palette: warm near-blacks with ochre (#CC7722) accent.
+# Every neutral carries a faint brown undertone so the ochre accent feels
+# native to the surface instead of floating on cool zinc gray.
 # Inspired by oxidised iron — warm but heavy.
 
 name = "Oxide"
 variant = "dark"
 
 # ── Backgrounds ───────────────────────────────────────────────────────────────
-bg_base    = "#0A0A0A"   # deepest background — body / root
-bg_panel   = "#151515"   # editor and preview panel fill
-bg_surface = "#1A1A1A"   # sidebar and window chrome
-bg_hover   = "#222222"   # subtle hover overlay
+bg_base    = "#0B0907"   # deepest background — body / root (warm black)
+bg_panel   = "#16120E"   # editor and preview panel fill
+bg_surface = "#1B1712"   # sidebar and window chrome
+bg_hover   = "#241E17"   # subtle hover overlay
 
 # ── Borders ───────────────────────────────────────────────────────────────────
-border        = "#161616"   # primary border — barely-there on bg_base
-border_subtle = "#2A2A2A"   # secondary dividers
+border        = "#171310"   # primary border — barely-there on bg_base
+border_subtle = "#2C251C"   # secondary dividers
 
 # ── Accent (ochre) ────────────────────────────────────────────────────────────
 ochre        = "#CC7722"   # full ochre — buttons, active indicators
-ochre_dim    = "#4A2810"   # ochre/35 — selection highlight
-ochre_border = "#3D2008"   # ochre/20 — border-level accent
+ochre_dim    = "#4A2E12"   # ochre/35 — selection highlight
+ochre_border = "#3D2508"   # ochre/20 — border-level accent
 
 # ── Text ──────────────────────────────────────────────────────────────────────
-text        = "#F4F4F5"   # primary text — zinc-100
-text_muted  = "#A1A1AA"   # secondary text — zinc-400
-text_subtle = "#71717A"   # tertiary / placeholder — zinc-500
-text_faint  = "#52525B"   # barely-visible — zinc-600
+text        = "#F5F0EA"   # primary text — warm near-white
+text_muted  = "#A89F93"   # secondary text — warm stone
+text_subtle = "#7A7163"   # tertiary / placeholder
+text_faint  = "#57503F"   # barely-visible
 
 # ── Mode indicator colours ────────────────────────────────────────────────────
 mode_insert = "#528BFF"   # bright blue
@@ -33,15 +35,15 @@ mode_normal = "#CC7722"   # ochre (matches accent)
 mode_visual = "#A855F7"   # purple
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
-cursor_fg = "#0A0A0A"   # text colour on top of a block cursor fill
+cursor_fg = "#0B0907"   # text colour on top of a block cursor fill
 
 # ── Syntax highlighting ───────────────────────────────────────────────────────
-syntax_heading  = "#F4F4F5"   # text — headings use full brightness
+syntax_heading  = "#F5F0EA"   # text — headings use full brightness
 syntax_keyword  = "#CC7722"   # ochre — typst directives (#let, #set, …)
 syntax_math     = "#528BFF"   # blue  — $inline$ and $block$ math
 syntax_link     = "#A855F7"   # purple — [[wikilinks]]
 syntax_code     = "#2DD4BF"   # teal  — `inline code`
-syntax_comment  = "#52525B"   # text_faint — // comments
+syntax_comment  = "#57503F"   # text_faint — // comments
 
 # ── Bracket match ──────────────────────────────────────────────────────────────
-bracket_match_bg = "#2D3B2D"   # subtle dark-green highlight for matching bracket
+bracket_match_bg = "#3A2F1A"   # warm amber-tinted highlight for matching bracket
