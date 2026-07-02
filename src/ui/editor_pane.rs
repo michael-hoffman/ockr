@@ -2607,6 +2607,67 @@ impl Render for EditorPane {
             div().into_any_element()
         };
 
+        // Diagnostics count (compiler + LSP merged): "✗N ⚠N", hidden when clean.
+        let (diag_errors, diag_warnings) = {
+            let mut e = 0usize;
+            let mut w = 0usize;
+            for d in &self.diagnostics {
+                match d.severity {
+                    DiagnosticSeverity::Error => e += 1,
+                    DiagnosticSeverity::Warning => w += 1,
+                }
+            }
+            for d in &self.lsp_diagnostics {
+                match d.severity {
+                    LspSeverity::Error => e += 1,
+                    _ => w += 1,
+                }
+            }
+            (e, w)
+        };
+        let diag_indicator: gpui::AnyElement = if diag_errors + diag_warnings > 0 {
+            let mut row = div().flex().flex_row().items_center().gap_2().font_family("Menlo");
+            if diag_errors > 0 {
+                row = row.child(
+                    div()
+                        .text_color(gpui::rgb(0xff5555u32))
+                        .child(format!("✗ {}", diag_errors)),
+                );
+            }
+            if diag_warnings > 0 {
+                row = row.child(
+                    div()
+                        .text_color(gpui::rgb(0xffb86cu32))
+                        .child(format!("⚠ {}", diag_warnings)),
+                );
+            }
+            row.into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        // LSP connection indicator — shown only while tinymist is attached.
+        let lsp_indicator: gpui::AnyElement = if self.lsp.is_some() {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint))
+                .child("lsp")
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        // Vault-relative path of the open file.
+        let path_label: gpui::AnyElement = if let Some(rel) = self.file_rel_path.clone() {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_subtle))
+                .child(rel)
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         let status_bar = div()
             .flex()
             .flex_row()
@@ -2628,6 +2689,7 @@ impl Render for EditorPane {
             .child(macro_rec_indicator)
             .child(multi_cursor_indicator)
             .child(typewriter_indicator)
+            .child(path_label)
             .child(
                 div()
                     .text_color(gpui::rgb(t.text_faint))
@@ -2676,6 +2738,10 @@ impl Render for EditorPane {
             } else {
                 div().into_any_element()
             })
+            // Spacer — everything after is right-aligned.
+            .child(div().flex_1())
+            .child(diag_indicator)
+            .child(lsp_indicator)
             .child(if self.state.is_dirty {
                 div()
                     .text_color(gpui::rgb(t.ochre))
