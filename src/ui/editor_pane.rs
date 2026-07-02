@@ -3718,8 +3718,14 @@ fn render_line(
     };
 
     // ── Assemble row ──────────────────────────────────────────────────────────
+    // `flex_shrink_0` is load-bearing: the rows live in an always-overfull flex
+    // column (VIEWPORT_LINES × line_height exceeds the pane), and taffy's
+    // default flex-shrink of 1 crushes each row toward its min-height — a
+    // soft-wrapped row squeezed to one line-height paints its extra lines over
+    // the rows below.
     let mut row = div()
         .min_h(line_height)
+        .flex_shrink_0()
         .flex()
         .flex_row();
 
