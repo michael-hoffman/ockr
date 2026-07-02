@@ -314,6 +314,12 @@ pub struct EditorPane {
     completion: Option<CompletionState>,
     /// Request ID of the most recent completion request (to discard stale ones).
     completion_request_id: Option<i64>,
+    /// Pixel width of this pane, fed by `MainWindow` each render.  Used to give
+    /// the text column an explicit width: with flex-derived widths, GPUI can
+    /// measure the text at one width and paint it wrapped at another, leaving
+    /// rows shorter than their painted lines (overlapping text).  An explicit
+    /// width makes measure and paint agree.
+    pane_width_px: f32,
 }
 
 impl EditorPane {
@@ -404,6 +410,7 @@ impl EditorPane {
             jump_cursor: 0,
             completion: None,
             completion_request_id: None,
+            pane_width_px: 700.0,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -1089,6 +1096,12 @@ impl EditorPane {
 
     pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
         self.line_number_mode = mode;
+    }
+
+    /// Tell the pane its current pixel width (from `MainWindow`'s layout).
+    /// See `pane_width_px` — gives the text column an explicit wrap width.
+    pub fn set_pane_width(&mut self, px: f32) {
+        self.pane_width_px = px;
     }
 
     /// Clear the persistent search highlights and nav status (`:noh`).
@@ -2398,6 +2411,16 @@ impl Render for EditorPane {
 
         let lnm = self.line_number_mode;
 
+        // Explicit width for the text column: pane width minus the gutter and
+        // the p_4 body padding.  Giving StyledText a definite width keeps its
+        // measured height and painted wrap in agreement (see pane_width_px).
+        let gutter_px = if lnm != LineNumberMode::Off {
+            gutter_digits(line_count) as f32 * CHAR_W + 12.0
+        } else {
+            0.0
+        };
+        let text_w = (self.pane_width_px - gutter_px - 32.0 - 2.0).max(50.0);
+
         // ── Spell check (async, cached) ─────────────────────────────────────
         // Fire one async NSSpellChecker request per invalidation; the
         // completion handler delivers spans through the channel (drained in
@@ -2466,7 +2489,7 @@ impl Render for EditorPane {
             line_elements.push(render_line(
                 i, text, cursor, mode, in_selection, is_front_matter,
                 lnm, line_count, &other_matches, focused_match, diag_sev,
-                bracket_range, &line_spell_errors, &line_extra_cursors, &t,
+                bracket_range, &line_spell_errors, &line_extra_cursors, text_w, &t,
             ));
         }
 
@@ -3364,6 +3387,8 @@ fn render_line(
     spell_errors: &[(usize, usize)],
     // Extra cursor byte-columns on this line (for multi-cursor display).
     extra_cursors: &[usize],
+    // Explicit pixel width for the text column (definite wrap width).
+    text_w: f32,
     t: &ThemePalette,
 ) -> gpui::AnyElement {
     let line_height = px(20.0);
@@ -3617,24 +3642,18 @@ fn render_line(
     }
 
     // ── Assemble content ──────────────────────────────────────────────────────
-    // `StyledText` renders the whole line as a single text layout that wraps at
-    // word boundaries when the available width is narrower than the text.  This
-    // gives proper soft-wrap behaviour — the same logical line number covers
-    // multiple visual rows.  `flex_1` ensures the content div fills the width
-    // left over after the gutter so the wrap constraint is the editor column.
-    // `min_w_0()` zeroes the flex item's default `min-width: auto` so taffy
-    // can shrink the content div below its text's natural (unwrapped) width.
-    // Without it the flex algorithm honours the minimum content size, the div
-    // overflows the row, and text escapes past the editor boundary.
-    // With `min_w_0()` taffy assigns a definite known_dimensions.width equal
-    // to the flex-allocated width, which StyledText receives as its wrap
-    // constraint, producing proper soft word-wrap.
+    // `StyledText` wraps at word boundaries when its width is narrower than the
+    // text, so one logical line can span several visual rows.  The content div
+    // gets an *explicit* pixel width (`text_w`, derived from the pane width fed
+    // by MainWindow) rather than a flex-derived one: with flex sizing, GPUI can
+    // measure the text under one width and paint it wrapped under another,
+    // producing rows shorter than their painted lines (overlapping text).  A
+    // definite width makes every measure/paint pass agree on the wrap point.
     let content = if runs.is_empty() {
         // Empty line — render a zero-width placeholder so the row has min_h.
         div()
             .relative()
-            .flex_1()
-            .min_w_0()
+            .w(px(text_w))
             .text_sm()
             .font_family("Menlo")
             .child("")
@@ -3690,8 +3709,7 @@ fn render_line(
 
         div()
             .relative()
-            .flex_1()
-            .min_w_0()
+            .w(px(text_w))
             .text_sm()
             .font_family("Menlo")
             .child(styled)
