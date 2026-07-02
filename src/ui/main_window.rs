@@ -202,6 +202,12 @@ pub struct MainWindow {
     plugin_manager_focus_pending: bool,
     /// Handle to the `tinymist` LSP thread.  `None` if tinymist is not installed.
     lsp: Option<LspHandle>,
+    /// Window-resize subscription (registered on first render).  Forces a full
+    /// re-render on resize: GPUI's text-measure cache can go incoherent when
+    /// the retained tree is re-laid-out at a new width, painting more wrapped
+    /// lines than the row's height (overlapping rows).  Fresh elements per
+    /// resize keep measurement and paint consistent.
+    bounds_sub: Option<gpui::Subscription>,
     /// Active file-rename modal, if any.
     rename_modal: Option<Entity<RenameModal>>,
     /// True when `rename_modal` was just created and needs focus on next render.
@@ -541,6 +547,7 @@ impl MainWindow {
             plugin_manager_focus_pending: false,
             html_link_sender: link_tx,
             lsp: lsp_handle,
+            bounds_sub: None,
             rename_modal: None,
             rename_modal_focus_pending: false,
             settings_panel: None,
@@ -2583,6 +2590,17 @@ impl Render for MainWindow {
         if !self.preview_width_set {
             self.preview_width = (content_w as f32 * 0.45).clamp(320.0, 900.0);
             self.preview_width_set = true;
+        }
+
+        // Re-render everything on window resize (see `bounds_sub` docs — avoids
+        // stale text-measure caches painting overlapping wrapped rows).
+        if self.bounds_sub.is_none() {
+            self.bounds_sub = Some(cx.observe_window_bounds(window, |this, _, cx| {
+                for pane in &this.panes {
+                    pane.editor.update(cx, |_, c| c.notify());
+                }
+                cx.notify();
+            }));
         }
 
         // ── WKWebView lifecycle ───────────────────────────────────────────────

@@ -3402,6 +3402,37 @@ fn render_line(
     // ── Syntax spans ──────────────────────────────────────────────────────────
     let spans = highlight_spans(&text, t, is_front_matter);
 
+    // ── Spell-span filtering ──────────────────────────────────────────────────
+    // NSSpellChecker flags everything, including code — filter to prose only:
+    // drop a span when it (a) overlaps a syntax span (directives, links, code,
+    // comments), (b) sits inside a double-quoted string, (c) contains code-ish
+    // characters (paths, hex colors, identifiers), or (d) is immediately
+    // followed by `(` (a function call like `rgb(`).
+    let spell_errors: Vec<(usize, usize)> = spell_errors
+        .iter()
+        .copied()
+        .filter(|&(s, e)| {
+            if spans.iter().any(|sp| sp.start < e && s < sp.end) {
+                return false;
+            }
+            let Some(word) = text.get(s..e) else { return false };
+            if word.chars().any(|c| {
+                c.is_ascii_digit() || matches!(c, '#' | '/' | '.' | '_' | '(' | ')' | '@' | '\\')
+            }) {
+                return false;
+            }
+            if text[e..].starts_with('(') {
+                return false;
+            }
+            // Odd number of quotes before the word ⇒ inside a string literal.
+            if text[..s].matches('"').count() % 2 == 1 {
+                return false;
+            }
+            true
+        })
+        .collect();
+    let spell_errors: &[(usize, usize)] = &spell_errors;
+
     // ── Cursor character bounds ───────────────────────────────────────────────
     let cursor_col = if is_cursor_line { cursor.col.min(text_len) } else { usize::MAX };
     let cursor_end = if is_cursor_line && cursor_col < text_len {
@@ -3520,8 +3551,8 @@ fn render_line(
         let is_spell_error = spell_errors.iter().any(|&(s, e)| s <= a && a < e);
         let spell_underline = if is_spell_error {
             Some(gpui::UnderlineStyle {
-                thickness: gpui::px(1.5),
-                color: Some(gpui::rgb(0xff5555u32).into()),
+                thickness: gpui::px(1.0),
+                color: Some(gpui::rgba(0xff5555aau32).into()),
                 wavy: true,
             })
         } else {
