@@ -2364,6 +2364,79 @@ impl Focusable for MainWindow {
 }
 
 impl MainWindow {
+    /// The activity rail — a 40px icon column on the far left that launches
+    /// each major surface.  Icons highlight ochre while their surface is open.
+    fn render_activity_rail(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // (id, glyph, active, action-dispatcher)
+        let buttons: Vec<(&'static str, &'static str, bool, Box<dyn Fn(&mut Window, &mut App)>)> = vec![
+            ("rail-files", "☰", self.sidebar_visible,
+                Box::new(|_, cx| cx.dispatch_action(&ToggleSidebar))),
+            ("rail-search", "⌕", self.vault_search.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenVaultSearch))),
+            ("rail-graph", "◎", self.graph_view.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenGraphView))),
+            ("rail-outline", "≡", self.outline.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenOutline))),
+            ("rail-backlinks", "↩", self.backlinks.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenBacklinks))),
+            ("rail-plugins", "⬡", self.plugin_manager.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenPluginManager))),
+        ];
+
+        let mut rail = div()
+            .w(px(40.0))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(10.0))
+            .gap(px(4.0))
+            .bg(gpui::rgb(t.bg_base))
+            .border_r_1()
+            .border_color(gpui::rgb(t.border_subtle));
+
+        let make_btn = |id: &'static str,
+                        glyph: &'static str,
+                        active: bool,
+                        on_click: Box<dyn Fn(&mut Window, &mut App)>,
+                        t: &ThemePalette| {
+            let color = if active { t.ochre } else { t.text_subtle };
+            let hover_bg = t.bg_hover;
+            div()
+                .id(id)
+                .w(px(30.0))
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_color(gpui::rgb(color))
+                .cursor_pointer()
+                .hover(move |s| s.bg(gpui::rgb(hover_bg)))
+                .on_click(move |_, window, cx| on_click(window, cx))
+                .child(glyph)
+        };
+
+        for (id, glyph, active, action) in buttons {
+            rail = rail.child(make_btn(id, glyph, active, action, t));
+        }
+
+        // Settings pinned to the bottom.
+        rail = rail.child(div().flex_1()).child(
+            make_btn(
+                "rail-settings",
+                "⚙",
+                self.settings_panel.is_some(),
+                Box::new(|_, cx| cx.dispatch_action(&OpenSettings)),
+                t,
+            )
+            .mb(px(10.0)),
+        );
+
+        let _ = cx; // listeners not needed — actions bubble via dispatch_action
+        rail.into_any_element()
+    }
+
     /// First-run welcome pane, shown when no vault is open (`vault.root` is
     /// `None`).  Without it the window renders an empty editor that looks
     /// broken to a new user.  The "Open Vault" button dispatches the existing
@@ -2592,6 +2665,14 @@ impl Render for MainWindow {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up));
 
+        // ── Activity rail ─────────────────────────────────────────────────────
+        // Unified launcher for the surfaces that were previously scattered
+        // across shortcuts and the palette: files, search, graph, outline,
+        // backlinks, plugins, settings.  Hidden in Zen Mode.
+        if !self.zen_mode {
+            root = root.child(self.render_activity_rail(&t, cx));
+        }
+
         // ── Sidebar ───────────────────────────────────────────────────────────
         if self.sidebar_visible {
             root = root
@@ -2607,10 +2688,12 @@ impl Render for MainWindow {
         //
         // Each sub-pane is rendered as a flex-col with a tab bar at the top.
 
+        let rail_w = if self.zen_mode { 0.0 } else { 40.0 };
         let sidebar_w = if self.sidebar_visible { self.sidebar_width + 4.0 } else { 0.0 };
         // In Zen Mode the preview is hidden, so do not subtract preview_width.
         let effective_preview_w = if self.zen_mode { 0.0 } else { self.preview_width + 4.0 };
-        let editor_area_w = (content_w as f32 - sidebar_w - effective_preview_w).max(200.0);
+        let editor_area_w =
+            (content_w as f32 - rail_w - sidebar_w - effective_preview_w).max(200.0);
 
         // Build a pane column (tab bar + editor) for pane at `idx`.
         let pane_col = |pane_idx: usize, this: &Self, cx: &mut Context<Self>| -> gpui::AnyElement {
