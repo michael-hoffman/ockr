@@ -284,6 +284,8 @@ pub struct EditorPane {
     /// `true` while a spell-check request is in flight (avoids re-firing every
     /// render until its reply lands).
     spell_pending: bool,
+    /// `true` while a debounce timer for the next spell request is armed.
+    spell_scheduled: bool,
 
     // ── LSP (tinymist) ────────────────────────────────────────────────────────
 
@@ -406,6 +408,7 @@ impl EditorPane {
             spell_tx: Some(spell_tx),
             spell_seq: 0,
             spell_pending: false,
+            spell_scheduled: false,
             jump_list: Vec::new(),
             jump_cursor: 0,
             completion: None,
@@ -2421,14 +2424,43 @@ impl Render for EditorPane {
         };
         let text_w = (self.pane_width_px - gutter_px - 32.0 - 2.0).max(50.0);
 
-        // ── Spell check (async, cached) ─────────────────────────────────────
-        // Fire one async NSSpellChecker request per invalidation; the
-        // completion handler delivers spans through the channel (drained in
-        // new()).  Never blocks the render/main thread.
-        if self.spell_errors.is_none() && !self.spell_pending {
-            if let Some(ref tx) = self.spell_tx {
-                self.spell_pending = true;
-                crate::ui::spellcheck::request(&self.buffer.text(), self.spell_seq, tx.clone());
+        // ── Spell check (async, debounced) ──────────────────────────────────
+        // Requests go to NSSpellChecker only after ~500ms of quiet: firing on
+        // every keystroke floods the spell server ("NSSpellServer
+        // dataFromCheckingString timed out").  A timer captures the current
+        // spell_seq; if any edit bumps the seq before it fires, it reschedules
+        // via the next render instead of sending a stale request.
+        if self.spell_errors.is_none() && !self.spell_pending && !self.spell_scheduled {
+            if self.spell_tx.is_some() {
+                self.spell_scheduled = true;
+                let seq = self.spell_seq;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    let _ = cx.update(|cx| {
+                        let _ = this.update(cx, |pane, c| {
+                            pane.spell_scheduled = false;
+                            if pane.spell_seq == seq
+                                && pane.spell_errors.is_none()
+                                && !pane.spell_pending
+                            {
+                                if let Some(ref tx) = pane.spell_tx {
+                                    pane.spell_pending = true;
+                                    crate::ui::spellcheck::request(
+                                        &pane.buffer.text(),
+                                        pane.spell_seq,
+                                        tx.clone(),
+                                    );
+                                }
+                            } else {
+                                // Stale — a re-render will schedule a fresh timer.
+                                c.notify();
+                            }
+                        });
+                    });
+                })
+                .detach();
             }
         }
         let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);

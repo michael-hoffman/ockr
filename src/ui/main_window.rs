@@ -2603,6 +2603,24 @@ impl Render for MainWindow {
             }));
         }
 
+        // Any floating GPUI overlay open?  The WKWebView is a native NSView
+        // layered above everything GPUI draws, so overlays extending into the
+        // preview column get visually clipped at its edge.  Hide the webview
+        // while an overlay is up; it returns when the overlay closes (this
+        // render runs again).
+        let overlay_open = self.palette.is_some()
+            || self.quick_switch.is_some()
+            || self.file_picker.is_some()
+            || self.template_picker.is_some()
+            || self.settings_panel.is_some()
+            || self.rename_modal.is_some()
+            || self.plugin_manager.is_some()
+            || self.plugin_panel.is_some()
+            || self.graph_view.is_some()
+            || self.vault_search.is_some()
+            || self.backlinks.is_some()
+            || self.outline.is_some();
+
         // ── WKWebView lifecycle ───────────────────────────────────────────────
         let preview_x = content_w - self.preview_width as f64;
         match preview_mode {
@@ -2611,8 +2629,8 @@ impl Render for MainWindow {
                     self.html_webview = HtmlWebView::new(self.html_link_sender.clone());
                 }
                 if let Some(ref wv) = self.html_webview {
-                    if self.zen_mode {
-                        // Hide the webview while in Zen Mode.
+                    if self.zen_mode || overlay_open {
+                        // Hide the webview in Zen Mode and under overlays.
                         wv.set_hidden(true);
                     } else {
                         wv.update_frame(preview_x, 0.0, self.preview_width as f64, content_h);
