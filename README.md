@@ -33,7 +33,9 @@ See [docs/index.md](docs/index.md) for the full feature list and
 
 ### Download (recommended)
 
-Grab the latest `ockr-<version>.dmg`, open it, and drag **ockr** to Applications.
+Grab the latest `ockr-<version>.dmg` from
+[Releases](https://github.com/michael-hoffman/ockr/releases), open it, and drag
+**ockr** to Applications.
 
 The app is ad-hoc signed, so on first launch macOS may warn it's from an
 unidentified developer. Right-click the app → **Open** → **Open** to bypass
@@ -44,7 +46,7 @@ unidentified developer. Right-click the app → **Open** → **Open** to bypass
 Requires the [Rust toolchain](https://rustup.rs/) (1.96+) and macOS 11 or newer.
 
 ```sh
-git clone <your-clone-url> ockr
+git clone https://github.com/michael-hoffman/ockr.git ockr
 cd ockr
 cargo run --release
 ```

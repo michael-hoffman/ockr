@@ -14,6 +14,7 @@ description = "A Typst-native, keyboard-driven note editor with a Helix-style mo
 authors = ["Michael Hoffman <hoffman1512@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/michael-hoffman/ockr"
 keywords = ["typst", "editor", "notes", "helix", "markdown"]
 categories = ["text-editors"]
 
