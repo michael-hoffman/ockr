@@ -144,6 +144,14 @@ section h2 {
   margin-bottom: 28px;
   letter-spacing: -0.01em;
 }
+.lede {
+  color: var(--muted);
+  font-size: 18px;
+  max-width: 640px;
+  margin: -12px 0 32px;
+}
+.lede a { color: var(--ochre); text-decoration: none; }
+.lede a:hover { text-decoration: underline; }
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

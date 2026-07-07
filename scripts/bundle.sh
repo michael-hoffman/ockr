@@ -115,7 +115,13 @@ hdiutil create \
     "$DMG" >/dev/null
 
 rm -rf "$STAGE"
+
+# Version-less alias so the site's "Download the latest" link
+# (releases/latest/download/ockr-macos.dmg) is a permanent, stable URL.
+cp "$DMG" "$DIST/$APP_NAME-macos.dmg"
+
 echo "✓ Built $DMG"
+echo "✓ Built $DIST/$APP_NAME-macos.dmg (stable-name alias)"
 echo ""
-echo "Done. Distribute dist/$APP_NAME-$VERSION.dmg"
+echo "Done. Upload BOTH to the release so the direct-download link resolves."
 echo "(ad-hoc signed — users may need right-click → Open on first launch)"
