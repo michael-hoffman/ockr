@@ -26,20 +26,10 @@ pub struct Settings {
     pub keyboard_mode: String,
     /// Theme name (stem of a TOML file in `themes/` or `~/.config/ockr/themes/`).
     pub theme: String,
-    /// Editor font size in points.
-    pub font_size: f32,
     /// Line number display: `"relative"`, `"absolute"`, or `"off"`.
     pub line_number_mode: String,
     /// Preview output format: `"html"` or `"paged"`.
     pub preview_mode: String,
-    /// Whether to soft-wrap long lines.
-    pub soft_wrap: bool,
-    /// Number of spaces per indent level.
-    pub tab_size: usize,
-    /// Auto-save on focus loss / buffer switch.
-    pub auto_save: bool,
-    /// Show word count in the status bar.
-    pub show_word_count: bool,
 }
 
 impl Default for Settings {
@@ -47,13 +37,8 @@ impl Default for Settings {
         Self {
             keyboard_mode: "helix".into(),
             theme: "oxide".into(),
-            font_size: 14.0,
             line_number_mode: "relative".into(),
             preview_mode: "html".into(),
-            soft_wrap: true,
-            tab_size: 2,
-            auto_save: false,
-            show_word_count: true,
         }
     }
 }
@@ -69,13 +54,8 @@ impl gpui::Global for Settings {}
 struct SettingsOverlay {
     keyboard_mode: Option<String>,
     theme: Option<String>,
-    font_size: Option<f32>,
     line_number_mode: Option<String>,
     preview_mode: Option<String>,
-    soft_wrap: Option<bool>,
-    tab_size: Option<usize>,
-    auto_save: Option<bool>,
-    show_word_count: Option<bool>,
 }
 
 impl Settings {
@@ -83,13 +63,8 @@ impl Settings {
     fn merge(&mut self, overlay: SettingsOverlay) {
         if let Some(v) = overlay.keyboard_mode { self.keyboard_mode = v; }
         if let Some(v) = overlay.theme { self.theme = v; }
-        if let Some(v) = overlay.font_size { self.font_size = v; }
         if let Some(v) = overlay.line_number_mode { self.line_number_mode = v; }
         if let Some(v) = overlay.preview_mode { self.preview_mode = v; }
-        if let Some(v) = overlay.soft_wrap { self.soft_wrap = v; }
-        if let Some(v) = overlay.tab_size { self.tab_size = v; }
-        if let Some(v) = overlay.auto_save { self.auto_save = v; }
-        if let Some(v) = overlay.show_word_count { self.show_word_count = v; }
     }
 }
 
@@ -175,9 +150,6 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.keyboard_mode, "helix");
         assert_eq!(s.theme, "oxide");
-        assert_eq!(s.font_size, 14.0);
-        assert_eq!(s.tab_size, 2);
-        assert!(s.show_word_count);
     }
 
     #[test]
@@ -185,15 +157,12 @@ mod tests {
         let mut s = Settings::default();
         let overlay = SettingsOverlay {
             theme: Some("ochre".into()),
-            font_size: Some(16.0),
             ..Default::default()
         };
         s.merge(overlay);
         assert_eq!(s.theme, "ochre");
-        assert_eq!(s.font_size, 16.0);
         // unchanged
         assert_eq!(s.keyboard_mode, "helix");
-        assert_eq!(s.tab_size, 2);
     }
 
     #[test]

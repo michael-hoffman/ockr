@@ -503,21 +503,21 @@ pub fn apply<B: Buffer>(
 
         MoveWORDForward => {
             let pos = state.cursor();
-            let new_pos = word_forward_whitespace(pos, buf);
+            let new_pos = word_forward(pos, buf);
             navigate(&mut state, new_pos);
             (state, None)
         }
 
         MoveWORDBackward => {
             let pos = state.cursor();
-            let new_pos = word_backward_whitespace(pos, buf);
+            let new_pos = word_backward(pos, buf);
             navigate(&mut state, new_pos);
             (state, None)
         }
 
         MoveWORDEnd => {
             let pos = state.cursor();
-            let new_pos = word_end_forward_whitespace(pos, buf);
+            let new_pos = word_end_forward(pos, buf);
             navigate(&mut state, new_pos);
             (state, None)
         }
@@ -1534,25 +1534,6 @@ fn yank_visual_char<B: Buffer>(start: crate::editor::state::Pos, end: crate::edi
     }
 }
 
-// ── WORD motions (whitespace-only boundaries; W / B / E) ──────────────────────
-
-/// Move forward one WORD: skip non-whitespace, then skip whitespace.
-/// Identical boundary rule to `word_forward` — both only split on whitespace —
-/// but provided as a distinct function so the intent is explicit in the dispatch.
-fn word_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
-    word_forward(pos, buf)
-}
-
-/// Move backward one WORD: find the start of the previous whitespace-delimited run.
-fn word_backward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
-    word_backward(pos, buf)
-}
-
-/// Move to the end of the current/next WORD (whitespace-delimited).
-fn word_end_forward_whitespace<B: Buffer>(pos: Pos, buf: &B) -> Pos {
-    word_end_forward(pos, buf)
-}
-
 // ── Find-char helpers ─────────────────────────────────────────────────────────
 
 /// Find the next occurrence of `c` after `col` on `line`.
@@ -1582,16 +1563,10 @@ fn find_char_forward(line: &str, col: usize, c: char, till: bool) -> Option<usiz
 /// If `till`, returns the position just after `c`.
 fn find_char_backward(line: &str, col: usize, c: char, till: bool) -> Option<usize> {
     if col == 0 { return None; }
-    let scan = &line[..col];
-    // Walk backwards through chars.
-    let chars: Vec<(usize, char)> = scan.char_indices().collect();
-    for &(i, ch) in chars.iter().rev() {
+    // Walk backwards through chars (char_indices is double-ended).
+    for (i, ch) in line[..col].char_indices().rev() {
         if ch == c {
-            return if till {
-                Some(i + ch.len_utf8())
-            } else {
-                Some(i)
-            };
+            return if till { Some(i + ch.len_utf8()) } else { Some(i) };
         }
     }
     None

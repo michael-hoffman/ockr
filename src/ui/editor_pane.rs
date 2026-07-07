@@ -333,12 +333,7 @@ impl EditorPane {
         } else {
             Box::new(crate::editor::keymap_helix::HelixKeymap::new())
         };
-        // Standard mode starts in Insert (the default); Helix starts in Normal.
         let state = EditorState::new();
-        if keymap.mode_label(&state) != "STANDARD" {
-            // EditorState defaults to Insert; switch to Normal for Helix mode.
-            // (We don't have a Noop path through apply for this, so set directly.)
-        }
         // Initial line-number mode from settings (canonical source of truth).
         let line_number_mode = match cx
             .try_global::<crate::settings::Settings>()
@@ -841,46 +836,17 @@ impl EditorPane {
     /// Return the highest-severity diagnostic (compiler + LSP) on `line`,
     /// or `None` if the line is clean.  Error beats Warning.
     fn merged_diag_sev(&self, line: usize) -> Option<DiagnosticSeverity> {
-        let compiler = self
-            .diagnostics
-            .iter()
-            .filter(|d| d.line == Some(line))
-            .fold(None, |acc, d| {
-                Some(match acc {
-                    None => d.severity.clone(),
-                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
-                    Some(DiagnosticSeverity::Warning) => d.severity.clone(),
-                })
-            });
-
-        let lsp = self
-            .lsp_diagnostics
-            .iter()
-            .filter(|d| d.range.start.line == line)
-            .fold(None, |acc, d| {
-                let s = match d.severity {
-                    LspSeverity::Error => DiagnosticSeverity::Error,
-                    _ => DiagnosticSeverity::Warning,
-                };
-                Some(match acc {
-                    None => s,
-                    Some(DiagnosticSeverity::Error) => DiagnosticSeverity::Error,
-                    Some(DiagnosticSeverity::Warning) => s,
-                })
-            });
-
-        match (compiler, lsp) {
-            (None, None) => None,
-            (Some(s), None) | (None, Some(s)) => Some(s),
-            (Some(a), Some(b)) => Some(
-                match (&a, &b) {
-                    (DiagnosticSeverity::Error, _) | (_, DiagnosticSeverity::Error) => {
-                        DiagnosticSeverity::Error
-                    }
-                    _ => DiagnosticSeverity::Warning,
-                },
-            ),
+        let comp_any = self.diagnostics.iter().any(|d| d.line == Some(line));
+        let lsp_any = self.lsp_diagnostics.iter().any(|d| d.range.start.line == line);
+        if !comp_any && !lsp_any {
+            return None;
         }
+        let has_error = self.diagnostics.iter().any(|d| {
+            d.line == Some(line) && matches!(d.severity, DiagnosticSeverity::Error)
+        }) || self.lsp_diagnostics.iter().any(|d| {
+            d.range.start.line == line && matches!(d.severity, LspSeverity::Error)
+        });
+        Some(if has_error { DiagnosticSeverity::Error } else { DiagnosticSeverity::Warning })
     }
 
     fn compute_doc_stats(&self) -> (usize, usize) {
@@ -1003,11 +969,6 @@ impl EditorPane {
     fn push_undo(&mut self) {
         self.push_undo_impl();
         self.redo_history.clear();
-    }
-
-    /// Push onto undo without clearing redo — used internally during redo.
-    fn push_undo_keeping_redo(&mut self) {
-        self.push_undo_impl();
     }
 
     fn push_undo_impl(&mut self) {
@@ -2320,7 +2281,7 @@ impl EditorPane {
     /// Perform redo (shared between Cmd-Shift-Z and keymap Redo).
     fn do_redo(&mut self, cx: &mut Context<Self>) {
         if let Some((text, pos)) = self.redo_history.pop() {
-            self.push_undo_keeping_redo();
+            self.push_undo_impl();
             self.buffer = InMemoryBuffer::from_text(&text);
             self.state.mode = Mode::Normal;
             self.state.move_cursor_to(pos);
@@ -3123,12 +3084,7 @@ impl Render for EditorPane {
 
 fn is_line_in_visual_selection(line: usize, mode: Mode, sel: &Selection) -> bool {
     match mode {
-        Mode::Visual(VisualKind::Line) => {
-            let start = sel.start().line;
-            let end = sel.end().line;
-            line >= start && line <= end
-        }
-        Mode::Visual(VisualKind::Char) => {
+        Mode::Visual(_) => {
             let start = sel.start().line;
             let end = sel.end().line;
             line >= start && line <= end

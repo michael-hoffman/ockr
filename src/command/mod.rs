@@ -4,11 +4,6 @@
 //! The Command Palette (Story 08) is a fuzzy-search UI over this registry.
 //! For now, search is a simple substring filter; BM25-weighted fuzzy matching
 //! arrives with the full palette in Story 08.
-// Fields and methods form the Command Palette API surface (Story 08).
-#![allow(dead_code)]
-
-use gpui::App;
-
 // Mark as a GPUI global so it can be accessed from any App context.
 impl gpui::Global for CommandRegistry {}
 
@@ -20,7 +15,6 @@ pub struct CommandEntry {
     pub name: String,
     /// Keybinding hint for display only (actual binding registered separately).
     pub keybinding_hint: Option<String>,
-    handler: Box<dyn Fn(&mut App) + 'static>,
 }
 
 impl CommandEntry {
@@ -28,18 +22,12 @@ impl CommandEntry {
         id: impl Into<String>,
         name: impl Into<String>,
         keybinding_hint: Option<impl Into<String>>,
-        handler: impl Fn(&mut App) + 'static,
     ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             keybinding_hint: keybinding_hint.map(|h| h.into()),
-            handler: Box::new(handler),
         }
-    }
-
-    pub fn invoke(&self, cx: &mut App) {
-        (self.handler)(cx);
     }
 }
 

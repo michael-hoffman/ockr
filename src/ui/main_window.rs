@@ -1363,7 +1363,7 @@ impl MainWindow {
         let templates = scan_templates(&root);
         if templates.is_empty() {
             // No templates available — create blank note immediately.
-            self.create_new_note(None, root, window, cx);
+            self.create_new_note_deferred(None, root, cx);
             return;
         }
 
@@ -1449,50 +1449,6 @@ impl MainWindow {
         self.spawn_backlink_build_if_needed(cx);
 
         // Route through tab management.
-        self.open_tab_in_pane(self.active_idx, note_path, cx);
-        cx.notify();
-    }
-
-    /// Create a new note when a `Window` is available (direct call path).
-    fn create_new_note(
-        &mut self,
-        template_path: Option<PathBuf>,
-        vault_root: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let raw = match &template_path {
-            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
-            None => String::new(),
-        };
-
-        let filename = {
-            let today = time::OffsetDateTime::now_local()
-                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-            let date_str = format!(
-                "{:04}-{:02}-{:02}",
-                today.year(), today.month() as u8, today.day()
-            );
-            let partial = apply_template_substitutions(&raw, "");
-            match heading_to_filename_stem(&partial) {
-                Some(stem) => format!("{stem}.typ"),
-                None => format!("untitled-{date_str}.typ"),
-            }
-        };
-
-        let title_stem = filename.trim_end_matches(".typ").to_string();
-        let content = apply_template_substitutions(&raw, &title_stem);
-
-        let note_path = unique_path(&vault_root, &filename);
-        let _ = std::fs::write(&note_path, &content);
-
-        self.vault.update(cx, |vs, _cx| {
-            *vs = crate::vault::VaultState::open(vault_root.clone());
-        });
-        self.spawn_backlink_build_if_needed(cx);
-
-        // Route through tab management.
-        let _ = window; // open_tab_in_pane uses open_file_no_focus (no Window needed).
         self.open_tab_in_pane(self.active_idx, note_path, cx);
         cx.notify();
     }
@@ -2089,7 +2045,7 @@ impl MainWindow {
         for event in events {
             match event {
                 PluginEvent::CommandRegistered { plugin_id, id, name, hint } => {
-                    let entry = CommandEntry::new(id.clone(), name, hint, |_| {});
+                    let entry = CommandEntry::new(id.clone(), name, hint);
                     cx.global_mut::<crate::command::CommandRegistry>().register(entry);
                     let reg = cx.global_mut::<PluginRegistry>();
                     reg.plugin_commands.entry(plugin_id.clone()).or_default().push(id.clone());

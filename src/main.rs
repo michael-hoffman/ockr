@@ -467,6 +467,6 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
         ("nohlsearch",            "nohlsearch  · clear search highlights", Some(":nohlsearch")),
     ];
     for &(id, name, hint) in cmds {
-        registry.register(CommandEntry::new(id, name, hint, |_cx| {}));
+        registry.register(CommandEntry::new(id, name, hint));
     }
 }
