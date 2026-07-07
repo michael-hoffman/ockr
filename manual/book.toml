@@ -8,6 +8,7 @@ src = "src"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
+additional-css = ["theme/ockr.css"]
 git-repository-url = "https://github.com/michael-hoffman/ockr"
 edit-url-template = "https://github.com/michael-hoffman/ockr/edit/main/manual/{path}"
 site-url = "/ockr/manual/"

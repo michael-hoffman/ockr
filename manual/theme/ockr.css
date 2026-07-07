@@ -1,0 +1,105 @@
+/* ockr manual — Oxide palette, matching the landing page.
+   Overrides mdBook's built-in navy theme variables. */
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono&display=swap");
+
+:root {
+  --oxide-bg:      #0B0907;
+  --oxide-panel:   #16120E;
+  --oxide-surface: #1B1712;
+  --oxide-hover:   #241E17;
+  --oxide-border:  #2C251C;
+  --oxide-ochre:   #CC7722;
+  --oxide-ochre-2: #E8932E;
+  --oxide-text:    #F5F0EA;
+  --oxide-muted:   #A89F93;
+  --oxide-subtle:  #7A7163;
+}
+
+/* Apply to the default (navy) theme and the light one alike so the manual
+   always reads as Oxide regardless of the reader's saved mdBook theme. */
+html.navy,
+html.coal,
+html.ayu,
+html.rust,
+html.light,
+html {
+  --bg: var(--oxide-bg);
+  --fg: var(--oxide-text);
+
+  --sidebar-bg: var(--oxide-surface);
+  --sidebar-fg: var(--oxide-muted);
+  --sidebar-non-existant: var(--oxide-subtle);
+  --sidebar-active: var(--oxide-ochre);
+  --sidebar-spacer: var(--oxide-border);
+
+  --scrollbar: var(--oxide-subtle);
+
+  --icons: var(--oxide-subtle);
+  --icons-hover: var(--oxide-ochre);
+
+  --links: var(--oxide-ochre);
+
+  --inline-code-color: #2DD4BF;
+
+  --theme-popup-bg: var(--oxide-panel);
+  --theme-popup-border: var(--oxide-border);
+  --theme-hover: var(--oxide-hover);
+
+  --quote-bg: var(--oxide-panel);
+  --quote-border: var(--oxide-ochre);
+
+  --table-border-color: var(--oxide-border);
+  --table-header-bg: var(--oxide-panel);
+  --table-alternate-bg: #0E0B09;
+
+  --searchbar-border-color: var(--oxide-border);
+  --searchbar-bg: var(--oxide-panel);
+  --searchbar-fg: var(--oxide-text);
+  --searchbar-shadow-color: var(--oxide-border);
+  --searchresults-header-fg: var(--oxide-muted);
+  --searchresults-border-color: var(--oxide-border);
+  --searchresults-li-bg: var(--oxide-panel);
+  --search-mark-bg: var(--oxide-ochre);
+}
+
+/* Typography — Space Grotesk headings, matching the landing wordmark. */
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--oxide-text);
+}
+.content h1 { letter-spacing: -0.02em; }
+
+/* Sidebar title as a small ockr wordmark with the ochre caret. */
+.sidebar .sidebar-scrollbox { padding-top: 8px; }
+
+/* Code blocks on the panel surface with a subtle border. */
+.content pre,
+.content pre > code {
+  background: var(--oxide-panel);
+  border-radius: 6px;
+}
+.content pre {
+  border: 1px solid var(--oxide-border);
+}
+code {
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* Active sidebar link gets the ochre accent bar, like the landing nav caret. */
+.chapter li.chapter-item a.active {
+  color: var(--oxide-ochre);
+  font-weight: 500;
+}
+
+/* Menu bar blends into the background. */
+.menu-title { font-family: "Space Grotesk", sans-serif; font-weight: 500; }
+#menu-bar { background: var(--oxide-bg); border-bottom: 1px solid var(--oxide-border); }
+
+/* Link hover matches the landing brighter-ochre. */
+.content a:hover { color: var(--oxide-ochre-2); }
