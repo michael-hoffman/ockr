@@ -62,7 +62,26 @@ nav a:hover { color: var(--text); }
 nav .spacer { flex: 1; }
 
 /* ── Hero ── */
-.hero { padding: 88px 0 56px; text-align: center; }
+.hero { padding: 72px 0 56px; text-align: center; }
+.wordmark {
+  font-family: "Space Grotesk", var(--sans);
+  font-weight: 700;
+  font-size: 76px;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--text);
+  margin-bottom: 28px;
+  display: inline-flex;
+  align-items: baseline;
+}
+.wordmark .caret {
+  display: inline-block;
+  width: 10px;
+  height: 56px;
+  background: var(--ochre);
+  margin-left: 6px;
+  transform: translateY(6px);
+}
 .hero h1 {
   font-size: 44px;
   line-height: 1.15;
