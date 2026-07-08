@@ -115,6 +115,31 @@ struct PaneEntry {
     active_tab: usize,
 }
 
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+
+/// Minimal single-line tooltip used by the activity rail's icon buttons.
+struct RailTooltip {
+    text: gpui::SharedString,
+}
+
+impl Render for RailTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.global::<ThemePalette>().clone();
+        div()
+            .px_2()
+            .py_1()
+            .bg(gpui::rgb(t.bg_surface))
+            .border_1()
+            .border_color(gpui::rgb(t.border_subtle))
+            .rounded(px(4.0))
+            .shadow_lg()
+            .text_xs()
+            .font_family("Menlo")
+            .text_color(gpui::rgb(t.text))
+            .child(self.text.clone())
+    }
+}
+
 // ── Drag state ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2330,20 +2355,36 @@ impl MainWindow {
     /// The activity rail — a 40px icon column on the far left that launches
     /// each major surface.  Icons highlight ochre while their surface is open.
     fn render_activity_rail(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
-        // (id, glyph, active, action-dispatcher)
-        let buttons: Vec<(&'static str, &'static str, bool, Box<dyn Fn(&mut Window, &mut App)>)> = vec![
-            ("rail-files", "☰", self.sidebar_visible,
-                Box::new(|_, cx| cx.dispatch_action(&ToggleSidebar))),
-            ("rail-search", "⌕", self.vault_search.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenVaultSearch))),
-            ("rail-graph", "◎", self.graph_view.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenGraphView))),
-            ("rail-outline", "≡", self.outline.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenOutline))),
-            ("rail-backlinks", "↩", self.backlinks.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenBacklinks))),
-            ("rail-plugins", "⬡", self.plugin_manager.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenPluginManager))),
+        // (id, glyph, active, label-for-tooltip, click-handler)
+        //
+        // Each handler calls the real MainWindow method directly, via
+        // cx.listener — NOT cx.dispatch_action(&Foo) on a bare `App`.  The
+        // latter resolves through `App::dispatch_action`, which falls back to
+        // a *global* action listener when it can't resolve the active window;
+        // main.rs registers empty no-op stubs for these exact actions (for
+        // menu/keybinding scaffolding), so that fallback silently did nothing —
+        // the rail's clicks appeared completely dead. cx.listener looks up the
+        // view directly and is the pattern every other click handler in this
+        // codebase uses.
+        let buttons: Vec<(
+            &'static str,
+            &'static str,
+            bool,
+            &'static str,
+            Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>,
+        )> = vec![
+            ("rail-files", "☰", self.sidebar_visible, "Toggle file sidebar",
+                Box::new(|this, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
+            ("rail-search", "⌕", self.vault_search.is_some(), "Vault search",
+                Box::new(|this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx))),
+            ("rail-graph", "◎", self.graph_view.is_some(), "Graph view",
+                Box::new(|this, window, cx| this.open_graph_view(&OpenGraphView, window, cx))),
+            ("rail-outline", "≡", self.outline.is_some(), "Outline",
+                Box::new(|this, window, cx| this.open_outline(&OpenOutline, window, cx))),
+            ("rail-backlinks", "↩", self.backlinks.is_some(), "Backlinks",
+                Box::new(|this, window, cx| this.open_backlinks(&OpenBacklinks, window, cx))),
+            ("rail-plugins", "⬡", self.plugin_manager.is_some(), "Plugin manager",
+                Box::new(|this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx))),
         ];
 
         let mut rail = div()
@@ -2358,11 +2399,15 @@ impl MainWindow {
             .border_r_1()
             .border_color(gpui::rgb(t.border_subtle));
 
-        let make_btn = |id: &'static str,
-                        glyph: &'static str,
-                        active: bool,
-                        on_click: Box<dyn Fn(&mut Window, &mut App)>,
-                        t: &ThemePalette| {
+        fn make_btn(
+            id: &'static str,
+            glyph: &'static str,
+            active: bool,
+            label: &'static str,
+            on_click: Box<dyn Fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>)>,
+            t: &ThemePalette,
+            cx: &Context<MainWindow>,
+        ) -> gpui::Stateful<gpui::Div> {
             let color = if active { t.ochre } else { t.text_subtle };
             let hover_bg = t.bg_hover;
             div()
@@ -2376,12 +2421,13 @@ impl MainWindow {
                 .text_color(gpui::rgb(color))
                 .cursor_pointer()
                 .hover(move |s| s.bg(gpui::rgb(hover_bg)))
-                .on_click(move |_, window, cx| on_click(window, cx))
+                .on_click(cx.listener(move |this, _event, window, cx| on_click(this, window, cx)))
+                .tooltip(move |_window, cx| cx.new(|_| RailTooltip { text: label.into() }).into())
                 .child(glyph)
-        };
+        }
 
-        for (id, glyph, active, action) in buttons {
-            rail = rail.child(make_btn(id, glyph, active, action, t));
+        for (id, glyph, active, label, action) in buttons {
+            rail = rail.child(make_btn(id, glyph, active, label, action, t, cx));
         }
 
         // Settings pinned to the bottom.
@@ -2390,13 +2436,14 @@ impl MainWindow {
                 "rail-settings",
                 "⚙",
                 self.settings_panel.is_some(),
-                Box::new(|_, cx| cx.dispatch_action(&OpenSettings)),
+                "Settings",
+                Box::new(|this, window, cx| this.open_settings(&OpenSettings, window, cx)),
                 t,
+                cx,
             )
             .mb(px(10.0)),
         );
 
-        let _ = cx; // listeners not needed — actions bubble via dispatch_action
         rail.into_any_element()
     }
 
