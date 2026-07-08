@@ -1096,35 +1096,64 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) {
         let pane_idx = self.active_idx;
-        let pane = &mut self.panes[pane_idx];
+        let tab_idx = self.panes[pane_idx].active_tab;
+        self.close_tab_at(pane_idx, tab_idx, window, cx);
+    }
 
-        if pane.tabs.is_empty() {
+    /// Close tab `tab_idx` in pane `pane_idx` — the shared logic behind
+    /// `Cmd-W` (always closes the active tab) and the tab bar's `×` button
+    /// (can close any tab, active or not).
+    fn close_tab_at(
+        &mut self,
+        pane_idx: usize,
+        tab_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if pane_idx >= self.panes.len() {
+            return;
+        }
+        let pane = &mut self.panes[pane_idx];
+        if tab_idx >= pane.tabs.len() {
             return;
         }
 
-        let closing = pane.active_tab;
-        pane.tabs.remove(closing);
+        let was_active = tab_idx == pane.active_tab;
+        pane.tabs.remove(tab_idx);
 
         if pane.tabs.is_empty() {
-            // No more tabs — nothing left to show; just notify.
+            // No more tabs — clear the editor so it doesn't keep showing the
+            // now-closed buffer.
             pane.active_tab = 0;
+            let editor = pane.editor.clone();
+            editor.update(cx, |ep, c| {
+                ep.close_document();
+                c.notify();
+            });
+            self.persist_tabs();
             cx.notify();
             return;
         }
 
-        // Adjust active index after removal.
-        let new_active = if closing >= pane.tabs.len() {
-            pane.tabs.len() - 1
-        } else {
-            closing
-        };
-        let path = pane.tabs[new_active].path.clone();
-        let editor = pane.editor.clone();
-        open_file_in_editor(&path, &editor, &self.vault, cx);
-        self.panes[pane_idx].active_tab = new_active;
+        if was_active {
+            // Adjust active index after removing the currently-shown tab, then
+            // load whichever tab now occupies that slot.
+            let new_active = if tab_idx >= pane.tabs.len() {
+                pane.tabs.len() - 1
+            } else {
+                tab_idx
+            };
+            let path = pane.tabs[new_active].path.clone();
+            let editor = pane.editor.clone();
+            open_file_in_editor(&path, &editor, &self.vault, cx);
+            self.panes[pane_idx].active_tab = new_active;
+            editor.read(cx).focus_handle(cx).focus(window);
+        } else if tab_idx < pane.active_tab {
+            // A tab before the active one was removed — shift the index down
+            // so `active_tab` still points at the same (still-open) tab.
+            self.panes[pane_idx].active_tab -= 1;
+        }
 
-        // Re-focus the editor after closing.
-        editor.read(cx).focus_handle(cx).focus(window);
         self.persist_tabs();
         cx.notify();
     }
@@ -2756,8 +2785,32 @@ impl Render for MainWindow {
                         } else {
                             false
                         };
+                        let group_name = format!("tab-{pane_idx}-{i}");
+
+                        let close_btn = div()
+                            .id(("tab-close", i))
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .text_color(gpui::rgb(t.text_faint))
+                            .opacity(0.0)
+                            .group_hover(group_name.clone(), |s| s.opacity(1.0))
+                            .hover(|s| s.bg(gpui::rgb(t.bg_hover)).text_color(gpui::rgb(t.text)))
+                            .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_tab_at(pane_idx, i, window, cx);
+                                }),
+                            );
 
                         div()
+                            .id(("tab", i))
+                            .group(group_name)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -2787,6 +2840,7 @@ impl Render for MainWindow {
                                         .child("●"),
                                 )
                             })
+                            .child(close_btn)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _event, _window, cx| {
@@ -2799,6 +2853,7 @@ impl Render for MainWindow {
                     .collect();
 
                 div()
+                    .id("tab-bar")
                     .w_full()
                     .flex()
                     .flex_row()
@@ -2807,7 +2862,7 @@ impl Render for MainWindow {
                     .bg(gpui::rgb(t.bg_base))
                     .border_b_1()
                     .border_color(gpui::rgb(t.border_subtle))
-                    .overflow_x_hidden()
+                    .overflow_x_scroll()
                     .children(tab_items)
                     .into_any_element()
             };
