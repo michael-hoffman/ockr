@@ -31,6 +31,13 @@ jobs:
             | tar -xz -C "$HOME/bin"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      - name: Verify manual/src/keymap.md tracks docs/keymap.md
+        # manual/src/keymap.md is a symlink to docs/keymap.md so the keymap
+        # reference has exactly one source of truth. This fails loudly (rather
+        # than silently shipping stale docs) if it's ever replaced with an
+        # independent copy that drifts.
+        run: diff docs/keymap.md manual/src/keymap.md
+
       - name: Build manual
         run: mdbook build manual
 
