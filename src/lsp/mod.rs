@@ -193,7 +193,11 @@ pub fn spawn_lsp(
     workspace_root: Option<PathBuf>,
     on_message: impl Fn(LspMessage) + Send + 'static,
 ) -> Option<LspHandle> {
+    // `tinymist` requires the `lsp` subcommand to actually speak the language
+    // server protocol on stdio; a bare invocation just prints its CLI help and
+    // exits, which the initialize handshake below would then time out on.
     let child = Command::new("tinymist")
+        .arg("lsp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -1,6 +1,7 @@
 # ockr
 
 A fast, keyboard-driven **Typst note editor** for macOS, built with [GPUI](https://www.gpui.rs/).
+Think an Obsidian-style linked knowledge base, but native to [Typst](https://typst.app/) instead of Markdown.
 
 ockr pairs a Helix-style modal editing model with live Typst compilation, wikilink
 navigation, and a sandboxed WASM plugin system — a writing environment for people
