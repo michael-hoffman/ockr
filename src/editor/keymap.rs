@@ -110,6 +110,16 @@ pub enum KeymapResult {
     JumpForward,
     /// Request LSP completions at the cursor (`Ctrl-Space`).
     RequestCompletion,
+    /// Record the cursor position under register `reg` (`Alt-m<reg>`).
+    ///
+    /// Vim/Helix convention binds this to bare `m`, but `m` is already the
+    /// text-object prefix here (`mi`/`ma`), so setting a mark uses `Alt-m`
+    /// instead; jumping still uses the familiar bare `` ` `` / `'`.
+    SetMark(char),
+    /// Jump to the position recorded under register `reg`.
+    /// `` `<reg> `` jumps to the exact position; `'<reg>` jumps to the first
+    /// non-blank character of that line (matches Vim's backtick vs quote).
+    JumpToMark { reg: char, first_non_blank: bool },
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

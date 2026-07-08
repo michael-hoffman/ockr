@@ -54,6 +54,12 @@ enum PendingKey {
     MacroPlay,
     /// `z` pressed; awaiting scroll-alignment key.
     Z,
+    /// `Alt-m` pressed; awaiting the mark register to set.
+    MarkSet,
+    /// `` ` `` pressed; awaiting the mark register to jump to (exact position).
+    MarkJumpExact,
+    /// `'` pressed; awaiting the mark register to jump to (line, first non-blank).
+    MarkJumpLine,
 }
 
 // ── HelixKeymap ──────────────────────────────────────────────────────────────
@@ -564,6 +570,55 @@ impl KeymapHandler for HelixKeymap {
                         _ => unreachable!(),
                     };
                     return KeymapResult::Command(cmd);
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+
+        // ── Marks: Alt-m<reg> sets, `<reg> / '<reg> jump ────────────────
+        // `m` alone is the text-object prefix (mi/ma), so setting a mark uses
+        // Alt-m instead; bare backtick/quote are otherwise unbound in Normal
+        // mode (they only mean something after `mi`/`ma`, a mutually
+        // exclusive pending state), so they're free for jump-to-mark exactly
+        // as in Vim.
+        if in_modal
+            && self.pending == PendingKey::None
+            && !k.modifiers.platform
+            && !k.modifiers.control
+        {
+            if k.modifiers.alt && k.key == "m" {
+                self.pending = PendingKey::MarkSet;
+                return KeymapResult::Pending;
+            }
+            if !k.modifiers.alt {
+                if k.key == "`" {
+                    self.pending = PendingKey::MarkJumpExact;
+                    return KeymapResult::Pending;
+                }
+                if k.key == "'" {
+                    self.pending = PendingKey::MarkJumpLine;
+                    return KeymapResult::Pending;
+                }
+            }
+        }
+        if matches!(
+            self.pending,
+            PendingKey::MarkSet | PendingKey::MarkJumpExact | PendingKey::MarkJumpLine
+        ) {
+            let pending_kind = self.pending;
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                if let Some(reg) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    return match pending_kind {
+                        PendingKey::MarkSet => KeymapResult::SetMark(reg),
+                        PendingKey::MarkJumpExact => {
+                            KeymapResult::JumpToMark { reg, first_non_blank: false }
+                        }
+                        PendingKey::MarkJumpLine => {
+                            KeymapResult::JumpToMark { reg, first_non_blank: true }
+                        }
+                        _ => unreachable!(),
+                    };
                 }
             }
             return KeymapResult::Passthrough;

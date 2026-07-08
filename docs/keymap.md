@@ -119,6 +119,19 @@ First select with `mi` (inner) or `ma` (around), then `d` / `y` / `c`.
 | `gv`          | Reselect last visual selection      |
 | `gc`          | Toggle `// ` comment on current line |
 
+### Normal Mode — Marks
+
+`m` is already the text-object prefix (`mi`/`ma`), so setting a mark uses
+`Alt-m` instead of bare `m`; jumping still uses the familiar bare
+backtick/quote. Marks are buffer-local and cleared when a different file
+loads into the pane.
+
+| Key           | Action                                             |
+|---------------|-----------------------------------------------------|
+| `Alt-m<reg>`  | Set mark `<reg>` (any letter) at the cursor          |
+| `` `<reg> ``  | Jump to mark `<reg>` (exact position)                |
+| `'<reg>`      | Jump to mark `<reg>`'s line (first non-whitespace)   |
+
 ### Normal Mode — Search
 
 | Key           | Action                              |

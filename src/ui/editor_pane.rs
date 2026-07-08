@@ -312,6 +312,10 @@ pub struct EditorPane {
     /// Index into `jump_list`; equals `jump_list.len()` when at the live cursor
     /// (not currently navigating history).
     jump_cursor: usize,
+    /// Named mark positions (`Alt-m<reg>` sets, `` `<reg> ``/`'<reg>` jumps).
+    /// Buffer-local, like Vim's lowercase marks — cleared when a new file
+    /// loads into this pane.
+    marks: std::collections::HashMap<char, Pos>,
     /// Active LSP completion popup, if any.
     completion: Option<CompletionState>,
     /// Request ID of the most recent completion request (to discard stale ones).
@@ -406,6 +410,7 @@ impl EditorPane {
             spell_scheduled: false,
             jump_list: Vec::new(),
             jump_cursor: 0,
+            marks: std::collections::HashMap::new(),
             completion: None,
             completion_request_id: None,
             pane_width_px: 700.0,
@@ -583,6 +588,7 @@ impl EditorPane {
         self.spell_pending = false;
         self.cached_doc_stats = None;
         self.hover_popup = None;
+        self.marks.clear();
     }
 
     /// Record `from` as a jump origin (called before a jump-class motion).
@@ -625,6 +631,25 @@ impl EditorPane {
         }
     }
 
+    /// Jump to mark `reg`, if set.  `first_non_blank` moves to column 0 of
+    /// the mark's line instead of its exact column (`'reg` vs `` `reg ``).
+    /// Records the origin in the jump list, like Vim's mark jumps do.
+    fn jump_to_mark(&mut self, reg: char, first_non_blank: bool) {
+        let Some(&mark) = self.marks.get(&reg) else { return };
+        let line_count = self.buffer.line_count();
+        if mark.line >= line_count {
+            return; // stale mark past the end of a since-shortened buffer
+        }
+        self.record_jump(self.state.cursor());
+        let pos = if first_non_blank {
+            Pos::new(mark.line, 0)
+        } else {
+            mark
+        };
+        self.state.move_cursor_to(pos);
+        self.update_viewport();
+    }
+
     /// Current cursor as an LSP position: `(line, UTF-16 character offset)`.
     fn cursor_lsp_pos(&self) -> (usize, usize) {
         let cur = self.state.cursor();
@@ -663,6 +688,7 @@ impl EditorPane {
         self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
+        self.marks.clear();
         self.refresh_word_target();
         // Notify LSP that a new document was opened.
         self.lsp_doc_opened = false;
@@ -1920,6 +1946,15 @@ impl EditorPane {
             KeymapResult::JumpForward => {
                 cx.stop_propagation();
                 self.jump_forward();
+                cx.notify();
+            }
+            KeymapResult::SetMark(reg) => {
+                cx.stop_propagation();
+                self.marks.insert(reg, self.state.cursor());
+            }
+            KeymapResult::JumpToMark { reg, first_non_blank } => {
+                cx.stop_propagation();
+                self.jump_to_mark(reg, first_non_blank);
                 cx.notify();
             }
             KeymapResult::RequestCompletion => {
