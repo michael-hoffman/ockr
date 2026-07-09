@@ -2384,36 +2384,24 @@ impl MainWindow {
     /// The activity rail — a 40px icon column on the far left that launches
     /// each major surface.  Icons highlight ochre while their surface is open.
     fn render_activity_rail(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
-        // (id, glyph, active, label-for-tooltip, click-handler)
-        //
-        // Each handler calls the real MainWindow method directly, via
-        // cx.listener — NOT cx.dispatch_action(&Foo) on a bare `App`.  The
-        // latter resolves through `App::dispatch_action`, which falls back to
-        // a *global* action listener when it can't resolve the active window;
-        // main.rs registers empty no-op stubs for these exact actions (for
-        // menu/keybinding scaffolding), so that fallback silently did nothing —
-        // the rail's clicks appeared completely dead. cx.listener looks up the
-        // view directly and is the pattern every other click handler in this
-        // codebase uses.
-        let buttons: Vec<(
-            &'static str,
-            &'static str,
-            bool,
-            &'static str,
-            Box<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>,
-        )> = vec![
+        // Handlers call the MainWindow method via cx.listener — NOT
+        // cx.dispatch_action on a bare App, which falls back to main.rs's
+        // no-op global stubs and the clicks go silently dead (shipped bug).
+        type Btn = (&'static str, &'static str, bool, &'static str,
+            fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>));
+        let buttons: [Btn; 6] = [
             ("rail-files", "☰", self.sidebar_visible, "Toggle file sidebar",
-                Box::new(|this, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))),
+                |this, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
             ("rail-search", "⌕", self.vault_search.is_some(), "Vault search",
-                Box::new(|this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx))),
+                |this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx)),
             ("rail-graph", "◎", self.graph_view.is_some(), "Graph view",
-                Box::new(|this, window, cx| this.open_graph_view(&OpenGraphView, window, cx))),
+                |this, window, cx| this.open_graph_view(&OpenGraphView, window, cx)),
             ("rail-outline", "≡", self.outline.is_some(), "Outline",
-                Box::new(|this, window, cx| this.open_outline(&OpenOutline, window, cx))),
+                |this, window, cx| this.open_outline(&OpenOutline, window, cx)),
             ("rail-backlinks", "↩", self.backlinks.is_some(), "Backlinks",
-                Box::new(|this, window, cx| this.open_backlinks(&OpenBacklinks, window, cx))),
+                |this, window, cx| this.open_backlinks(&OpenBacklinks, window, cx)),
             ("rail-plugins", "⬡", self.plugin_manager.is_some(), "Plugin manager",
-                Box::new(|this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx))),
+                |this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx)),
         ];
 
         let mut rail = div()
@@ -2429,11 +2417,7 @@ impl MainWindow {
             .border_color(gpui::rgb(t.border_subtle));
 
         fn make_btn(
-            id: &'static str,
-            glyph: &'static str,
-            active: bool,
-            label: &'static str,
-            on_click: Box<dyn Fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>)>,
+            (id, glyph, active, label, on_click): Btn,
             t: &ThemePalette,
             cx: &Context<MainWindow>,
         ) -> gpui::Stateful<gpui::Div> {
@@ -2455,18 +2439,15 @@ impl MainWindow {
                 .child(glyph)
         }
 
-        for (id, glyph, active, label, action) in buttons {
-            rail = rail.child(make_btn(id, glyph, active, label, action, t, cx));
+        for btn in buttons {
+            rail = rail.child(make_btn(btn, t, cx));
         }
 
         // Settings pinned to the bottom.
         rail = rail.child(div().flex_1()).child(
             make_btn(
-                "rail-settings",
-                "⚙",
-                self.settings_panel.is_some(),
-                "Settings",
-                Box::new(|this, window, cx| this.open_settings(&OpenSettings, window, cx)),
+                ("rail-settings", "⚙", self.settings_panel.is_some(), "Settings",
+                    |this, window, cx| this.open_settings(&OpenSettings, window, cx)),
                 t,
                 cx,
             )
