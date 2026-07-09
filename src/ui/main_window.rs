@@ -86,6 +86,17 @@ enum SplitLayout {
     Horizontal,
 }
 
+/// Which content the sidebar column shows (switched by the activity rail).
+/// Outline/Backlinks are rendered statelessly from the active buffer each
+/// frame, so they can never go stale while docked.
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+enum SidebarPanel {
+    #[default]
+    Files,
+    Outline,
+    Backlinks,
+}
+
 // ── Tab ───────────────────────────────────────────────────────────────────────
 
 /// Saved state for one open file tab within a pane.
@@ -181,6 +192,8 @@ pub struct MainWindow {
     html_link_sender: futures::channel::mpsc::UnboundedSender<String>,
     vault: Entity<VaultState>,
     sidebar_visible: bool,
+    /// Which panel the sidebar column currently shows.
+    sidebar_panel: SidebarPanel,
     sidebar_width: f32,
     preview_width: f32,
     /// `false` until the first render seeds `preview_width` from the window size.
@@ -542,6 +555,7 @@ impl MainWindow {
             html_webview: None,
             vault,
             sidebar_visible: true,
+            sidebar_panel: SidebarPanel::default(),
             sidebar_width: 220.0,
             preview_width: 420.0,
             preview_width_set: false,
@@ -815,6 +829,18 @@ impl MainWindow {
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    /// Rail click on a dockable panel: show it in the sidebar, or drop back to
+    /// the file list if it's already showing.
+    fn toggle_docked_panel(&mut self, panel: SidebarPanel, cx: &mut Context<Self>) {
+        if self.sidebar_visible && self.sidebar_panel == panel {
+            self.sidebar_panel = SidebarPanel::Files;
+        } else {
+            self.sidebar_panel = panel;
+            self.sidebar_visible = true;
+        }
         cx.notify();
     }
 
@@ -2381,6 +2407,113 @@ impl Focusable for MainWindow {
 }
 
 impl MainWindow {
+    /// Shared chrome for a docked sidebar panel: small header + scrollable rows.
+    fn docked_panel(title: &'static str, rows: Vec<gpui::AnyElement>, t: &ThemePalette) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .w_full()
+            .bg(gpui::rgb(t.bg_surface))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .font_family("Menlo")
+                    .text_color(gpui::rgb(t.text_faint))
+                    .border_b_1()
+                    .border_color(gpui::rgb(t.border_subtle))
+                    .child(title),
+            )
+            .child(div().id(title).flex_1().flex().flex_col().overflow_y_scroll().children(rows))
+            .into_any_element()
+    }
+
+    /// Docked outline: headings of the active buffer, re-parsed each render so
+    /// it can't go stale.  Click a row to jump.
+    fn render_docked_outline(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let text = self.active_editor().read(cx).buffer_text();
+        let headings = crate::ui::outline_panel::parse_headings(&text);
+        let rows: Vec<gpui::AnyElement> = if headings.is_empty() {
+            vec![div().px_3().py_2().text_sm().font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint)).child("No headings.").into_any_element()]
+        } else {
+            headings
+                .into_iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let line = h.line;
+                    div()
+                        .id(("outline-row", i))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .py_1()
+                        .pl(px(12.0 + ((h.level.saturating_sub(1)) * 12) as f32))
+                        .text_sm()
+                        .font_family("Menlo")
+                        .text_color(gpui::rgb(t.text_muted))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgb(t.bg_hover)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_editor().clone().update(cx, |pane, cx| {
+                                pane.jump_to_line(line, cx);
+                            });
+                        }))
+                        .child(
+                            div().text_xs().text_color(gpui::rgb(t.ochre)).flex_shrink_0()
+                                .child(format!("H{}", h.level.min(6))),
+                        )
+                        .child(div().overflow_hidden().child(h.title))
+                        .into_any_element()
+                })
+                .collect()
+        };
+        Self::docked_panel("OUTLINE", rows, t)
+    }
+
+    /// Docked backlinks: notes linking to the active one, re-derived from the
+    /// backlink index each render.  Click a row to open that note.
+    fn render_docked_backlinks(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rel_path = self.active_editor().read(cx).current_rel_path().unwrap_or("").to_string();
+        let mut links = if rel_path.is_empty() {
+            vec![]
+        } else {
+            self.vault.read(cx).backlinks.incoming_links(std::path::Path::new(&rel_path))
+        };
+        links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        let rows: Vec<gpui::AnyElement> = if links.is_empty() {
+            vec![div().px_3().py_2().text_sm().font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint)).child("No backlinks.").into_any_element()]
+        } else {
+            links
+                .into_iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let path = f.abs_path.clone();
+                    div()
+                        .id(("backlink-row", i))
+                        .px_3()
+                        .py_1()
+                        .text_sm()
+                        .font_family("Menlo")
+                        .text_color(gpui::rgb(t.text_muted))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgb(t.bg_hover)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_path(path.clone(), cx);
+                        }))
+                        .child(f.title.clone())
+                        .into_any_element()
+                })
+                .collect()
+        };
+        Self::docked_panel("BACKLINKS", rows, t)
+    }
+
     /// The activity rail — a 40px icon column on the far left that launches
     /// each major surface.  Icons highlight ochre while their surface is open.
     fn render_activity_rail(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2390,16 +2523,27 @@ impl MainWindow {
         type Btn = (&'static str, &'static str, bool, &'static str,
             fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>));
         let buttons: [Btn; 6] = [
-            ("rail-files", "☰", self.sidebar_visible, "Toggle file sidebar",
-                |this, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+            ("rail-files", "☰", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Files,
+                "Toggle file sidebar",
+                |this, window, cx| {
+                    if this.sidebar_panel != SidebarPanel::Files {
+                        this.sidebar_panel = SidebarPanel::Files;
+                        this.sidebar_visible = true;
+                        cx.notify();
+                    } else {
+                        this.toggle_sidebar(&ToggleSidebar, window, cx);
+                    }
+                }),
             ("rail-search", "⌕", self.vault_search.is_some(), "Vault search",
                 |this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx)),
             ("rail-graph", "◎", self.graph_view.is_some(), "Graph view",
                 |this, window, cx| this.open_graph_view(&OpenGraphView, window, cx)),
-            ("rail-outline", "≡", self.outline.is_some(), "Outline",
-                |this, window, cx| this.open_outline(&OpenOutline, window, cx)),
-            ("rail-backlinks", "↩", self.backlinks.is_some(), "Backlinks",
-                |this, window, cx| this.open_backlinks(&OpenBacklinks, window, cx)),
+            ("rail-outline", "≡", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Outline,
+                "Outline",
+                |this, _, cx| this.toggle_docked_panel(SidebarPanel::Outline, cx)),
+            ("rail-backlinks", "↩", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Backlinks,
+                "Backlinks",
+                |this, _, cx| this.toggle_docked_panel(SidebarPanel::Backlinks, cx)),
             ("rail-plugins", "⬡", self.plugin_manager.is_some(), "Plugin manager",
                 |this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx)),
         ];
@@ -2724,9 +2868,14 @@ impl Render for MainWindow {
 
         // ── Sidebar ───────────────────────────────────────────────────────────
         if self.sidebar_visible {
+            let content: gpui::AnyElement = match self.sidebar_panel {
+                SidebarPanel::Files => self.sidebar.clone().into_any_element(),
+                SidebarPanel::Outline => self.render_docked_outline(&t, cx),
+                SidebarPanel::Backlinks => self.render_docked_backlinks(&t, cx),
+            };
             root = root
                 .child(div().w(px(self.sidebar_width)).h_full().overflow_hidden()
-                    .child(self.sidebar.clone()))
+                    .child(content))
                 .child(handle(DragTarget::Sidebar, true, cx));
         }
 
