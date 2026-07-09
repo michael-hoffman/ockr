@@ -39,6 +39,12 @@ Status: ✅ done · 🚧 partial · ❌ not started
 | `<N>gg`       | Go to line N                        | ✅     | Count survives `pending_g` |
 | `<N>j`        | Move down N lines                   | ✅     | Count `min(500)` |
 | `<N>k`        | Move up N lines                     | ✅     | Count `min(500)` |
+| `Ctrl-o`      | Jump list back                      | ✅     | Origins recorded on jump-class motions |
+| `Ctrl-i`      | Jump list forward                   | ✅     | |
+| `Alt-m<reg>`  | Set mark                            | ✅     | `m` is the text-object prefix, so set moved to Alt-m |
+| `` `<reg> ``  | Jump to mark (exact)                | ✅     | Buffer-local; records a jump-list entry |
+| `'<reg>`      | Jump to mark's line                 | ✅     | First non-blank |
+| `Ctrl-Space`  | LSP completions                     | ✅     | Popup; Tab/Enter accepts — live-verified vs tinymist |
 
 ---
 
