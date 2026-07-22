@@ -280,30 +280,25 @@ impl KeymapHandler for HelixKeymap {
             }
             return KeymapResult::Passthrough;
         }
-        if self.pending == PendingKey::SurroundDelete {
+        if matches!(
+            self.pending,
+            PendingKey::SurroundDelete | PendingKey::SurroundReplaceFrom | PendingKey::SurroundReplaceTo(_)
+        ) {
+            let pending_kind = self.pending;
             self.pending = PendingKey::None;
             if !k.modifiers.control && !k.modifiers.platform {
                 if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
-                    return KeymapResult::SurroundDelete(ch);
-                }
-            }
-            return KeymapResult::Passthrough;
-        }
-        if self.pending == PendingKey::SurroundReplaceFrom {
-            self.pending = PendingKey::None;
-            if !k.modifiers.control && !k.modifiers.platform {
-                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
-                    self.pending = PendingKey::SurroundReplaceTo(ch);
-                    return KeymapResult::Pending;
-                }
-            }
-            return KeymapResult::Passthrough;
-        }
-        if let PendingKey::SurroundReplaceTo(from) = self.pending {
-            self.pending = PendingKey::None;
-            if !k.modifiers.control && !k.modifiers.platform {
-                if let Some(to) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
-                    return KeymapResult::SurroundReplace { from, to };
+                    return match pending_kind {
+                        PendingKey::SurroundDelete => KeymapResult::SurroundDelete(ch),
+                        PendingKey::SurroundReplaceFrom => {
+                            self.pending = PendingKey::SurroundReplaceTo(ch);
+                            KeymapResult::Pending
+                        }
+                        PendingKey::SurroundReplaceTo(from) => {
+                            KeymapResult::SurroundReplace { from, to: ch }
+                        }
+                        _ => unreachable!(),
+                    };
                 }
             }
             return KeymapResult::Passthrough;

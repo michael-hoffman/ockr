@@ -1144,27 +1144,7 @@ pub fn apply<B: Buffer>(
         // ── Text object selection ──────────────────────────────────────────
         SelectObject { inner, kind } => {
             let pos = state.cursor();
-            let maybe = match kind {
-                TextObjectKind::Word      => obj_word(buf.line(pos.line), pos.col, inner, false)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-                TextObjectKind::WORD      => obj_word(buf.line(pos.line), pos.col, inner, true)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-                TextObjectKind::Paragraph => obj_paragraph(buf, pos, inner),
-                TextObjectKind::Paren     => obj_surround(buf, pos, '(', ')', inner),
-                TextObjectKind::Brace     => obj_surround(buf, pos, '{', '}', inner),
-                TextObjectKind::Bracket | TextObjectKind::TypstContent
-                                          => obj_surround(buf, pos, '[', ']', inner),
-                TextObjectKind::Angle     => obj_surround(buf, pos, '<', '>', inner),
-                TextObjectKind::DoubleQuote => obj_quote(buf.line(pos.line), pos.col, '"', inner)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-                TextObjectKind::SingleQuote => obj_quote(buf.line(pos.line), pos.col, '\'', inner)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-                TextObjectKind::Backtick    => obj_quote(buf.line(pos.line), pos.col, '`', inner)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-                TextObjectKind::InlineMath  => obj_quote(buf.line(pos.line), pos.col, '$', inner)
-                    .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-            };
-            if let Some((start, end)) = maybe {
+            if let Some((start, end)) = text_object_span(buf, pos, inner, kind) {
                 state.selection = Selection { anchor: start, cursor: end };
                 state.extra_selections.clear();
                 state.mode = Mode::Visual(VisualKind::Char);
@@ -1700,6 +1680,38 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Locate the span of `kind` at `pos` (exclusive-end convention), for the
+/// given `inner`/`around` flavour. Shared by `SelectObject` (`mi`/`ma`) and
+/// `md`/`mr` (surround delete/replace), which only need the position, not a
+/// full Visual-mode selection.
+pub fn text_object_span<B: Buffer>(
+    buf: &B,
+    pos: Pos,
+    inner: bool,
+    kind: TextObjectKind,
+) -> Option<(Pos, Pos)> {
+    match kind {
+        TextObjectKind::Word      => obj_word(buf.line(pos.line), pos.col, inner, false)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+        TextObjectKind::WORD      => obj_word(buf.line(pos.line), pos.col, inner, true)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+        TextObjectKind::Paragraph => obj_paragraph(buf, pos, inner),
+        TextObjectKind::Paren     => obj_surround(buf, pos, '(', ')', inner),
+        TextObjectKind::Brace     => obj_surround(buf, pos, '{', '}', inner),
+        TextObjectKind::Bracket | TextObjectKind::TypstContent
+                                  => obj_surround(buf, pos, '[', ']', inner),
+        TextObjectKind::Angle     => obj_surround(buf, pos, '<', '>', inner),
+        TextObjectKind::DoubleQuote => obj_quote(buf.line(pos.line), pos.col, '"', inner)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+        TextObjectKind::SingleQuote => obj_quote(buf.line(pos.line), pos.col, '\'', inner)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+        TextObjectKind::Backtick    => obj_quote(buf.line(pos.line), pos.col, '`', inner)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+        TextObjectKind::InlineMath  => obj_quote(buf.line(pos.line), pos.col, '$', inner)
+            .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
+    }
+}
+
 /// Select inner/around **word** or **WORD** on a single line.
 ///
 /// `whitespace_word`: if `true` treat any non-whitespace run as the "WORD".
@@ -1766,57 +1778,54 @@ fn obj_word(line: &str, col: usize, inner: bool, whitespace_word: bool) -> Optio
     }
 }
 
-/// Append `slice` (from buffer `line` starting at `col_base`) onto `text`,
-/// recording every byte's absolute `Pos` in `offsets` so regex match byte
-/// ranges can be translated back into buffer coordinates.
-fn push_slice(
-    text: &mut String,
-    offsets: &mut std::collections::HashMap<usize, Pos>,
+/// Where one included line's content begins within the flattened selection
+/// text produced by `selection_text_and_anchors`, and where that line begins
+/// in the buffer — enough to map any byte offset in that text back to a
+/// buffer `Pos` via `pos_at`, without recording every individual byte.
+struct LineAnchor {
+    text_start: usize,
     line: usize,
-    slice: &str,
     col_base: usize,
-) {
-    let base = text.len();
-    for (i, _) in slice.char_indices() {
-        offsets.insert(base + i, Pos::new(line, col_base + i));
-    }
+}
+
+/// Append one line's slice onto `text`, recording its `LineAnchor`.
+fn push_line(text: &mut String, anchors: &mut Vec<LineAnchor>, line: usize, slice: &str, col_base: usize) {
+    anchors.push(LineAnchor { text_start: text.len(), line, col_base });
     text.push_str(slice);
 }
 
 /// Extract the text spanned by `[start, end)` (exclusive-end convention,
-/// possibly multi-line) plus a byte-offset → `Pos` map covering every char
-/// boundary in the extracted text (including injected `\n` line joins), with
-/// a final sentinel entry at `text.len()` for a match ending exactly at `end`.
-///
-/// Used by `SelectRegex`/`SplitSelection` to turn regex byte-range matches
-/// back into buffer positions.
-fn selection_text_and_offsets<B: Buffer>(
-    buf: &B,
-    start: Pos,
-    end: Pos,
-) -> (String, std::collections::HashMap<usize, Pos>) {
+/// possibly multi-line, lines joined by `\n`) plus one `LineAnchor` per
+/// included line, for translating regex byte-range matches (`SelectRegex`/
+/// `SplitSelection`) back into buffer positions via `pos_at`.
+fn selection_text_and_anchors<B: Buffer>(buf: &B, start: Pos, end: Pos) -> (String, Vec<LineAnchor>) {
     let mut text = String::new();
-    let mut offsets = std::collections::HashMap::new();
+    let mut anchors = Vec::new();
 
     if start.line == end.line {
         let line = buf.line(start.line);
-        push_slice(&mut text, &mut offsets, start.line, &line[start.col..end.col], start.col);
+        push_line(&mut text, &mut anchors, start.line, &line[start.col..end.col], start.col);
     } else {
         let first = buf.line(start.line);
-        push_slice(&mut text, &mut offsets, start.line, &first[start.col..], start.col);
-        offsets.insert(text.len(), Pos::new(start.line, first.len()));
+        push_line(&mut text, &mut anchors, start.line, &first[start.col..], start.col);
         text.push('\n');
         for l in start.line + 1..end.line {
             let s = buf.line(l).to_string();
-            push_slice(&mut text, &mut offsets, l, &s, 0);
-            offsets.insert(text.len(), Pos::new(l, s.len()));
+            push_line(&mut text, &mut anchors, l, &s, 0);
             text.push('\n');
         }
-        let last = buf.line(end.line);
-        push_slice(&mut text, &mut offsets, end.line, &last[..end.col], 0);
+        push_line(&mut text, &mut anchors, end.line, &buf.line(end.line)[..end.col], 0);
     }
-    offsets.insert(text.len(), end);
-    (text, offsets)
+    (text, anchors)
+}
+
+/// Map a byte offset within text produced by `selection_text_and_anchors`
+/// back to its buffer `Pos` — the anchor for the line it falls in, plus the
+/// offset from that line's start (a `\n` join byte resolves to end-of-line).
+fn pos_at(anchors: &[LineAnchor], offset: usize) -> Pos {
+    let a = anchors.iter().rev().find(|a| a.text_start <= offset)
+        .expect("anchors always start at text offset 0");
+    Pos::new(a.line, a.col_base + (offset - a.text_start))
 }
 
 /// `SelectRegex`/`SplitSelection` (Helix `s`/`S`): run `pattern` against the
@@ -1838,24 +1847,24 @@ fn apply_regex_select<B: Buffer>(
     };
     let sel_start = state.selection.start();
     let sel_end = state.selection.end();
-    let (text, offsets) = selection_text_and_offsets(buf, sel_start, sel_end);
+    let (text, anchors) = selection_text_and_anchors(buf, sel_start, sel_end);
 
     let mut ranges: Vec<(Pos, Pos)> = Vec::new();
     if split {
         let mut cursor = 0usize;
         for m in re.find_iter(&text) {
             if m.start() > cursor {
-                ranges.push((offsets[&cursor], offsets[&m.start()]));
+                ranges.push((pos_at(&anchors, cursor), pos_at(&anchors, m.start())));
             }
             cursor = m.end();
         }
         if cursor < text.len() {
-            ranges.push((offsets[&cursor], offsets[&text.len()]));
+            ranges.push((pos_at(&anchors, cursor), pos_at(&anchors, text.len())));
         }
     } else {
         for m in re.find_iter(&text) {
             if !m.as_str().is_empty() {
-                ranges.push((offsets[&m.start()], offsets[&m.end()]));
+                ranges.push((pos_at(&anchors, m.start()), pos_at(&anchors, m.end())));
             }
         }
     }

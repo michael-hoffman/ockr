@@ -1081,18 +1081,26 @@ impl EditorPane {
         });
     }
 
+    /// Restore the selection saved when a regex prompt opened (Escape, or an
+    /// empty pattern confirmed with Enter).
+    fn restore_regex_prompt_selection(&mut self, p: RegexPromptState) {
+        self.state.selection = p.saved_selection;
+        self.state.extra_selections = p.saved_extra_selections;
+    }
+
     /// Route a keystroke to the `s`/`S` regex-pattern prompt while it is open.
     fn handle_regex_prompt_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
         match k.key.as_str() {
             "escape" => {
                 if let Some(p) = self.regex_prompt.take() {
-                    self.state.selection = p.saved_selection;
-                    self.state.extra_selections = p.saved_extra_selections;
+                    self.restore_regex_prompt_selection(p);
                 }
             }
             "enter" => {
                 if let Some(p) = self.regex_prompt.take() {
-                    if !p.query.is_empty() {
+                    if p.query.is_empty() {
+                        self.restore_regex_prompt_selection(p);
+                    } else {
                         let cmd = if p.split {
                             EditorCommand::SplitSelection(p.query)
                         } else {
@@ -1102,9 +1110,6 @@ impl EditorPane {
                         let (new_state, _) = apply(cmd, prev, &mut self.buffer);
                         self.state = new_state;
                         self.update_viewport();
-                    } else {
-                        self.state.selection = p.saved_selection;
-                        self.state.extra_selections = p.saved_extra_selections;
                     }
                 }
             }
@@ -2969,6 +2974,10 @@ impl Render for EditorPane {
                 .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
         });
 
+        // Whether either bottom bar (search or regex-prompt) is showing —
+        // popups below reserve the same 28px either way.
+        let bar_open = search_bar.is_some() || regex_bar.is_some();
+
         // ── Wikilink autocomplete popup ───────────────────────────────────────
         // Positioned immediately below and to the right of the `[[` opening on
         // the cursor line, using approximate fixed character metrics.
@@ -2982,7 +2991,7 @@ impl Render for EditorPane {
                 0.0
             };
             // Leave vertical room for the search bar when it is open.
-            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if bar_open { 28.0_f32 } else { 0.0 };
             let popup_left = px(PADDING + gutter_w + wl.open_col as f32 * CHAR_W);
             let popup_top = px(
                 search_h
@@ -3031,7 +3040,7 @@ impl Render for EditorPane {
             } else {
                 0.0
             };
-            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if bar_open { 28.0_f32 } else { 0.0 };
             let left = px(PADDING + gutter_w + c.anchor_col as f32 * CHAR_W);
             let top = px(
                 search_h
@@ -3093,7 +3102,7 @@ impl Render for EditorPane {
         let hover_popup = self.hover_popup.as_ref().map(|content| {
             const LINE_H: f32 = 20.0;
             const PADDING: f32 = 16.0;
-            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if bar_open { 28.0_f32 } else { 0.0 };
             // Y of the cursor line within the pane.
             let cursor_row = cursor.line.saturating_sub(self.viewport_top) as f32;
             let cursor_line_y = search_h + PADDING + cursor_row * LINE_H;
@@ -4128,26 +4137,13 @@ impl EditorPane {
     /// Returns the exact `(open, close)` byte positions of the two
     /// single-character delimiters, via the same "around" text-object lookup
     /// `mi`/`ma` already use.
-    fn find_surround_pair(&mut self, delim: char) -> Option<(Pos, Pos)> {
+    fn find_surround_pair(&self, delim: char) -> Option<(Pos, Pos)> {
         let kind = delim_text_object_kind(delim)?;
-        let prev = std::mem::take(&mut self.state);
-        let restore_mode = prev.mode;
-        let restore_selection = prev.selection;
-        let (sel_state, _) = apply(EditorCommand::SelectObject { inner: false, kind }, prev, &mut self.buffer);
-        self.state = sel_state;
-        // `SelectObject`'s "around" span is `[open_col, close_col_exclusive)`
-        // (Rust-slice style) — the close delimiter's own byte sits one before
-        // that exclusive end. All supported delimiters are single-byte ASCII.
-        let found = matches!(self.state.mode, Mode::Visual(_)).then(|| {
-            let open = self.state.selection.start();
-            let end = self.state.selection.end();
-            (open, Pos::new(end.line, end.col.saturating_sub(1)))
-        });
-        // SelectObject entered Visual mode as a side effect; undo that, this
-        // isn't a real selection request.
-        self.state.mode = restore_mode;
-        self.state.selection = restore_selection;
-        found
+        let (open, end) = crate::editor::apply::text_object_span(&self.buffer, self.state.cursor(), false, kind)?;
+        // The "around" span is `[open_col, close_col_exclusive)` (Rust-slice
+        // style) — the close delimiter's own byte sits one before that
+        // exclusive end. All supported delimiters are single-byte ASCII.
+        Some((open, Pos::new(end.line, end.col.saturating_sub(1))))
     }
 
     /// Delete the surrounding pair matching `delim` around the cursor (`md<delim>`).
