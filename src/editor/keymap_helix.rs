@@ -66,6 +66,8 @@ enum PendingKey {
     MarkJumpExact,
     /// `'` pressed; awaiting the mark register to jump to (line, first non-blank).
     MarkJumpLine,
+    /// `Space` pressed (Normal mode); awaiting the leader-menu mnemonic key.
+    Space,
 }
 
 // ── HelixKeymap ──────────────────────────────────────────────────────────────
@@ -669,6 +671,28 @@ impl KeymapHandler for HelixKeymap {
             return KeymapResult::Passthrough;
         }
 
+        // ── `Space` leader menu (Normal mode) ────────────────────────────
+        // Bare Space is otherwise unbound in Normal mode (it only inserts a
+        // literal space in Insert mode), so it's free to use as a leader key.
+        if state.mode == Mode::Normal
+            && self.pending == PendingKey::None
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && (k.key == " " || k.key == "space")
+        {
+            self.pending = PendingKey::Space;
+            return KeymapResult::Pending;
+        }
+        if self.pending == PendingKey::Space {
+            self.pending = PendingKey::None;
+            if !k.modifiers.platform && !k.modifiers.control {
+                if let Some(id) = space_menu_id(k.key_char.as_deref().unwrap_or(&k.key)) {
+                    return KeymapResult::SpaceMenu(id);
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+
         // ── Count-qualified motions ──────────────────────────────────────
         // `<N>G` → jump to line N; `<N>j`/`<N>k` → move N lines.
         if in_modal && count > 0 && !k.modifiers.platform && !k.modifiers.control {
@@ -1008,6 +1032,22 @@ pub fn delim_text_object_kind(c: char) -> Option<TextObjectKind> {
     }
 }
 
+/// Map a `Space<c>` leader-menu mnemonic to its command-palette id. Kept to a
+/// small, high-value set of already-existing commands — see `docs/keymap.md`.
+fn space_menu_id(c: &str) -> Option<&'static str> {
+    Some(match c {
+        "f" => "open-file-picker",
+        "s" => "vault-search",
+        "o" => "open-outline",
+        "b" => "open-backlinks",
+        "g" => "open-graph-view",
+        "p" => "open-plugin-manager",
+        "d" => "open-daily-note",
+        "n" => "new-note",
+        _ => return None,
+    })
+}
+
 /// The literal open/close delimiter pair to insert for `mr<from><to>`'s `to`
 /// character. `to` may be any single character, in which case it's used as
 /// both open and close (matching Helix's behaviour for e.g. `mr(*` → `*...*`).
@@ -1043,5 +1083,13 @@ mod surround_helper_tests {
     fn delim_pair_for_symmetric_char_is_same_both_sides() {
         assert_eq!(delim_pair_for('*'), ("*".to_string(), "*".to_string()));
         assert_eq!(delim_pair_for('"'), ("\"".to_string(), "\"".to_string()));
+    }
+
+    #[test]
+    fn space_menu_ids_are_recognised_and_unmapped_keys_are_none() {
+        for &c in &["f", "s", "o", "b", "g", "p", "d", "n"] {
+            assert!(space_menu_id(c).is_some(), "{c:?} should map to a palette id");
+        }
+        assert_eq!(space_menu_id("q"), None);
     }
 }

@@ -124,6 +124,11 @@ pub enum KeymapResult {
     SurroundDelete(char),
     /// Replace the surrounding pair matching `from` with the pair for `to` (`mr<from><to>`).
     SurroundReplace { from: char, to: char },
+    /// `Space<c>` leader menu resolved to command-palette id `id` (e.g. `"open-file-picker"`).
+    /// The caller (`EditorPane`) doesn't execute palette commands itself — it forwards
+    /// `id` up to `MainWindow` via `EditorPaneEvent::SpaceMenu`, the same executor the
+    /// command palette itself uses.
+    SpaceMenu(&'static str),
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

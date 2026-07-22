@@ -188,6 +188,9 @@ pub enum EditorPaneEvent {
     OpenFile(PathBuf),
     /// Request that MainWindow open the command palette.
     OpenPalette,
+    /// `Space<c>` leader menu resolved to command-palette id `id` — MainWindow
+    /// executes it via the same path as a palette selection.
+    SpaceMenu(&'static str),
 }
 
 impl EventEmitter<EditorPaneEvent> for EditorPane {}
@@ -1830,6 +1833,10 @@ impl EditorPane {
             KeymapResult::OpenPalette => {
                 cx.stop_propagation();
                 cx.emit(EditorPaneEvent::OpenPalette);
+            }
+            KeymapResult::SpaceMenu(id) => {
+                cx.stop_propagation();
+                cx.emit(EditorPaneEvent::SpaceMenu(id));
             }
             KeymapResult::OperatorMotion { op, motion } => {
                 cx.stop_propagation();

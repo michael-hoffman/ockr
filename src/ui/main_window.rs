@@ -607,6 +607,9 @@ impl MainWindow {
                     this.open_palette_pending = true;
                     cx.notify();
                 }
+                EditorPaneEvent::SpaceMenu(id) => {
+                    this.handle_palette_execute(id, cx);
+                }
             }
         }).detach();
     }

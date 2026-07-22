@@ -164,6 +164,24 @@ Persistent highlights: matches stay dimmed after search bar closes (Enter);
 
 ---
 
+## Normal Mode — Space Leader Menu
+
+| Key(s)       | Helix action                        | Status | Notes |
+|--------------|--------------------------------------|--------|-------|
+| `Space f`    | File picker                         | ✅     | Routes through the same executor as the command palette |
+| `Space s`    | Vault search                        | ✅     | |
+| `Space o`    | Outline panel                       | ✅     | |
+| `Space b`    | Backlinks panel                     | ✅     | |
+| `Space g`    | Graph view                          | ✅     | |
+| `Space p`    | Plugin manager                      | ✅     | |
+| `Space d`    | Daily note                          | ✅     | |
+| `Space n`    | New note                            | ✅     | |
+| `Space a` (code action) | —                         | ❌     | No LSP code-action support yet |
+| `Space r` (rename) | —                                  | ❌     | No LSP rename support yet |
+| `Space w` (window menu) | —                         | ❌     | Split/close pane already have dedicated bindings; no menu wrapper |
+
+---
+
 ## LSP (tinymist)
 
 Background JSON-RPC client (`src/lsp/mod.rs`). Disabled silently if `tinymist`

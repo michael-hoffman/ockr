@@ -145,6 +145,22 @@ selection needed.
 
 `<delim>` / `<new>` accept `(`/`)`, `{`/`}`, `[`/`]`, `<`/`>`, `"`, `'`, `` ` ``, `$`.
 
+### Normal Mode — Space Leader Menu
+
+`Space` is otherwise unbound in Normal mode, so `Space<c>` is a quick launcher
+for commands also reachable through the command palette (`:`).
+
+| Key         | Action              |
+|-------------|---------------------|
+| `Space f`   | File picker         |
+| `Space s`   | Vault search        |
+| `Space o`   | Outline panel       |
+| `Space b`   | Backlinks panel     |
+| `Space g`   | Graph view          |
+| `Space p`   | Plugin manager      |
+| `Space d`   | Open/create today's daily note |
+| `Space n`   | New note            |
+
 ### Normal Mode — Search
 
 | Key           | Action                              |
