@@ -196,6 +196,16 @@ pub enum EditorCommand {
     /// matches (`S`) — the complement of `SelectRegex`.
     SplitSelection(String),
 
+    // ── Syntax-aware expand/shrink selection (Helix `Alt-o` / `Alt-i`) ──────
+    /// Grow the selection to the next enclosing syntax node. From Normal mode
+    /// this selects the smallest node at the cursor and enters Visual mode.
+    /// No-op if the buffer doesn't parse or the selection is already the
+    /// whole document.
+    ExpandSelection,
+    /// Shrink back to the selection saved by the last `ExpandSelection`.
+    /// No-op if there's nothing to shrink back to.
+    ShrinkSelection,
+
     // ── Mode transitions ───────────────────────────────────────────────────
     /// Enter Normal mode (Escape / Ctrl-[).
     EnterNormal,

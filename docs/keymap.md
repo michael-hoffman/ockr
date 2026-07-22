@@ -52,6 +52,8 @@ The active mode is shown in the status bar (`NORMAL` / `INSERT` / `STANDARD`).
 | `gv`          | Reselect last visual selection      |
 | `;`           | Collapse selection to cursor        |
 | `_`           | Trim whitespace from selection ends |
+| `Alt-o`       | Expand selection to the next enclosing syntax node |
+| `Alt-i`       | Shrink back to the selection before the last `Alt-o` |
 
 ### Normal Mode — Text Objects (select-then-act)
 
@@ -144,6 +146,15 @@ selection needed.
 | `mr<delim><new>`    | Replace the surrounding `<delim>` pair with `<new>`       |
 
 `<delim>` / `<new>` accept `(`/`)`, `{`/`}`, `[`/`]`, `<`/`>`, `"`, `'`, `` ` ``, `$`.
+
+### Normal / Visual Mode — Expand/Shrink Selection
+
+`Alt-o` grows the selection to the next enclosing Typst syntax node (parsed
+fresh each time via tree-sitter — no incremental tree is kept between edits).
+From Normal mode it first selects the smallest node at the cursor and enters
+Visual mode; repeating keeps climbing outward (word → call → block → …).
+`Alt-i` steps back down through the same sequence. Both are no-ops if the
+buffer doesn't parse or there's nothing further to expand/shrink to.
 
 ### Normal Mode — Space Leader Menu
 

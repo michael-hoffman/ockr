@@ -410,6 +410,7 @@ pub fn apply<B: Buffer>(
                     let primary_pos = collapsed.next().unwrap_or(primary_start);
                     state.extra_cursors = collapsed.collect();
                     state.extra_selections.clear();
+                    state.expand_stack.clear();
                     state.move_cursor_to(primary_pos);
                 }
                 _ => {
@@ -891,6 +892,7 @@ pub fn apply<B: Buffer>(
                 cursor: pos,
             };
             state.extra_selections.clear();
+            state.expand_stack.clear();
             state.mode = Mode::Visual(VisualKind::Char);
             (state, None)
         }
@@ -903,6 +905,7 @@ pub fn apply<B: Buffer>(
                 cursor: Pos::new(line, line_len),
             };
             state.extra_selections.clear();
+            state.expand_stack.clear();
             state.mode = Mode::Visual(VisualKind::Line);
             (state, None)
         }
@@ -1147,6 +1150,7 @@ pub fn apply<B: Buffer>(
             if let Some((start, end)) = text_object_span(buf, pos, inner, kind) {
                 state.selection = Selection { anchor: start, cursor: end };
                 state.extra_selections.clear();
+                state.expand_stack.clear();
                 state.mode = Mode::Visual(VisualKind::Char);
             }
             (state, None)
@@ -1155,6 +1159,40 @@ pub fn apply<B: Buffer>(
         // ── Multi-select (Helix `s` / `S`) ──────────────────────────────────
         SelectRegex(pattern) => (apply_regex_select(state, buf, &pattern, false), None),
         SplitSelection(pattern) => (apply_regex_select(state, buf, &pattern, true), None),
+
+        // ── Syntax-aware expand/shrink selection (Helix `Alt-o` / `Alt-i`) ───
+        ExpandSelection => {
+            let (sel_start, sel_end) = if matches!(state.mode, Mode::Visual(_)) {
+                (state.selection.start(), state.selection.end())
+            } else {
+                let p = state.cursor();
+                (p, p)
+            };
+            // Reuse the same line-anchor machinery `s`/`S` use for regex
+            // byte-offset↔Pos translation, just spanning the whole buffer
+            // (col_base is 0 on every line, so Pos→offset is a direct index).
+            let last_line = buf.line_count().saturating_sub(1);
+            let whole_end = Pos::new(last_line, buf.line(last_line).len());
+            let (text, anchors) = selection_text_and_anchors(buf, Pos::new(0, 0), whole_end);
+            let start_off = anchors[sel_start.line].text_start + sel_start.col;
+            let end_off = anchors[sel_end.line].text_start + sel_end.col;
+            if let Some((new_start, new_end)) = crate::editor::syntax::expand_selection(&text, start_off, end_off) {
+                state.expand_stack.push(Selection { anchor: sel_start, cursor: sel_end });
+                state.selection = Selection {
+                    anchor: pos_at(&anchors, new_start),
+                    cursor: pos_at(&anchors, new_end),
+                };
+                state.mode = Mode::Visual(VisualKind::Char);
+            }
+            (state, None)
+        }
+        ShrinkSelection => {
+            if let Some(prev) = state.expand_stack.pop() {
+                state.selection = prev;
+                state.mode = Mode::Visual(VisualKind::Char);
+            }
+            (state, None)
+        }
 
         // ── Mode transitions ───────────────────────────────────────────────
         EnterNormal => {
@@ -1166,6 +1204,7 @@ pub fn apply<B: Buffer>(
                 state.move_cursor_to(start);
             }
             state.extra_selections.clear();
+            state.expand_stack.clear();
             state.mode = Mode::Normal;
             // In Normal mode the cursor must not sit past the last character.
             let pos = state.cursor();
@@ -1551,6 +1590,7 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 ///
 /// Handles both single-line and multi-line selections.  The returned string
 /// does **not** end with `\n` unless the selection crosses a line boundary.
+
 /// Collect the primary selection plus any `extra_selections`, each normalized
 /// to `(start, end)` and deduplicated. Used by `DeleteSelection` to fan out
 /// across a multi-select (`s`/`S`) instead of just the primary.

@@ -126,6 +126,10 @@ pub struct EditorState {
     /// multi-select.  `DeleteSelection`/`ChangeSelection` fan out across all
     /// of them, then collapse into `extra_cursors` for simultaneous editing.
     pub extra_selections: Vec<Selection>,
+    /// Selections to restore on `Alt-i` (shrink), pushed by `Alt-o` (expand)
+    /// before growing to the next enclosing syntax node. Empty outside an
+    /// expand/shrink sequence.
+    pub expand_stack: Vec<Selection>,
 }
 
 impl EditorState {
@@ -142,6 +146,7 @@ impl EditorState {
             last_insert_pos: None,
             last_modified_pos: None,
             extra_selections: Vec::new(),
+            expand_stack: Vec::new(),
         }
     }
 

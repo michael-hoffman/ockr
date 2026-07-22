@@ -84,6 +84,8 @@ back into view if it scrolls off). Pure `viewport_top` ops, not `EditorCommand`
 | `Alt-C`       | Add cursor above                    | ✅     | Multi-cursor |
 | `,`           | Keep only primary cursor            | ✅     | Collapse multi-cursor |
 | `Alt-,`       | Remove primary cursor               | ✅     | |
+| `Alt-o`       | Expand selection to enclosing syntax node | ✅ | tree-sitter (`codebook-tree-sitter-typst`), reparses fresh each call |
+| `Alt-i`       | Shrink to previous expand step      | ✅     | `state.expand_stack` |
 
 ---
 

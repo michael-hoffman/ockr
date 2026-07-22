@@ -531,6 +531,21 @@ impl KeymapHandler for HelixKeymap {
             }
         }
 
+        // ── Expand/shrink selection (`Alt-o` / `Alt-i`) ─────────────────
+        if in_modal
+            && self.pending == PendingKey::None
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && k.modifiers.alt
+        {
+            if k.key == "o" {
+                return KeymapResult::Command(EditorCommand::ExpandSelection);
+            }
+            if k.key == "i" {
+                return KeymapResult::Command(EditorCommand::ShrinkSelection);
+            }
+        }
+
         // ── `/`, `?` search and `n`/`N`/`*`/`#` ────────────────────────
         if in_modal && !k.modifiers.platform && !k.modifiers.control {
             let is_slash = k.key == "/" || k.key_char.as_deref() == Some("/");
