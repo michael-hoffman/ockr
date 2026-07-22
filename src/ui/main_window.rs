@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Render, Window, div, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, Window, div, prelude::*, px,
 };
 
 use crate::actions::{
@@ -194,6 +194,13 @@ pub struct MainWindow {
     sidebar_visible: bool,
     /// Which panel the sidebar column currently shows.
     sidebar_panel: SidebarPanel,
+    /// Focus target for the docked Outline/Backlinks panel's keyboard nav
+    /// (j/k/Enter) — separate from `focus_handle` since the editor usually
+    /// holds that one.
+    docked_panel_focus: FocusHandle,
+    /// Selected row in the currently docked panel. Reset whenever the docked
+    /// panel switches; clamped to the live row count at use.
+    docked_selected: usize,
     sidebar_width: f32,
     preview_width: f32,
     /// `false` until the first render seeds `preview_width` from the window size.
@@ -556,6 +563,8 @@ impl MainWindow {
             vault,
             sidebar_visible: true,
             sidebar_panel: SidebarPanel::default(),
+            docked_panel_focus: cx.focus_handle(),
+            docked_selected: 0,
             sidebar_width: 220.0,
             preview_width: 420.0,
             preview_width_set: false,
@@ -702,6 +711,20 @@ impl MainWindow {
                     });
                 }
             }
+            LspMessage::RenameResult { request_id, result } => {
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, cx| {
+                        pane.set_rename_result(request_id, result.clone(), cx);
+                    });
+                }
+            }
+            LspMessage::CodeActionResult { request_id, actions } => {
+                for entry in &self.panes {
+                    entry.editor.update(cx, |pane, cx| {
+                        pane.set_code_action_result(request_id, actions.clone(), cx);
+                    });
+                }
+            }
             LspMessage::Unavailable => {
                 // tinymist not found or crashed — clear the handle silently.
                 self.lsp = None;
@@ -844,6 +867,7 @@ impl MainWindow {
             self.sidebar_panel = panel;
             self.sidebar_visible = true;
         }
+        self.docked_selected = 0;
         cx.notify();
     }
 
@@ -1906,6 +1930,16 @@ impl MainWindow {
             }
             "vault-search" => cx.dispatch_action(&OpenVaultSearch),
             "open-daily-note" => cx.dispatch_action(&OpenDailyNote),
+            "code-action" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.request_code_action(cx);
+                });
+            }
+            "rename-symbol" => {
+                self.active_editor().clone().update(cx, |pane, cx| {
+                    pane.open_rename_prompt(cx);
+                });
+            }
             "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
             "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
             "close-pane" => cx.dispatch_action(&ClosePane),
@@ -2410,14 +2444,75 @@ impl Focusable for MainWindow {
 }
 
 impl MainWindow {
-    /// Shared chrome for a docked sidebar panel: small header + scrollable rows.
-    fn docked_panel(title: &'static str, rows: Vec<gpui::AnyElement>, t: &ThemePalette) -> gpui::AnyElement {
+    /// Headings of the active buffer, for the docked Outline panel and its
+    /// keyboard nav — re-parsed on demand so it can't go stale.
+    fn docked_outline_headings(&self, cx: &Context<Self>) -> Vec<crate::ui::outline_panel::OutlineHeading> {
+        let text = self.active_editor().read(cx).buffer_text();
+        crate::ui::outline_panel::parse_headings(&text)
+    }
+
+    /// Notes linking to the active one, for the docked Backlinks panel and
+    /// its keyboard nav — re-derived from the backlink index on demand.
+    fn docked_backlink_files(&self, cx: &Context<Self>) -> Vec<crate::vault::VaultFile> {
+        let rel_path = self.active_editor().read(cx).current_rel_path().unwrap_or("").to_string();
+        let mut links = if rel_path.is_empty() {
+            vec![]
+        } else {
+            self.vault.read(cx).backlinks.incoming_links(std::path::Path::new(&rel_path))
+        };
+        links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        links
+    }
+
+    /// j/k/Enter navigation for whichever docked panel (Outline/Backlinks) is
+    /// showing — mirrors the overlay `OutlinePanel`/`BacklinkPanel`'s own
+    /// key handling, scoped to `docked_panel_focus` instead of a modal.
+    fn handle_docked_panel_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let k = &event.keystroke;
+        let len = match self.sidebar_panel {
+            SidebarPanel::Outline => self.docked_outline_headings(cx).len(),
+            SidebarPanel::Backlinks => self.docked_backlink_files(cx).len(),
+            SidebarPanel::Files => return,
+        };
+        if len == 0 {
+            return;
+        }
+        if k.key == "up" || (k.modifiers.control && k.key == "k") {
+            self.docked_selected = self.docked_selected.saturating_sub(1);
+            cx.notify();
+        } else if k.key == "down" || (k.modifiers.control && k.key == "j") {
+            self.docked_selected = (self.docked_selected + 1).min(len - 1);
+            cx.notify();
+        } else if k.key == "enter" {
+            let selected = self.docked_selected.min(len - 1);
+            match self.sidebar_panel {
+                SidebarPanel::Outline => {
+                    let line = self.docked_outline_headings(cx)[selected].line;
+                    self.active_editor().clone().update(cx, |pane, cx| {
+                        pane.jump_to_line(line, cx);
+                    });
+                }
+                SidebarPanel::Backlinks => {
+                    let path = self.docked_backlink_files(cx)[selected].abs_path.clone();
+                    self.open_path(path, cx);
+                }
+                SidebarPanel::Files => {}
+            }
+        }
+    }
+
+    /// Shared chrome for a docked sidebar panel: small header + scrollable,
+    /// keyboard-navigable rows (click a row, or focus the panel and use
+    /// j/k/Enter — see `handle_docked_panel_key`).
+    fn docked_panel(&self, title: &'static str, rows: Vec<gpui::AnyElement>, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex()
             .flex_col()
             .h_full()
             .w_full()
             .bg(gpui::rgb(t.bg_surface))
+            .track_focus(&self.docked_panel_focus)
+            .on_key_down(cx.listener(Self::handle_docked_panel_key))
             .child(
                 div()
                     .px_3()
@@ -2436,8 +2531,8 @@ impl MainWindow {
     /// Docked outline: headings of the active buffer, re-parsed each render so
     /// it can't go stale.  Click a row to jump.
     fn render_docked_outline(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let text = self.active_editor().read(cx).buffer_text();
-        let headings = crate::ui::outline_panel::parse_headings(&text);
+        let headings = self.docked_outline_headings(cx);
+        let selected = self.docked_selected.min(headings.len().saturating_sub(1));
         let rows: Vec<gpui::AnyElement> = if headings.is_empty() {
             vec![div().px_3().py_2().text_sm().font_family("Menlo")
                 .text_color(gpui::rgb(t.text_faint)).child("No headings.").into_any_element()]
@@ -2459,9 +2554,11 @@ impl MainWindow {
                         .text_sm()
                         .font_family("Menlo")
                         .text_color(gpui::rgb(t.text_muted))
+                        .when(i == selected, |d| d.bg(gpui::rgb(t.bg_hover)))
                         .cursor_pointer()
                         .hover(|s| s.bg(gpui::rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.docked_selected = i;
                             this.active_editor().clone().update(cx, |pane, cx| {
                                 pane.jump_to_line(line, cx);
                             });
@@ -2475,19 +2572,14 @@ impl MainWindow {
                 })
                 .collect()
         };
-        Self::docked_panel("OUTLINE", rows, t)
+        self.docked_panel("OUTLINE", rows, t, cx)
     }
 
     /// Docked backlinks: notes linking to the active one, re-derived from the
     /// backlink index each render.  Click a row to open that note.
     fn render_docked_backlinks(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let rel_path = self.active_editor().read(cx).current_rel_path().unwrap_or("").to_string();
-        let mut links = if rel_path.is_empty() {
-            vec![]
-        } else {
-            self.vault.read(cx).backlinks.incoming_links(std::path::Path::new(&rel_path))
-        };
-        links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        let links = self.docked_backlink_files(cx);
+        let selected = self.docked_selected.min(links.len().saturating_sub(1));
         let rows: Vec<gpui::AnyElement> = if links.is_empty() {
             vec![div().px_3().py_2().text_sm().font_family("Menlo")
                 .text_color(gpui::rgb(t.text_faint)).child("No backlinks.").into_any_element()]
@@ -2504,9 +2596,11 @@ impl MainWindow {
                         .text_sm()
                         .font_family("Menlo")
                         .text_color(gpui::rgb(t.text_muted))
+                        .when(i == selected, |d| d.bg(gpui::rgb(t.bg_hover)))
                         .cursor_pointer()
                         .hover(|s| s.bg(gpui::rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.docked_selected = i;
                             this.open_path(path.clone(), cx);
                         }))
                         .child(f.title.clone())
@@ -2514,7 +2608,7 @@ impl MainWindow {
                 })
                 .collect()
         };
-        Self::docked_panel("BACKLINKS", rows, t)
+        self.docked_panel("BACKLINKS", rows, t, cx)
     }
 
     /// The activity rail — a 40px icon column on the far left that launches
@@ -2543,10 +2637,16 @@ impl MainWindow {
                 |this, window, cx| this.open_graph_view(&OpenGraphView, window, cx)),
             ("rail-outline", "≡", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Outline,
                 "Outline",
-                |this, _, cx| this.toggle_docked_panel(SidebarPanel::Outline, cx)),
+                |this, window, cx| {
+                    this.toggle_docked_panel(SidebarPanel::Outline, cx);
+                    this.docked_panel_focus.clone().focus(window);
+                }),
             ("rail-backlinks", "↩", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Backlinks,
                 "Backlinks",
-                |this, _, cx| this.toggle_docked_panel(SidebarPanel::Backlinks, cx)),
+                |this, window, cx| {
+                    this.toggle_docked_panel(SidebarPanel::Backlinks, cx);
+                    this.docked_panel_focus.clone().focus(window);
+                }),
             ("rail-plugins", "⬡", self.plugin_manager.is_some(), "Plugin manager",
                 |this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx)),
         ];

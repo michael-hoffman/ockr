@@ -160,6 +160,16 @@ for commands also reachable through the command palette (`:`).
 | `Space p`   | Plugin manager      |
 | `Space d`   | Open/create today's daily note |
 | `Space n`   | New note            |
+| `Space a`   | Code action (applies directly if there's one; picker if several) |
+| `Space r`   | Rename symbol at cursor |
+
+`Space a` / `Space r` need `tinymist` running (same requirement as `gd`/`K`).
+Edits from either only apply to the current file — a response touching other
+files skips those (this codebase can't mutate a buffer that isn't open).
+
+The docked Outline/Backlinks panels (`Space o` / `Space b`) support keyboard
+nav once focused (click a row, or opening the panel focuses it automatically):
+`j`/`k`/arrows to move, `Enter` to jump/open.
 
 ### Normal Mode — Search
 

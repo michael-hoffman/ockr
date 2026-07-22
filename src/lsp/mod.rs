@@ -22,6 +22,9 @@
 //! | `textDocument/publishDiagnostics`| gutter   |
 //! | `textDocument/hover`             | `K`      |
 //! | `textDocument/definition`        | `gd`     |
+//! | `textDocument/completion`        | `Ctrl-Space` |
+//! | `textDocument/codeAction`        | `Space a` |
+//! | `textDocument/rename`            | `Space r` |
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -101,6 +104,28 @@ pub struct CompletionItem {
     pub detail: Option<String>,
 }
 
+/// A single text replacement from a `WorkspaceEdit`, in LSP (UTF-16) coordinates.
+#[derive(Debug, Clone)]
+pub struct LspTextEdit {
+    pub range: LspRange,
+    pub new_text: String,
+}
+
+/// A `WorkspaceEdit`, flattened to `(file URI, edits)` pairs. Both
+/// `textDocument/rename` and a chosen `CodeAction` produce this shape.
+pub type WorkspaceEdits = Vec<(String, Vec<LspTextEdit>)>;
+
+/// One available code action (`textDocument/codeAction`).
+///
+/// Only actions carrying a direct `edit` (a `WorkspaceEdit`) are surfaced —
+/// actions that require `workspace/executeCommand` round-trips are skipped,
+/// since applying an arbitrary server command isn't modeled here.
+#[derive(Debug, Clone)]
+pub struct CodeAction {
+    pub title: String,
+    pub edits: WorkspaceEdits,
+}
+
 /// A message produced by the LSP thread and delivered to the UI thread.
 pub enum LspMessage {
     /// Diagnostics for the given URI (may be empty = all clear).
@@ -123,6 +148,16 @@ pub enum LspMessage {
         request_id: i64,
         items: Vec<CompletionItem>,
     },
+    /// Result of a `textDocument/rename` request.
+    RenameResult {
+        request_id: i64,
+        result: Option<WorkspaceEdits>,
+    },
+    /// Result of a `textDocument/codeAction` request.
+    CodeActionResult {
+        request_id: i64,
+        actions: Vec<CodeAction>,
+    },
     /// The language server was unavailable or crashed.
     Unavailable,
 }
@@ -134,6 +169,8 @@ enum LspRequest {
     DidChange { uri: String, version: i32, text: String },
     Hover { uri: String, line: usize, col: usize, id: i64 },
     Definition { uri: String, line: usize, col: usize, id: i64 },
+    Rename { uri: String, line: usize, col: usize, new_name: String, id: i64 },
+    CodeAction { uri: String, line: usize, col: usize, id: i64 },
     Completion { uri: String, line: usize, col: usize, id: i64 },
     #[allow(dead_code)] // sent when LspHandle is explicitly shut down
     Shutdown,
@@ -178,6 +215,20 @@ impl LspHandle {
     pub fn request_completion(&self, uri: String, line: usize, col: usize) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(LspRequest::Completion { uri, line, col, id });
+        id
+    }
+
+    /// Request renaming the symbol at `(line, col)` to `new_name`.  Returns the request ID.
+    pub fn request_rename(&self, uri: String, line: usize, col: usize, new_name: String) -> i64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(LspRequest::Rename { uri, line, col, new_name, id });
+        id
+    }
+
+    /// Request available code actions at `(line, col)`.  Returns the request ID.
+    pub fn request_code_action(&self, uri: String, line: usize, col: usize) -> i64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(LspRequest::CodeAction { uri, line, col, id });
         id
     }
 }
@@ -402,6 +453,28 @@ fn handle_outgoing(
             });
             let _ = send_request(stdin, id, "textDocument/completion", params);
         }
+        LspRequest::Rename { uri, line, col, new_name, id } => {
+            pending.insert(id, "rename");
+            let params = json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": col },
+                "newName": new_name
+            });
+            let _ = send_request(stdin, id, "textDocument/rename", params);
+        }
+        LspRequest::CodeAction { uri, line, col, id } => {
+            pending.insert(id, "codeAction");
+            let range = json!({
+                "start": { "line": line, "character": col },
+                "end": { "line": line, "character": col }
+            });
+            let params = json!({
+                "textDocument": { "uri": uri },
+                "range": range,
+                "context": { "diagnostics": [] }
+            });
+            let _ = send_request(stdin, id, "textDocument/codeAction", params);
+        }
         LspRequest::Shutdown => {
             let _ = send_request(stdin, 999, "shutdown", json!(null));
             let _ = send_notification(stdin, "exit", json!({}));
@@ -461,6 +534,21 @@ fn dispatch_incoming(
                 .map(parse_completion_items)
                 .unwrap_or_default();
             on_message(LspMessage::CompletionResult { request_id: id, items });
+        }
+        Some("rename") => {
+            let result = msg
+                .get("result")
+                .filter(|r| !r.is_null())
+                .and_then(parse_workspace_edit);
+            on_message(LspMessage::RenameResult { request_id: id, result });
+        }
+        Some("codeAction") => {
+            let actions = msg
+                .get("result")
+                .filter(|r| !r.is_null())
+                .map(parse_code_actions)
+                .unwrap_or_default();
+            on_message(LspMessage::CodeActionResult { request_id: id, actions });
         }
         _ => {} // initialize / shutdown / unknown
     }
@@ -672,6 +760,66 @@ fn parse_definition_result(result: &Value) -> Option<DefinitionResult> {
     })
 }
 
+/// Parse a `WorkspaceEdit` — either the simple `changes: {uri: TextEdit[]}` map
+/// or the richer `documentChanges: TextDocumentEdit[]` form (resource
+/// operations like create/rename/delete file within it are skipped, since
+/// only content edits are applied here).
+fn parse_workspace_edit(edit: &Value) -> Option<WorkspaceEdits> {
+    let mut out = WorkspaceEdits::new();
+    if let Some(changes) = edit.get("changes").and_then(|v| v.as_object()) {
+        for (uri, edits) in changes {
+            let edits = parse_text_edits(edits);
+            if !edits.is_empty() {
+                out.push((uri.clone(), edits));
+            }
+        }
+    } else if let Some(doc_changes) = edit.get("documentChanges").and_then(|v| v.as_array()) {
+        for dc in doc_changes {
+            let Some(uri) = dc.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
+                continue; // resource operation (create/rename/delete), not a content edit
+            };
+            let Some(edits_val) = dc.get("edits") else { continue };
+            let edits = parse_text_edits(edits_val);
+            if !edits.is_empty() {
+                out.push((uri.to_string(), edits));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn parse_text_edits(v: &Value) -> Vec<LspTextEdit> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let range = parse_range(&e["range"])?;
+                    let new_text = e["newText"].as_str()?.to_string();
+                    Some(LspTextEdit { range, new_text })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse `textDocument/codeAction`'s result: `(Command | CodeAction)[]`.
+/// Only entries carrying a direct `edit` are kept — see `CodeAction`'s doc.
+fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
+    result
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let title = a["title"].as_str()?.to_string();
+                    let edits = a.get("edit").and_then(parse_workspace_edit)?;
+                    Some(CodeAction { title, edits })
+                })
+                .take(20)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ── URI helpers ────────────────────────────────────────────────────────────────
 
 /// Convert an absolute file-system path to a `file://` URI, percent-encoding
@@ -742,5 +890,58 @@ mod tests {
     #[test]
     fn percent_decode_leaves_malformed_untouched() {
         assert_eq!(percent_decode("100%done"), "100%done");
+    }
+
+    #[test]
+    fn parse_workspace_edit_simple_changes_map() {
+        let edit = json!({
+            "changes": {
+                "file:///a.typ": [
+                    { "range": { "start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 5} }, "newText": "foo" }
+                ]
+            }
+        });
+        let result = parse_workspace_edit(&edit).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "file:///a.typ");
+        assert_eq!(result[0].1[0].new_text, "foo");
+        assert_eq!(result[0].1[0].range.start.character, 2);
+    }
+
+    #[test]
+    fn parse_workspace_edit_document_changes_form() {
+        let edit = json!({
+            "documentChanges": [
+                {
+                    "textDocument": { "uri": "file:///b.typ", "version": 1 },
+                    "edits": [
+                        { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3} }, "newText": "bar" }
+                    ]
+                }
+            ]
+        });
+        let result = parse_workspace_edit(&edit).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "file:///b.typ");
+        assert_eq!(result[0].1[0].new_text, "bar");
+    }
+
+    #[test]
+    fn parse_workspace_edit_empty_is_none() {
+        assert!(parse_workspace_edit(&json!({})).is_none());
+        assert!(parse_workspace_edit(&json!({ "changes": {} })).is_none());
+    }
+
+    #[test]
+    fn parse_code_actions_skips_command_only_entries() {
+        let result = json!([
+            { "title": "Has edit", "edit": { "changes": { "file:///a.typ": [
+                { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} }, "newText": "x" }
+            ] } } },
+            { "title": "Command only", "command": { "command": "do.thing" } }
+        ]);
+        let actions = parse_code_actions(&result);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Has edit");
     }
 }

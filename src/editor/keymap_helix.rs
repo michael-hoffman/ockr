@@ -1039,6 +1039,8 @@ fn space_menu_id(c: &str) -> Option<&'static str> {
         "p" => "open-plugin-manager",
         "d" => "open-daily-note",
         "n" => "new-note",
+        "a" => "code-action",
+        "r" => "rename-symbol",
         _ => return None,
     })
 }
@@ -1082,7 +1084,7 @@ mod surround_helper_tests {
 
     #[test]
     fn space_menu_ids_are_recognised_and_unmapped_keys_are_none() {
-        for &c in &["f", "s", "o", "b", "g", "p", "d", "n"] {
+        for &c in &["f", "s", "o", "b", "g", "p", "d", "n", "a", "r"] {
             assert!(space_menu_id(c).is_some(), "{c:?} should map to a palette id");
         }
         assert_eq!(space_menu_id("q"), None);

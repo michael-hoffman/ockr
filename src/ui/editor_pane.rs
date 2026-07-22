@@ -151,6 +151,19 @@ struct RegexPromptState {
     saved_extra_selections: Vec<Selection>,
 }
 
+/// State for the `Space r` rename prompt.
+struct RenamePromptState {
+    /// New name typed so far.
+    query: String,
+}
+
+/// State for the `Space a` code-action picker, shown when the server offers
+/// more than one action for the cursor position.
+struct CodeActionState {
+    actions: Vec<crate::lsp::CodeAction>,
+    selected: usize,
+}
+
 /// Typst preamble prepended for HTML-mode compilation only.
 ///
 /// Two fixes are bundled here:
@@ -341,6 +354,15 @@ pub struct EditorPane {
     pane_width_px: f32,
     /// Active `s`/`S` regex-pattern prompt; `Some` while typing the pattern.
     regex_prompt: Option<RegexPromptState>,
+    /// Active rename prompt (`Space r`); `Some` while typing the new name.
+    rename_prompt: Option<RenamePromptState>,
+    /// Request ID of the most recent `textDocument/rename` request.
+    rename_request_id: Option<i64>,
+    /// Active code-action picker (`Space a`), when the server offered more
+    /// than one action. A single action applies immediately with no picker.
+    code_action: Option<CodeActionState>,
+    /// Request ID of the most recent `textDocument/codeAction` request.
+    code_action_request_id: Option<i64>,
 }
 
 impl EditorPane {
@@ -430,6 +452,10 @@ impl EditorPane {
             completion_request_id: None,
             pane_width_px: 700.0,
             regex_prompt: None,
+            rename_prompt: None,
+            rename_request_id: None,
+            code_action: None,
+            code_action_request_id: None,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -1131,6 +1157,171 @@ impl EditorPane {
         cx.notify();
     }
 
+    /// Open the `Space r` rename prompt at the cursor.
+    pub fn open_rename_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.lsp.is_none() {
+            self.hover_popup = Some(LSP_MISSING_HINT.to_string());
+            cx.notify();
+            return;
+        }
+        self.rename_prompt = Some(RenamePromptState { query: String::new() });
+    }
+
+    /// Route a keystroke to the rename prompt while it is open.
+    fn handle_rename_prompt_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match k.key.as_str() {
+            "escape" => {
+                self.rename_prompt = None;
+            }
+            "enter" => {
+                if let Some(p) = self.rename_prompt.take() {
+                    if !p.query.is_empty() {
+                        if let (Some(lsp), Some(uri)) = (self.lsp.clone(), self.current_uri()) {
+                            let (line, col) = self.cursor_lsp_pos();
+                            self.rename_request_id = Some(lsp.request_rename(uri, line, col, p.query));
+                        }
+                    }
+                }
+            }
+            "backspace" => {
+                if let Some(ref mut p) = self.rename_prompt {
+                    p.query.pop();
+                }
+            }
+            _ => {
+                if !k.modifiers.platform && !k.modifiers.control {
+                    let ch_opt = k.key_char.as_deref()
+                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    if let (Some(ch), Some(ref mut p)) = (ch_opt, self.rename_prompt.as_mut()) {
+                        p.query.push_str(ch);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Apply the given `LspTextEdit`s to this pane's buffer, converting each
+    /// UTF-16 range to a byte range and applying bottom-to-top so earlier
+    /// edits' positions aren't perturbed by later ones.
+    fn apply_lsp_edits(&mut self, edits: &[crate::lsp::LspTextEdit], cx: &mut Context<Self>) {
+        if edits.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let last_line = self.buffer.line_count().saturating_sub(1);
+        let mut byte_edits: Vec<(Pos, Pos, &str)> = edits.iter().map(|e| {
+            let start_line = e.range.start.line.min(last_line);
+            let end_line = e.range.end.line.min(last_line);
+            let start_col = utf16_to_byte(self.buffer.line(start_line), e.range.start.character);
+            let end_col = utf16_to_byte(self.buffer.line(end_line), e.range.end.character);
+            (Pos::new(start_line, start_col), Pos::new(end_line, end_col), e.new_text.as_str())
+        }).collect();
+        byte_edits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        for (start, end, new_text) in byte_edits {
+            if start.line == end.line {
+                self.buffer.delete_range(start.line, start.col, end.col);
+                self.buffer.insert(start.line, start.col, new_text);
+            } else {
+                let start_line_len = self.buffer.line(start.line).len();
+                self.buffer.delete_range(start.line, start.col, start_line_len);
+                self.buffer.delete_range(end.line, 0, end.col);
+                for _ in start.line + 1..end.line {
+                    self.buffer.join_with_next(start.line);
+                }
+                self.buffer.join_with_next(start.line);
+                self.buffer.insert(start.line, start.col, new_text);
+            }
+        }
+        self.state.is_dirty = true;
+        self.cached_doc_stats = None;
+        self.update_viewport();
+        self.trigger_compile(cx);
+        cx.notify();
+    }
+
+    /// Apply the edit group matching this pane's own file from a
+    /// `WorkspaceEdit`; edits targeting other files are skipped (this
+    /// codebase has no way to mutate a buffer that isn't open in a pane).
+    fn apply_workspace_edits(&mut self, edits: &crate::lsp::WorkspaceEdits, cx: &mut Context<Self>) {
+        let Some(uri) = self.current_uri() else { return };
+        if let Some((_, file_edits)) = edits.iter().find(|(u, _)| *u == uri) {
+            let file_edits = file_edits.clone();
+            self.apply_lsp_edits(&file_edits, cx);
+        }
+    }
+
+    /// Handle a `textDocument/rename` response for this pane's outstanding request.
+    pub fn set_rename_result(&mut self, request_id: i64, result: Option<crate::lsp::WorkspaceEdits>, cx: &mut Context<Self>) {
+        if self.rename_request_id != Some(request_id) {
+            return;
+        }
+        self.rename_request_id = None;
+        if let Some(edits) = result {
+            self.apply_workspace_edits(&edits, cx);
+        }
+    }
+
+    /// Request code actions at the cursor (`Space a`).
+    pub fn request_code_action(&mut self, cx: &mut Context<Self>) {
+        self.code_action = None;
+        match (self.lsp.clone(), self.current_uri()) {
+            (None, _) => self.hover_popup = Some(LSP_MISSING_HINT.to_string()),
+            (Some(lsp), Some(uri)) => {
+                let (line, col) = self.cursor_lsp_pos();
+                self.code_action_request_id = Some(lsp.request_code_action(uri, line, col));
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Handle a `textDocument/codeAction` response for this pane's outstanding
+    /// request. Zero actions shows a hint; one applies immediately; more than
+    /// one opens the picker.
+    pub fn set_code_action_result(&mut self, request_id: i64, actions: Vec<crate::lsp::CodeAction>, cx: &mut Context<Self>) {
+        if self.code_action_request_id != Some(request_id) {
+            return;
+        }
+        self.code_action_request_id = None;
+        match actions.len() {
+            0 => self.hover_popup = Some("No code actions available.".to_string()),
+            1 => {
+                let edits = actions.into_iter().next().unwrap().edits;
+                self.apply_workspace_edits(&edits, cx);
+            }
+            _ => self.code_action = Some(CodeActionState { actions, selected: 0 }),
+        }
+        cx.notify();
+    }
+
+    /// Route a keystroke to the code-action picker while it is open.
+    fn handle_code_action_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match k.key.as_str() {
+            "escape" => self.code_action = None,
+            "up" => {
+                if let Some(ref mut s) = self.code_action {
+                    s.selected = s.selected.saturating_sub(1);
+                }
+            }
+            "down" => {
+                if let Some(ref mut s) = self.code_action {
+                    s.selected = (s.selected + 1).min(s.actions.len().saturating_sub(1));
+                }
+            }
+            "enter" => {
+                if let Some(s) = self.code_action.take() {
+                    if let Some(action) = s.actions.into_iter().nth(s.selected) {
+                        self.apply_workspace_edits(&action.edits, cx);
+                    }
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
         self.line_number_mode = mode;
     }
@@ -1654,6 +1845,20 @@ impl EditorPane {
         // Regex-prompt routing: while `s`/`S` is open, send non-Cmd keys there.
         if self.regex_prompt.is_some() && !k.modifiers.platform {
             self.handle_regex_prompt_key(k, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Rename-prompt routing: while `Space r` is open, send non-Cmd keys there.
+        if self.rename_prompt.is_some() && !k.modifiers.platform {
+            self.handle_rename_prompt_key(k, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Code-action picker routing: while `Space a`'s picker is open.
+        if self.code_action.is_some() && !k.modifiers.platform {
+            self.handle_code_action_key(k, cx);
             cx.stop_propagation();
             return;
         }
@@ -2522,7 +2727,11 @@ impl Render for EditorPane {
         let mut line_elements = Vec::with_capacity(last - first);
         for i in first..last {
             let text = self.buffer.line(i).to_string();
-            let in_selection = is_line_in_visual_selection(i, mode, &selection);
+            // Highlight lines covered by the primary selection or any
+            // extra_selections range (from `s`/`S` multi-select) — same
+            // whole-line granularity the primary selection already uses.
+            let in_selection = is_line_in_visual_selection(i, mode, &selection)
+                || self.state.extra_selections.iter().any(|s| is_line_in_visual_selection(i, mode, s));
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
 
             // Collect search match byte-ranges that fall on this line.
@@ -2974,9 +3183,58 @@ impl Render for EditorPane {
                 .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
         });
 
-        // Whether either bottom bar (search or regex-prompt) is showing —
-        // popups below reserve the same 28px either way.
-        let bar_open = search_bar.is_some() || regex_bar.is_some();
+        // ── Rename-prompt bar (`Space r`) ───────────────────────────────────────
+        let rename_bar = self.rename_prompt.as_ref().map(|p| {
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_4()
+                .py_1()
+                .bg(gpui::rgb(t.bg_base))
+                .border_b_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .text_sm()
+                .font_family("Menlo")
+                .child(div().text_color(gpui::rgb(t.ochre)).child("rename» "))
+                .child(div().text_color(gpui::rgb(t.text)).child(p.query.clone()))
+                .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
+                .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
+        });
+
+        // ── Code-action picker bar (`Space a`) ──────────────────────────────────
+        let code_action_bar = self.code_action.as_ref().map(|s| {
+            let rows: Vec<gpui::AnyElement> = s.actions.iter().enumerate().map(|(i, a)| {
+                div()
+                    .px_4()
+                    .py_1()
+                    .text_sm()
+                    .font_family("Menlo")
+                    .text_color(gpui::rgb(if i == s.selected { t.text } else { t.text_muted }))
+                    .when(i == s.selected, |d| d.bg(gpui::rgb(t.bg_hover)))
+                    .child(a.title.clone())
+                    .into_any_element()
+            }).collect();
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(gpui::rgb(t.bg_base))
+                .border_b_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .child(
+                    div().px_4().py_1().text_xs().font_family("Menlo")
+                        .text_color(gpui::rgb(t.text_faint))
+                        .child("Code actions — ↑↓ select, ↵ apply, esc cancel"),
+                )
+                .children(rows)
+        });
+
+        // Whether any bottom bar (search, regex-prompt, rename, code-action)
+        // is showing — popups below reserve the same 28px either way.
+        let bar_open = search_bar.is_some() || regex_bar.is_some()
+            || rename_bar.is_some() || code_action_bar.is_some();
 
         // ── Wikilink autocomplete popup ───────────────────────────────────────
         // Positioned immediately below and to the right of the `[[` opening on
@@ -3165,6 +3423,8 @@ impl Render for EditorPane {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
             .when_some(search_bar, |root, bar| root.child(bar))
             .when_some(regex_bar, |root, bar| root.child(bar))
+            .when_some(rename_bar, |root, bar| root.child(bar))
+            .when_some(code_action_bar, |root, bar| root.child(bar))
             .child(
                 div()
                     .flex_1()
