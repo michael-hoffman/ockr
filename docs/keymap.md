@@ -132,6 +132,19 @@ loads into the pane.
 | `` `<reg> ``  | Jump to mark `<reg>` (exact position)                |
 | `'<reg>`      | Jump to mark `<reg>`'s line (first non-whitespace)   |
 
+### Normal Mode — Surround (delete / replace)
+
+`ms` (add) is covered by Visual-mode surround below — select text, type an
+open delimiter. `md`/`mr` act on the pair around the cursor directly, no
+selection needed.
+
+| Key                 | Action                                                  |
+|---------------------|----------------------------------------------------------|
+| `md<delim>`         | Delete the surrounding `<delim>` pair around the cursor   |
+| `mr<delim><new>`    | Replace the surrounding `<delim>` pair with `<new>`       |
+
+`<delim>` / `<new>` accept `(`/`)`, `{`/`}`, `[`/`]`, `<`/`>`, `"`, `'`, `` ` ``, `$`.
+
 ### Normal Mode — Search
 
 | Key           | Action                              |
@@ -185,6 +198,8 @@ All Normal-mode **movement** keys extend the selection (anchor stays, cursor mov
 | `v` / `V`    | Switch to Visual Char / Line        |
 | `Ctrl-v`      | Switch to Visual Block              |
 | `mi` / `ma`  | Select inner / around text object   |
+| `s`           | Select-regex: prompt for a pattern, each match within the selection becomes its own selection |
+| `S`           | Split-selection: the segments *between* pattern matches become selections |
 | `Escape`      | Return to Normal                    |
 
 #### Surround selection
@@ -198,6 +213,26 @@ With text selected, pressing an opening delimiter **wraps** the selection instea
 | `{`  | `{ … }`              |
 | `"`  | `" … "`              |
 | `$`  | `$ … $`              |
+
+#### Multi-select (`s` / `S`)
+
+`s`/`S` open a pattern prompt (Rust `regex` syntax) scoped to the current
+Visual selection. Confirming with `Enter` replaces the single selection with
+one selection per match (`s`) or per gap between matches (`S`); `Escape`
+cancels back to the original selection. `Esc` in the pattern prompt or an
+empty pattern also cancels.
+
+With multiple selections active:
+
+| Key   | Action                                                              |
+|-------|------------------------------------------------------------------------|
+| `d`/`x` | Delete all selections at once; each survivor collapses to a cursor |
+| `c`   | Delete all selections, then Insert — typing lands at every cursor simultaneously |
+| `y`   | Yank — only the primary (first) selection's text goes to the register |
+
+Deleting/changing a multi-select feeds the survivors into the same
+multi-cursor mechanism as `C`/`Alt-C`, so a following edit in Insert mode
+applies everywhere at once.
 
 ---
 

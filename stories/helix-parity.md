@@ -45,6 +45,8 @@ Status: ✅ done · 🚧 partial · ❌ not started
 | `` `<reg> ``  | Jump to mark (exact)                | ✅     | Buffer-local; records a jump-list entry |
 | `'<reg>`      | Jump to mark's line                 | ✅     | First non-blank |
 | `Ctrl-Space`  | LSP completions                     | ✅     | Popup; Tab/Enter accepts — live-verified vs tinymist |
+| `md<delim>`   | Delete surrounding pair              | ✅     | No selection needed; reuses `ma<delim>` bound lookup |
+| `mr<from><to>`| Replace surrounding pair             | ✅     | `to` may be any char (symmetric wrap) or a bracket pair |
 
 ---
 
@@ -219,6 +221,9 @@ not in `PATH`. `didOpen` on file load, `didChange` on every compile trigger.
 | `Ctrl-v`     | Switch to Visual Block              | ✅     | |
 | `escape`      | Return to Normal                    | ✅     | |
 | `mi/ma<obj>` | Select inner/around object          | ✅     | |
+| `s`           | Select-regex: each match → its own selection | ✅ | Real `Vec<Selection>` model, not point-cursor approximation |
+| `S`           | Split-selection: gaps between matches → selections | ✅ | Complement of `s` |
+| `d/c/y` on multi-select | Fan out across all selections     | ✅     | `d`/`c` collapse survivors into `extra_cursors` for simultaneous Insert; `y` yanks primary only |
 
 ---
 

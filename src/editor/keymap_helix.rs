@@ -26,6 +26,12 @@ enum PendingKey {
     MatchInner,
     /// `ma` pressed; awaiting text-object character.
     MatchAround,
+    /// `md` pressed; awaiting the delimiter character to delete.
+    SurroundDelete,
+    /// `mr` pressed; awaiting the delimiter character to match.
+    SurroundReplaceFrom,
+    /// `mr<from>` pressed; awaiting the replacement delimiter character.
+    SurroundReplaceTo(char),
     /// `f` pressed; awaiting target character.
     FindChar,
     /// `F` pressed.
@@ -250,6 +256,14 @@ impl KeymapHandler for HelixKeymap {
                     self.pending = PendingKey::MatchAround;
                     return KeymapResult::Pending;
                 }
+                "d" => {
+                    self.pending = PendingKey::SurroundDelete;
+                    return KeymapResult::Pending;
+                }
+                "r" => {
+                    self.pending = PendingKey::SurroundReplaceFrom;
+                    return KeymapResult::Pending;
+                }
                 _ => {} // fall through
             }
         }
@@ -261,6 +275,34 @@ impl KeymapHandler for HelixKeymap {
             self.pending = PendingKey::None;
             if let Some(kind) = parse_text_object_key(k) {
                 return KeymapResult::Command(EditorCommand::SelectObject { inner, kind });
+            }
+            return KeymapResult::Passthrough;
+        }
+        if self.pending == PendingKey::SurroundDelete {
+            self.pending = PendingKey::None;
+            if !k.modifiers.control && !k.modifiers.platform {
+                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    return KeymapResult::SurroundDelete(ch);
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+        if self.pending == PendingKey::SurroundReplaceFrom {
+            self.pending = PendingKey::None;
+            if !k.modifiers.control && !k.modifiers.platform {
+                if let Some(ch) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    self.pending = PendingKey::SurroundReplaceTo(ch);
+                    return KeymapResult::Pending;
+                }
+            }
+            return KeymapResult::Passthrough;
+        }
+        if let PendingKey::SurroundReplaceTo(from) = self.pending {
+            self.pending = PendingKey::None;
+            if !k.modifiers.control && !k.modifiers.platform {
+                if let Some(to) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
+                    return KeymapResult::SurroundReplace { from, to };
+                }
             }
             return KeymapResult::Passthrough;
         }
@@ -379,15 +421,18 @@ impl KeymapHandler for HelixKeymap {
             // Unknown bracket-sequence — fall through.
         }
 
-        // ── `s` select-within-selection (Visual mode) ───────────────────
+        // ── `s`/`S` select-regex / split-selection (Visual mode) ────────
         if matches!(state.mode, Mode::Visual(_))
-            && k.key == "s"
             && !k.modifiers.platform
             && !k.modifiers.control
-            && !k.modifiers.shift
             && self.pending == PendingKey::None
         {
-            return KeymapResult::SelectInSelection;
+            if k.key == "s" {
+                return KeymapResult::OpenRegexPrompt { split: false };
+            }
+            if k.key == "S" {
+                return KeymapResult::OpenRegexPrompt { split: true };
+            }
         }
 
         // ── Macro record / play (`q` / `@`) ────────────────────────────
@@ -943,5 +988,60 @@ fn visual_surround_close(open: &str) -> Option<&'static str> {
         "[" => Some("]"),
         "\"" => Some("\""),
         _ => None,
+    }
+}
+
+/// Which `TextObjectKind` a delimiter character identifies, for `md`/`mr`
+/// (delete/replace surrounding pair). Only symmetric/paired delimiters that
+/// `obj_surround`/`obj_quote` know how to locate around the cursor.
+pub fn delim_text_object_kind(c: char) -> Option<TextObjectKind> {
+    match c {
+        '(' | ')' => Some(TextObjectKind::Paren),
+        '{' | '}' => Some(TextObjectKind::Brace),
+        '[' | ']' => Some(TextObjectKind::Bracket),
+        '<' | '>' => Some(TextObjectKind::Angle),
+        '"' => Some(TextObjectKind::DoubleQuote),
+        '\'' => Some(TextObjectKind::SingleQuote),
+        '`' => Some(TextObjectKind::Backtick),
+        '$' => Some(TextObjectKind::InlineMath),
+        _ => None,
+    }
+}
+
+/// The literal open/close delimiter pair to insert for `mr<from><to>`'s `to`
+/// character. `to` may be any single character, in which case it's used as
+/// both open and close (matching Helix's behaviour for e.g. `mr(*` → `*...*`).
+pub fn delim_pair_for(c: char) -> (String, String) {
+    match c {
+        '(' | ')' => ("(".into(), ")".into()),
+        '{' | '}' => ("{".into(), "}".into()),
+        '[' | ']' => ("[".into(), "]".into()),
+        '<' | '>' => ("<".into(), ">".into()),
+        _ => (c.to_string(), c.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod surround_helper_tests {
+    use super::*;
+
+    #[test]
+    fn delim_kind_recognises_both_sides_of_each_pair() {
+        for &c in &['(', ')', '{', '}', '[', ']', '<', '>', '"', '\'', '`', '$'] {
+            assert!(delim_text_object_kind(c).is_some(), "{c:?} should map to a TextObjectKind");
+        }
+        assert_eq!(delim_text_object_kind('x'), None);
+    }
+
+    #[test]
+    fn delim_pair_for_brackets_is_asymmetric() {
+        assert_eq!(delim_pair_for('('), ("(".to_string(), ")".to_string()));
+        assert_eq!(delim_pair_for(')'), ("(".to_string(), ")".to_string()));
+    }
+
+    #[test]
+    fn delim_pair_for_symmetric_char_is_same_both_sides() {
+        assert_eq!(delim_pair_for('*'), ("*".to_string(), "*".to_string()));
+        assert_eq!(delim_pair_for('"'), ("\"".to_string(), "\"".to_string()));
     }
 }

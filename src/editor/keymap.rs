@@ -79,9 +79,9 @@ pub enum KeymapResult {
         open: String,
         close: &'static str,
     },
-    /// Open the in-buffer search scoped to the current visual selection.
-    /// Matches outside the selection are hidden; `n`/`N` stay within bounds.
-    SelectInSelection,
+    /// Open the regex-pattern prompt for select-regex (`s`) / split-selection
+    /// (`S`) within the current Visual selection. `split` distinguishes them.
+    OpenRegexPrompt { split: bool },
     /// Jump to the next (forward=true) or previous (forward=false) diagnostic.
     JumpDiagnostic { forward: bool },
     /// Key consumed; multi-key sequence in progress.
@@ -120,6 +120,10 @@ pub enum KeymapResult {
     /// `` `<reg> `` jumps to the exact position; `'<reg>` jumps to the first
     /// non-blank character of that line (matches Vim's backtick vs quote).
     JumpToMark { reg: char, first_non_blank: bool },
+    /// Delete the surrounding pair matching `delim` around the cursor (`md<delim>`).
+    SurroundDelete(char),
+    /// Replace the surrounding pair matching `from` with the pair for `to` (`mr<from><to>`).
+    SurroundReplace { from: char, to: char },
 }
 
 /// How to align the cursor line within the visible viewport (`z` commands).

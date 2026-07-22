@@ -42,6 +42,7 @@ sha2 = "0.10"
 hex = "0.4"
 reqwest = { version = "0.12", features = ["blocking"] }
 trash = "5"
+regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

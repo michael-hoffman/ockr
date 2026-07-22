@@ -58,6 +58,7 @@ use crate::editor::{
     buffer::InMemoryBuffer,
     command::{EditorCommand, TextObjectKind},
     keymap::{KeymapHandler, KeymapResult, OperatorKind},
+    keymap_helix::{delim_pair_for, delim_text_object_kind},
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
 use crate::ui::preview::PreviewPane;
@@ -134,11 +135,20 @@ struct SearchState {
     replace_focused: bool,
     /// `true` when the last match jump had to wrap around the document boundary.
     wrapped: bool,
-    /// When `Some`, only matches inside this (start, end) inclusive line range
-    /// are considered (used by Visual-mode `s` — select-within-selection).
-    selection_bounds: Option<(Pos, Pos)>,
     /// When `true`, only whole-word occurrences are highlighted/navigated.
     whole_word: bool,
+}
+
+/// State for the `s`/`S` regex-pattern prompt (select-regex / split-selection),
+/// scoped to the current Visual selection.
+struct RegexPromptState {
+    /// Pattern typed so far.
+    query: String,
+    /// `false` = select-regex (`s`); `true` = split-selection (`S`).
+    split: bool,
+    /// Selection to restore on Escape or an empty pattern.
+    saved_selection: Selection,
+    saved_extra_selections: Vec<Selection>,
 }
 
 /// Typst preamble prepended for HTML-mode compilation only.
@@ -326,6 +336,8 @@ pub struct EditorPane {
     /// rows shorter than their painted lines (overlapping text).  An explicit
     /// width makes measure and paint agree.
     pane_width_px: f32,
+    /// Active `s`/`S` regex-pattern prompt; `Some` while typing the pattern.
+    regex_prompt: Option<RegexPromptState>,
 }
 
 impl EditorPane {
@@ -414,6 +426,7 @@ impl EditorPane {
             completion: None,
             completion_request_id: None,
             pane_width_px: 700.0,
+            regex_prompt: None,
             lsp: None,
             lsp_diagnostics: Vec::new(),
             lsp_doc_version: 0,
@@ -1027,39 +1040,6 @@ impl EditorPane {
             replace: None,
             replace_focused: false,
             wrapped: false,
-            selection_bounds: None,
-            whole_word: false,
-        });
-    }
-
-    /// Open the search bar scoped to the current Visual selection.
-    ///
-    /// Only matches within the selection's line range are shown; `n`/`N` stay
-    /// within bounds.  Called by the `SelectInSelection` keymap result (`s` in Visual).
-    pub fn open_search_in_selection(&mut self) {
-        use crate::editor::state::Mode;
-        let saved = self.state.cursor();
-        let bounds = if matches!(self.state.mode, Mode::Visual(_)) {
-            let sel = &self.state.selection;
-            let (a, b) = (sel.anchor, sel.cursor);
-            let (start, end) = if a.line <= b.line { (a, b) } else { (b, a) };
-            Some((start, end))
-        } else {
-            None
-        };
-        self.search_nav_status = None;
-        self.search_highlight_matches.clear();
-        self.search_highlight_current = 0;
-        self.search = Some(SearchState {
-            query: String::new(),
-            matches: Vec::new(),
-            current_idx: 0,
-            saved_cursor: saved,
-            backward: false,
-            replace: None,
-            replace_focused: false,
-            wrapped: false,
-            selection_bounds: bounds,
             whole_word: false,
         });
     }
@@ -1079,9 +1059,68 @@ impl EditorPane {
             replace: Some(String::new()),
             replace_focused: false,
             wrapped: false,
-            selection_bounds: None,
             whole_word: false,
         });
+    }
+
+    /// Open the `s`/`S` regex-pattern prompt (select-regex / split-selection),
+    /// scoped to the current Visual selection. `split` distinguishes them —
+    /// see `EditorCommand::SelectRegex`/`SplitSelection`.
+    pub fn open_regex_prompt(&mut self, split: bool) {
+        if !matches!(self.state.mode, Mode::Visual(_)) {
+            return;
+        }
+        self.regex_prompt = Some(RegexPromptState {
+            query: String::new(),
+            split,
+            saved_selection: self.state.selection,
+            saved_extra_selections: self.state.extra_selections.clone(),
+        });
+    }
+
+    /// Route a keystroke to the `s`/`S` regex-pattern prompt while it is open.
+    fn handle_regex_prompt_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match k.key.as_str() {
+            "escape" => {
+                if let Some(p) = self.regex_prompt.take() {
+                    self.state.selection = p.saved_selection;
+                    self.state.extra_selections = p.saved_extra_selections;
+                }
+            }
+            "enter" => {
+                if let Some(p) = self.regex_prompt.take() {
+                    if !p.query.is_empty() {
+                        let cmd = if p.split {
+                            EditorCommand::SplitSelection(p.query)
+                        } else {
+                            EditorCommand::SelectRegex(p.query)
+                        };
+                        let prev = std::mem::take(&mut self.state);
+                        let (new_state, _) = apply(cmd, prev, &mut self.buffer);
+                        self.state = new_state;
+                        self.update_viewport();
+                    } else {
+                        self.state.selection = p.saved_selection;
+                        self.state.extra_selections = p.saved_extra_selections;
+                    }
+                }
+            }
+            "backspace" => {
+                if let Some(ref mut p) = self.regex_prompt {
+                    p.query.pop();
+                }
+            }
+            _ => {
+                if !k.modifiers.platform && !k.modifiers.control {
+                    let ch_opt = k.key_char.as_deref()
+                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    if let (Some(ch), Some(ref mut p)) = (ch_opt, self.regex_prompt.as_mut()) {
+                        p.query.push_str(ch);
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     pub fn set_line_number_mode(&mut self, mode: LineNumberMode) {
@@ -1181,20 +1220,12 @@ impl EditorPane {
 
     /// Recompute match positions from the current query and jump to the best one.
     fn update_search_matches(&mut self, _cx: &mut Context<Self>) {
-        let (query, saved, backward, bounds, whole_word) = match &self.search {
-            Some(s) => (s.query.clone(), s.saved_cursor, s.backward, s.selection_bounds, s.whole_word),
+        let (query, saved, backward, whole_word) = match &self.search {
+            Some(s) => (s.query.clone(), s.saved_cursor, s.backward, s.whole_word),
             None => return,
         };
 
-        let all_matches = find_all_matches(&self.buffer, &query, whole_word);
-        // Filter to selection bounds if this is a scoped search.
-        let matches: Vec<Pos> = if let Some((lo, hi)) = bounds {
-            all_matches.into_iter()
-                .filter(|p| p.line >= lo.line && p.line <= hi.line)
-                .collect()
-        } else {
-            all_matches
-        };
+        let matches = find_all_matches(&self.buffer, &query, whole_word);
 
         // For forward search: pick first match at or after saved cursor.
         // For backward search: pick last match at or before saved cursor.
@@ -1612,6 +1643,13 @@ impl EditorPane {
             return;
         }
 
+        // Regex-prompt routing: while `s`/`S` is open, send non-Cmd keys there.
+        if self.regex_prompt.is_some() && !k.modifiers.platform {
+            self.handle_regex_prompt_key(k, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         // Wikilink autocomplete navigation.
         if self.wikilink_complete.is_some() && !k.modifiers.platform {
             let is_ctrl_k = k.modifiers.control && k.key == "k";
@@ -1822,9 +1860,9 @@ impl EditorPane {
                 self.update_viewport();
                 cx.notify();
             }
-            KeymapResult::SelectInSelection => {
+            KeymapResult::OpenRegexPrompt { split } => {
                 cx.stop_propagation();
-                self.open_search_in_selection();
+                self.open_regex_prompt(split);
                 cx.notify();
             }
             KeymapResult::JumpDiagnostic { forward } => {
@@ -1956,6 +1994,14 @@ impl EditorPane {
                 cx.stop_propagation();
                 self.jump_to_mark(reg, first_non_blank);
                 cx.notify();
+            }
+            KeymapResult::SurroundDelete(delim) => {
+                cx.stop_propagation();
+                self.apply_surround_delete(delim, cx);
+            }
+            KeymapResult::SurroundReplace { from, to } => {
+                cx.stop_propagation();
+                self.apply_surround_replace(from, to, cx);
             }
             KeymapResult::RequestCompletion => {
                 cx.stop_propagation();
@@ -2636,12 +2682,18 @@ impl Render for EditorPane {
             div().into_any_element()
         };
 
-        // Multi-cursor indicator.
+        // Multi-cursor / multi-selection indicator.
         let multi_cursor_indicator: gpui::AnyElement = if !self.state.extra_cursors.is_empty() {
             div()
                 .font_family("Menlo")
                 .text_color(gpui::rgb(t.ochre))
                 .child(format!("{} cursors", self.state.extra_cursors.len() + 1))
+                .into_any_element()
+        } else if !self.state.extra_selections.is_empty() {
+            div()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.ochre))
+                .child(format!("{} selections", self.state.extra_selections.len() + 1))
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -2889,6 +2941,27 @@ impl Render for EditorPane {
             bar
         });
 
+        // ── `s`/`S` regex-pattern prompt bar ───────────────────────────────────
+        let regex_bar = self.regex_prompt.as_ref().map(|p| {
+            let label = if p.split { "split» " } else { "select» " };
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_4()
+                .py_1()
+                .bg(gpui::rgb(t.bg_base))
+                .border_b_1()
+                .border_color(gpui::rgb(t.border_subtle))
+                .text_sm()
+                .font_family("Menlo")
+                .child(div().text_color(gpui::rgb(t.ochre)).child(label))
+                .child(div().text_color(gpui::rgb(t.text)).child(p.query.clone()))
+                .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
+                .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
+        });
+
         // ── Wikilink autocomplete popup ───────────────────────────────────────
         // Positioned immediately below and to the right of the `[[` opening on
         // the cursor line, using approximate fixed character metrics.
@@ -2902,7 +2975,7 @@ impl Render for EditorPane {
                 0.0
             };
             // Leave vertical room for the search bar when it is open.
-            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
             let popup_left = px(PADDING + gutter_w + wl.open_col as f32 * CHAR_W);
             let popup_top = px(
                 search_h
@@ -2951,7 +3024,7 @@ impl Render for EditorPane {
             } else {
                 0.0
             };
-            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
             let left = px(PADDING + gutter_w + c.anchor_col as f32 * CHAR_W);
             let top = px(
                 search_h
@@ -3013,7 +3086,7 @@ impl Render for EditorPane {
         let hover_popup = self.hover_popup.as_ref().map(|content| {
             const LINE_H: f32 = 20.0;
             const PADDING: f32 = 16.0;
-            let search_h = if search_bar.is_some() { 28.0_f32 } else { 0.0 };
+            let search_h = if search_bar.is_some() || regex_bar.is_some() { 28.0_f32 } else { 0.0 };
             // Y of the cursor line within the pane.
             let cursor_row = cursor.line.saturating_sub(self.viewport_top) as f32;
             let cursor_line_y = search_h + PADDING + cursor_row * LINE_H;
@@ -3075,6 +3148,7 @@ impl Render for EditorPane {
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
             .when_some(search_bar, |root, bar| root.child(bar))
+            .when_some(regex_bar, |root, bar| root.child(bar))
             .child(
                 div()
                     .flex_1()
@@ -4038,6 +4112,67 @@ impl EditorPane {
         self.state.move_cursor_to(Pos::new(end.line, close_col));
         self.state.is_dirty = true;
 
+        self.update_viewport();
+        self.trigger_compile(cx);
+        cx.notify();
+    }
+
+    /// Locate the delimiter pair matching `delim` around the cursor.
+    /// Returns the exact `(open, close)` byte positions of the two
+    /// single-character delimiters, via the same "around" text-object lookup
+    /// `mi`/`ma` already use.
+    fn find_surround_pair(&mut self, delim: char) -> Option<(Pos, Pos)> {
+        let kind = delim_text_object_kind(delim)?;
+        let prev = std::mem::take(&mut self.state);
+        let restore_mode = prev.mode;
+        let restore_selection = prev.selection;
+        let (sel_state, _) = apply(EditorCommand::SelectObject { inner: false, kind }, prev, &mut self.buffer);
+        self.state = sel_state;
+        // `SelectObject`'s "around" span is `[open_col, close_col_exclusive)`
+        // (Rust-slice style) — the close delimiter's own byte sits one before
+        // that exclusive end. All supported delimiters are single-byte ASCII.
+        let found = matches!(self.state.mode, Mode::Visual(_)).then(|| {
+            let open = self.state.selection.start();
+            let end = self.state.selection.end();
+            (open, Pos::new(end.line, end.col.saturating_sub(1)))
+        });
+        // SelectObject entered Visual mode as a side effect; undo that, this
+        // isn't a real selection request.
+        self.state.mode = restore_mode;
+        self.state.selection = restore_selection;
+        found
+    }
+
+    /// Delete the surrounding pair matching `delim` around the cursor (`md<delim>`).
+    fn apply_surround_delete(&mut self, delim: char, cx: &mut Context<Self>) {
+        let Some((open, close)) = self.find_surround_pair(delim) else {
+            return;
+        };
+        self.push_undo();
+        // Delete the closing delimiter first so the open position stays valid.
+        self.buffer.delete_range(close.line, close.col, close.col + 1);
+        self.buffer.delete_range(open.line, open.col, open.col + 1);
+        self.state.move_cursor_to(open);
+        self.state.is_dirty = true;
+        self.update_viewport();
+        self.trigger_compile(cx);
+        cx.notify();
+    }
+
+    /// Replace the surrounding pair matching `from` with the pair for `to` (`mr<from><to>`).
+    fn apply_surround_replace(&mut self, from: char, to: char, cx: &mut Context<Self>) {
+        let Some((open, close)) = self.find_surround_pair(from) else {
+            return;
+        };
+        self.push_undo();
+        let (open_delim, close_delim) = delim_pair_for(to);
+        // Replace the closing delimiter first so the open position stays valid.
+        self.buffer.delete_range(close.line, close.col, close.col + 1);
+        self.buffer.insert(close.line, close.col, &close_delim);
+        self.buffer.delete_range(open.line, open.col, open.col + 1);
+        self.buffer.insert(open.line, open.col, &open_delim);
+        self.state.move_cursor_to(open);
+        self.state.is_dirty = true;
         self.update_viewport();
         self.trigger_compile(cx);
         cx.notify();

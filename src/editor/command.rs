@@ -186,6 +186,16 @@ pub enum EditorCommand {
     /// (`d`, `y`, `c`).  `inner = true` ↔ `i` (no delimiters/trailing space).
     SelectObject { inner: bool, kind: TextObjectKind },
 
+    // ── Multi-select (Helix `s` / `S`) ──────────────────────────────────────
+    /// Select every regex match within the current Visual selection as an
+    /// independent selection (`s`). The primary selection becomes the first
+    /// match; the rest populate `extra_selections`. No-op if the pattern
+    /// fails to compile or matches nothing.
+    SelectRegex(String),
+    /// Split the current Visual selection into the segments *between* regex
+    /// matches (`S`) — the complement of `SelectRegex`.
+    SplitSelection(String),
+
     // ── Mode transitions ───────────────────────────────────────────────────
     /// Enter Normal mode (Escape / Ctrl-[).
     EnterNormal,

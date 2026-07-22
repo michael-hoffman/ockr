@@ -349,24 +349,68 @@ pub fn apply<B: Buffer>(
                     state.move_cursor_to(Pos::new(new_line, 0));
                 }
                 Mode::Visual(VisualKind::Char) => {
-                    let start = state.selection.start();
-                    let end   = state.selection.end();
-                    // Yank via shared helper (handles both same-line and multi-line).
-                    state.yank_register = yank_visual_char(start, end, buf);
-                    if start.line == end.line {
-                        // Same-line: delete slice [start.col, end.col).
-                        buf.delete_range(start.line, start.col, end.col);
-                    } else {
-                        // Cross-line: trim start tail, trim end head, join middle lines.
-                        let start_line_len = buf.line(start.line).len();
-                        buf.delete_range(start.line, start.col, start_line_len);
-                        buf.delete_range(end.line, 0, end.col);
-                        for _ in start.line + 1..end.line {
+                    // Fan out across `extra_selections` (from `s`/`S`) plus the
+                    // primary. With no multi-select this is exactly one range,
+                    // matching the previous single-selection behaviour.
+                    let primary_start = state.selection.start();
+                    let mut ranges = all_selection_ranges(&state);
+
+                    // Yank register gets the primary range's text only — this
+                    // codebase has one yank register, not one per selection.
+                    state.yank_register = ranges.iter()
+                        .find(|&&(s, _)| s == primary_start)
+                        .map(|&(s, e)| yank_visual_char(s, e, buf))
+                        .unwrap_or_default();
+
+                    // Delete bottom-to-top / right-to-left so earlier ranges'
+                    // coordinates aren't perturbed by later deletions.
+                    ranges.sort_unstable_by(|a, b| b.cmp(a));
+                    for &(start, end) in &ranges {
+                        if start.line == end.line {
+                            buf.delete_range(start.line, start.col, end.col);
+                        } else {
+                            let start_line_len = buf.line(start.line).len();
+                            buf.delete_range(start.line, start.col, start_line_len);
+                            buf.delete_range(end.line, 0, end.col);
+                            for _ in start.line + 1..end.line {
+                                buf.join_with_next(start.line);
+                            }
                             buf.join_with_next(start.line);
                         }
-                        buf.join_with_next(start.line);
                     }
-                    state.move_cursor_to(start);
+
+                    // Collapse each range to a cursor at its start, adjusted for
+                    // every earlier (already-deleted) range's shrinkage — each
+                    // range's own stored coordinates go stale the moment an
+                    // *earlier* range is also removed, since that shifts
+                    // everything after it. The earliest collapsed cursor becomes
+                    // primary, the rest feed `extra_cursors` so a following
+                    // Insert (via ChangeSelection) fans out to all of them, same
+                    // as the existing `C`/`Alt-C` multi-cursor path.
+                    ranges.sort_unstable();
+                    let mut line_shift: usize = 0;
+                    let mut col_shift_line: Option<usize> = Option::None;
+                    let mut col_shift: usize = 0;
+                    let mut collapsed: Vec<Pos> = Vec::with_capacity(ranges.len());
+                    for &(start, end) in &ranges {
+                        let shift = if col_shift_line == Some(start.line) { col_shift } else { 0 };
+                        collapsed.push(Pos::new(start.line - line_shift, start.col - shift));
+
+                        let lines_removed = end.line - start.line;
+                        if lines_removed == 0 {
+                            let base = if col_shift_line == Some(start.line) { col_shift } else { 0 };
+                            col_shift = base + (end.col - start.col);
+                        } else {
+                            line_shift += lines_removed;
+                            col_shift = end.col;
+                        }
+                        col_shift_line = Some(end.line);
+                    }
+                    let mut collapsed = collapsed.into_iter();
+                    let primary_pos = collapsed.next().unwrap_or(primary_start);
+                    state.extra_cursors = collapsed.collect();
+                    state.extra_selections.clear();
+                    state.move_cursor_to(primary_pos);
                 }
                 _ => {
                     // In Normal mode, fall back to DeleteLine.
@@ -846,6 +890,7 @@ pub fn apply<B: Buffer>(
                 anchor: pos,
                 cursor: pos,
             };
+            state.extra_selections.clear();
             state.mode = Mode::Visual(VisualKind::Char);
             (state, None)
         }
@@ -857,6 +902,7 @@ pub fn apply<B: Buffer>(
                 anchor: Pos::new(line, 0),
                 cursor: Pos::new(line, line_len),
             };
+            state.extra_selections.clear();
             state.mode = Mode::Visual(VisualKind::Line);
             (state, None)
         }
@@ -1120,10 +1166,15 @@ pub fn apply<B: Buffer>(
             };
             if let Some((start, end)) = maybe {
                 state.selection = Selection { anchor: start, cursor: end };
+                state.extra_selections.clear();
                 state.mode = Mode::Visual(VisualKind::Char);
             }
             (state, None)
         }
+
+        // ── Multi-select (Helix `s` / `S`) ──────────────────────────────────
+        SelectRegex(pattern) => (apply_regex_select(state, buf, &pattern, false), None),
+        SplitSelection(pattern) => (apply_regex_select(state, buf, &pattern, true), None),
 
         // ── Mode transitions ───────────────────────────────────────────────
         EnterNormal => {
@@ -1134,6 +1185,7 @@ pub fn apply<B: Buffer>(
                 let start = state.selection.start();
                 state.move_cursor_to(start);
             }
+            state.extra_selections.clear();
             state.mode = Mode::Normal;
             // In Normal mode the cursor must not sit past the last character.
             let pos = state.cursor();
@@ -1519,6 +1571,19 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 ///
 /// Handles both single-line and multi-line selections.  The returned string
 /// does **not** end with `\n` unless the selection crosses a line boundary.
+/// Collect the primary selection plus any `extra_selections`, each normalized
+/// to `(start, end)` and deduplicated. Used by `DeleteSelection` to fan out
+/// across a multi-select (`s`/`S`) instead of just the primary.
+fn all_selection_ranges(state: &EditorState) -> Vec<(Pos, Pos)> {
+    let mut ranges: Vec<(Pos, Pos)> = std::iter::once(state.selection)
+        .chain(state.extra_selections.iter().copied())
+        .map(|s| (s.start(), s.end()))
+        .collect();
+    ranges.sort_unstable();
+    ranges.dedup();
+    ranges
+}
+
 fn yank_visual_char<B: Buffer>(start: crate::editor::state::Pos, end: crate::editor::state::Pos, buf: &B) -> String {
     if start.line == end.line {
         buf.line(start.line)[start.col..end.col].to_string()
@@ -1699,6 +1764,109 @@ fn obj_word(line: &str, col: usize, inner: bool, whitespace_word: bool) -> Optio
         }
         Some((start, end))
     }
+}
+
+/// Append `slice` (from buffer `line` starting at `col_base`) onto `text`,
+/// recording every byte's absolute `Pos` in `offsets` so regex match byte
+/// ranges can be translated back into buffer coordinates.
+fn push_slice(
+    text: &mut String,
+    offsets: &mut std::collections::HashMap<usize, Pos>,
+    line: usize,
+    slice: &str,
+    col_base: usize,
+) {
+    let base = text.len();
+    for (i, _) in slice.char_indices() {
+        offsets.insert(base + i, Pos::new(line, col_base + i));
+    }
+    text.push_str(slice);
+}
+
+/// Extract the text spanned by `[start, end)` (exclusive-end convention,
+/// possibly multi-line) plus a byte-offset → `Pos` map covering every char
+/// boundary in the extracted text (including injected `\n` line joins), with
+/// a final sentinel entry at `text.len()` for a match ending exactly at `end`.
+///
+/// Used by `SelectRegex`/`SplitSelection` to turn regex byte-range matches
+/// back into buffer positions.
+fn selection_text_and_offsets<B: Buffer>(
+    buf: &B,
+    start: Pos,
+    end: Pos,
+) -> (String, std::collections::HashMap<usize, Pos>) {
+    let mut text = String::new();
+    let mut offsets = std::collections::HashMap::new();
+
+    if start.line == end.line {
+        let line = buf.line(start.line);
+        push_slice(&mut text, &mut offsets, start.line, &line[start.col..end.col], start.col);
+    } else {
+        let first = buf.line(start.line);
+        push_slice(&mut text, &mut offsets, start.line, &first[start.col..], start.col);
+        offsets.insert(text.len(), Pos::new(start.line, first.len()));
+        text.push('\n');
+        for l in start.line + 1..end.line {
+            let s = buf.line(l).to_string();
+            push_slice(&mut text, &mut offsets, l, &s, 0);
+            offsets.insert(text.len(), Pos::new(l, s.len()));
+            text.push('\n');
+        }
+        let last = buf.line(end.line);
+        push_slice(&mut text, &mut offsets, end.line, &last[..end.col], 0);
+    }
+    offsets.insert(text.len(), end);
+    (text, offsets)
+}
+
+/// `SelectRegex`/`SplitSelection` (Helix `s`/`S`): run `pattern` against the
+/// text of the current Visual selection. `split=false` turns each match into
+/// its own selection; `split=true` turns the segments *between* matches into
+/// selections (the complement). No-op (state unchanged) if the pattern
+/// fails to compile, there's no active selection, or nothing results.
+fn apply_regex_select<B: Buffer>(
+    mut state: EditorState,
+    buf: &B,
+    pattern: &str,
+    split: bool,
+) -> EditorState {
+    if !matches!(state.mode, Mode::Visual(_)) {
+        return state;
+    }
+    let Ok(re) = regex::Regex::new(pattern) else {
+        return state;
+    };
+    let sel_start = state.selection.start();
+    let sel_end = state.selection.end();
+    let (text, offsets) = selection_text_and_offsets(buf, sel_start, sel_end);
+
+    let mut ranges: Vec<(Pos, Pos)> = Vec::new();
+    if split {
+        let mut cursor = 0usize;
+        for m in re.find_iter(&text) {
+            if m.start() > cursor {
+                ranges.push((offsets[&cursor], offsets[&m.start()]));
+            }
+            cursor = m.end();
+        }
+        if cursor < text.len() {
+            ranges.push((offsets[&cursor], offsets[&text.len()]));
+        }
+    } else {
+        for m in re.find_iter(&text) {
+            if !m.as_str().is_empty() {
+                ranges.push((offsets[&m.start()], offsets[&m.end()]));
+            }
+        }
+    }
+
+    let Some((&(first_open, first_close), rest)) = ranges.split_first() else {
+        return state;
+    };
+    state.selection = Selection { anchor: first_open, cursor: first_close };
+    state.extra_selections = rest.iter().map(|&(a, c)| Selection { anchor: a, cursor: c }).collect();
+    state.mode = Mode::Visual(VisualKind::Char);
+    state
 }
 
 /// Find enclosing matched bracket pair across lines.
@@ -2404,6 +2572,163 @@ mod tests {
         s.move_cursor_to(Pos::new(0, 2));
         let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::Word }, s, &mut b);
         assert!(matches!(s2.mode, Mode::Visual(VisualKind::Char)));
+    }
+
+    // `md`/`mr` (surround delete/replace) locate the close delimiter's own
+    // byte as `around_end.col - 1` — verify that holds for every kind they
+    // support, since a wrong offset would corrupt the buffer on delete/replace.
+    #[test]
+    fn around_span_close_byte_is_end_minus_one() {
+        let cases: &[(&str, usize, TextObjectKind, char)] = &[
+            ("(hello)", 2, TextObjectKind::Paren, ')'),
+            ("{hello}", 2, TextObjectKind::Brace, '}'),
+            ("[hello]", 2, TextObjectKind::Bracket, ']'),
+            ("say \"hi\" now", 5, TextObjectKind::DoubleQuote, '"'),
+            ("$x + 1$", 2, TextObjectKind::InlineMath, '$'),
+        ];
+        for &(text, col, kind, close_char) in cases {
+            let (_, end) = select_obj(text, col, false, kind).unwrap();
+            assert_eq!(
+                text.as_bytes()[end - 1] as char,
+                close_char,
+                "text={text:?} kind={kind:?}"
+            );
+        }
+    }
+
+    // ── Multi-select tests (`s`/`S`) ─────────────────────────────────────────────
+
+    /// Select "foo", "bar", "baz" as a Visual selection, then run `SelectRegex`
+    /// or `SplitSelection`, returning the resulting ranges as `(line, col)` pairs.
+    fn regex_select_ranges(text: &str, sel: (usize, usize, usize, usize), pattern: &str, split: bool) -> Vec<((usize, usize), (usize, usize))> {
+        let mut b = buf(text);
+        let mut s = visual_char_state();
+        s.selection = Selection {
+            anchor: Pos::new(sel.0, sel.1),
+            cursor: Pos::new(sel.2, sel.3),
+        };
+        let cmd = if split {
+            EditorCommand::SplitSelection(pattern.to_string())
+        } else {
+            EditorCommand::SelectRegex(pattern.to_string())
+        };
+        let (s2, _) = apply(cmd, s, &mut b);
+        std::iter::once(s2.selection)
+            .chain(s2.extra_selections.iter().copied())
+            .map(|sel| ((sel.start().line, sel.start().col), (sel.end().line, sel.end().col)))
+            .collect()
+    }
+
+    #[test]
+    fn select_regex_finds_each_match_in_selection() {
+        // "foo bar foo baz foo" selected in full — 3 matches of "foo".
+        let ranges = regex_select_ranges("foo bar foo baz foo", (0, 0, 0, 19), "foo", false);
+        assert_eq!(ranges, vec![
+            ((0, 0), (0, 3)),
+            ((0, 8), (0, 11)),
+            ((0, 16), (0, 19)),
+        ]);
+    }
+
+    #[test]
+    fn select_regex_supports_real_regex_syntax() {
+        // Word-boundary digit runs: "a1 b22 c333".
+        let ranges = regex_select_ranges("a1 b22 c333", (0, 0, 0, 11), r"\d+", false);
+        assert_eq!(ranges, vec![
+            ((0, 1), (0, 2)),
+            ((0, 4), (0, 6)),
+            ((0, 8), (0, 11)),
+        ]);
+    }
+
+    #[test]
+    fn select_regex_invalid_pattern_is_noop() {
+        let mut b = buf("foo bar");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) };
+        let (s2, _) = apply(EditorCommand::SelectRegex("(".to_string()), s, &mut b);
+        assert!(s2.extra_selections.is_empty());
+        assert_eq!(s2.selection, Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) });
+    }
+
+    #[test]
+    fn select_regex_no_match_is_noop() {
+        let mut b = buf("foo bar");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) };
+        let (s2, _) = apply(EditorCommand::SelectRegex("zzz".to_string()), s, &mut b);
+        assert!(s2.extra_selections.is_empty());
+    }
+
+    #[test]
+    fn split_selection_keeps_segments_between_matches() {
+        // "a,b,c" split on "," — segments "a", "b", "c".
+        let ranges = regex_select_ranges("a,b,c", (0, 0, 0, 5), ",", true);
+        assert_eq!(ranges, vec![
+            ((0, 0), (0, 1)),
+            ((0, 2), (0, 3)),
+            ((0, 4), (0, 5)),
+        ]);
+    }
+
+    #[test]
+    fn select_regex_spans_multiple_lines() {
+        // Selection covers all of a 2-line buffer; regex matches "bar" on line 1.
+        let ranges = regex_select_ranges("foo bar\nbar baz", (0, 0, 1, 7), "bar", false);
+        assert_eq!(ranges, vec![((0, 4), (0, 7)), ((1, 0), (1, 3))]);
+    }
+
+    #[test]
+    fn delete_selection_fans_out_across_extra_selections() {
+        // Delete "foo" at three spots in one call — buffer keeps only the rest,
+        // and the survivors collapse into extra_cursors for a following Insert.
+        let mut b = buf("foo bar foo baz foo");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 3) };
+        s.extra_selections = vec![
+            Selection { anchor: Pos::new(0, 8), cursor: Pos::new(0, 11) },
+            Selection { anchor: Pos::new(0, 16), cursor: Pos::new(0, 19) },
+        ];
+        let (s2, effect) = apply(EditorCommand::DeleteSelection, s, &mut b);
+        assert_eq!(b.line(0), " bar  baz ");
+        assert_eq!(effect, SideEffect::BufferChanged);
+        assert_eq!(s2.cursor(), Pos::new(0, 0));
+        // Each survivor's column is shifted left by every earlier deletion's
+        // width: the second "foo" (originally col 8) collapses to col 5 (the
+        // seam between " bar" and " baz"), the third (originally col 16, at
+        // the exact end of the buffer) collapses to col 10 (new end-of-line).
+        assert_eq!(s2.extra_cursors, vec![Pos::new(0, 5), Pos::new(0, 10)]);
+        assert!(s2.extra_selections.is_empty());
+        assert_eq!(s2.yank_register, "foo");
+    }
+
+    #[test]
+    fn delete_selection_multi_range_position_math_matches_actual_buffer() {
+        // Cross-check the collapsed positions against independently computed
+        // slice boundaries in the *actual* post-delete buffer, for a case with
+        // uneven gaps between matches (catches shift-tracking regressions the
+        // fixed-width case above can't).
+        let mut b = buf("11 x 2222 y 333 z 4");
+        let mut s = visual_char_state();
+        // Ranges: "11" [0,2), "2222" [5,9), "333" [12,15), "4" [18,19).
+        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 2) };
+        s.extra_selections = vec![
+            Selection { anchor: Pos::new(0, 5), cursor: Pos::new(0, 9) },
+            Selection { anchor: Pos::new(0, 12), cursor: Pos::new(0, 15) },
+            Selection { anchor: Pos::new(0, 18), cursor: Pos::new(0, 19) },
+        ];
+        let (s2, _) = apply(EditorCommand::DeleteSelection, s, &mut b);
+        let expected = " x  y  z ";
+        assert_eq!(b.line(0), expected);
+
+        let mut cursors = vec![s2.cursor()];
+        cursors.extend(s2.extra_cursors.iter().copied());
+        assert_eq!(cursors, vec![
+            Pos::new(0, 0),
+            Pos::new(0, 3),
+            Pos::new(0, 6),
+            Pos::new(0, 9),
+        ]);
     }
 
     // ── Find-char tests ────────────────────────────────────────────────────────

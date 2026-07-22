@@ -118,6 +118,14 @@ pub struct EditorState {
     pub last_insert_pos: Option<Pos>,
     /// Where the last buffer mutation left the cursor.  Jumped to by `g.`.
     pub last_modified_pos: Option<Pos>,
+    /// Additional selection ranges from `s`/`S` (select-regex / split-selection).
+    ///
+    /// The primary range is always `self.selection`; each entry here is an
+    /// independent secondary range with full anchor/cursor extent (unlike
+    /// `extra_cursors`, which are zero-width points).  Empty outside a
+    /// multi-select.  `DeleteSelection`/`ChangeSelection` fan out across all
+    /// of them, then collapse into `extra_cursors` for simultaneous editing.
+    pub extra_selections: Vec<Selection>,
 }
 
 impl EditorState {
@@ -133,6 +141,7 @@ impl EditorState {
             extra_cursors: Vec::new(),
             last_insert_pos: None,
             last_modified_pos: None,
+            extra_selections: Vec::new(),
         }
     }
 
