@@ -97,6 +97,25 @@ enum SidebarPanel {
     Backlinks,
 }
 
+impl SidebarPanel {
+    /// Name saved to/loaded from the session file.
+    fn as_str(self) -> &'static str {
+        match self {
+            SidebarPanel::Files => "files",
+            SidebarPanel::Outline => "outline",
+            SidebarPanel::Backlinks => "backlinks",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "outline" => SidebarPanel::Outline,
+            "backlinks" => SidebarPanel::Backlinks,
+            _ => SidebarPanel::Files,
+        }
+    }
+}
+
 // ── Tab ───────────────────────────────────────────────────────────────────────
 
 /// Saved state for one open file tab within a pane.
@@ -267,6 +286,11 @@ impl MainWindow {
     pub fn new(vault: Entity<VaultState>, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(vault.clone(), cx));
         let preview = cx.new(|_| PreviewPane::new());
+
+        // Restore the docked sidebar panel and width from the last session.
+        let (saved_panel, saved_width) = crate::session::load_sidebar_state();
+        let sidebar_panel = saved_panel.map(|p| SidebarPanel::from_str(&p)).unwrap_or_default();
+        let sidebar_width = saved_width.unwrap_or(220.0);
 
         // ── Compiler thread ──────────────────────────────────────────────────
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CompileResult>();
@@ -562,10 +586,10 @@ impl MainWindow {
             html_webview: None,
             vault,
             sidebar_visible: true,
-            sidebar_panel: SidebarPanel::default(),
+            sidebar_panel,
             docked_panel_focus: cx.focus_handle(),
             docked_selected: 0,
-            sidebar_width: 220.0,
+            sidebar_width,
             preview_width: 420.0,
             preview_width_set: false,
             drag: None,
@@ -868,6 +892,7 @@ impl MainWindow {
             self.sidebar_visible = true;
         }
         self.docked_selected = 0;
+        crate::session::save_sidebar_state(self.sidebar_panel.as_str(), self.sidebar_width);
         cx.notify();
     }
 
@@ -2362,7 +2387,11 @@ impl MainWindow {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        self.drag = None;
+        if let Some(drag) = self.drag.take() {
+            if drag.target == DragTarget::Sidebar {
+                crate::session::save_sidebar_state(self.sidebar_panel.as_str(), self.sidebar_width);
+            }
+        }
     }
 }
 
@@ -2626,6 +2655,7 @@ impl MainWindow {
                     if this.sidebar_panel != SidebarPanel::Files {
                         this.sidebar_panel = SidebarPanel::Files;
                         this.sidebar_visible = true;
+                        crate::session::save_sidebar_state(this.sidebar_panel.as_str(), this.sidebar_width);
                         cx.notify();
                     } else {
                         this.toggle_sidebar(&ToggleSidebar, window, cx);

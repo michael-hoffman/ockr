@@ -171,6 +171,9 @@ The docked Outline/Backlinks panels (`Space o` / `Space b`) support keyboard
 nav once focused (click a row, or opening the panel focuses it automatically):
 `j`/`k`/arrows to move, `Enter` to jump/open.
 
+Which panel is docked and the sidebar's width persist across restarts (saved
+to the same session file as open tabs/recent files — not `settings.toml`).
+
 ### Normal Mode — Search
 
 | Key           | Action                              |

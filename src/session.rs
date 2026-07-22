@@ -20,6 +20,12 @@ struct Session {
     /// Recently opened file paths, most-recent first (max 20).
     #[serde(default)]
     recent_paths: Vec<PathBuf>,
+    /// Which sidebar panel was docked ("files", "outline", "backlinks").
+    #[serde(default)]
+    sidebar_panel: Option<String>,
+    /// Sidebar column width in pixels.
+    #[serde(default)]
+    sidebar_width: Option<f32>,
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -105,4 +111,18 @@ pub fn load_open_tabs() -> (Vec<PathBuf>, usize) {
         .collect();
     let active = session.active_tab.min(tabs.len().saturating_sub(1));
     (tabs, active)
+}
+
+/// Save which sidebar panel is docked and its width. Preserves other session data.
+pub fn save_sidebar_state(panel: &str, width: f32) {
+    let mut session = read_session();
+    session.sidebar_panel = Some(panel.to_string());
+    session.sidebar_width = Some(width);
+    write_session(&session);
+}
+
+/// Load the last-saved sidebar panel name and width, if any.
+pub fn load_sidebar_state() -> (Option<String>, Option<f32>) {
+    let session = read_session();
+    (session.sidebar_panel, session.sidebar_width)
 }
