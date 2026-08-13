@@ -1,7 +1,11 @@
 # Rust
 /target/
+ockr-plugin-example/target/
+ockr-plugin-typst-example/target/
 # Cargo.lock is committed — ockr ships as a binary, so a locked,
 # reproducible dependency set matters for anyone building from source.
+# Same reasoning for the plugin crates: each builds to a final wasm
+# artifact, not a published library, so their Cargo.lock is committed too.
 
 # macOS
 .DS_Store

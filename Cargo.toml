@@ -1,9 +1,10 @@
 [workspace]
 members = [".", "ockr-plugin"]
-# ockr-plugin-example builds only for wasm32 (its cdylib links against wasm
-# host-imports that don't exist on the host), so it's excluded from the host
-# workspace build. Build it with: cargo build --target wasm32-unknown-unknown.
-exclude = ["ockr-plugin-example"]
+# ockr-plugin-example / ockr-plugin-typst-example build only for wasm32
+# (their cdylibs link against wasm host-imports that don't exist on the
+# host), so they're excluded from the host workspace build. Build with:
+# cargo build --target wasm32-unknown-unknown.
+exclude = ["ockr-plugin-example", "ockr-plugin-typst-example"]
 resolver = "2"
 
 [package]

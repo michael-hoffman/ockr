@@ -1,0 +1,13 @@
+[workspace]
+# Stand-alone package — see ockr-plugin-example/Cargo.toml for why.
+
+[package]
+name = "ockr-plugin-typst-example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ockr-plugin = { path = "../ockr-plugin" }

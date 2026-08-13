@@ -36,9 +36,40 @@ plugin can't block the editor.
 
 ## Writing a plugin
 
-The `ockr-plugin` crate is the Rust SDK; `ockr-plugin-example` in the repository
-is a minimal working plugin. Plugins build for `wasm32-unknown-unknown`:
+The `ockr-plugin` crate is the Rust SDK. Two example plugins live in the
+repository, each focused on one capability:
+
+- **`ockr-plugin-example`** — `register_command` + `http_get` (the `console`
+  and `network` capabilities): registers two palette commands, one that just
+  logs and one that fetches a URL.
+- **`ockr-plugin-typst-example`** — `register_typst_package` (the
+  `typst-package` capability): contributes a small `callout` function so any
+  note can write `#import "@plugin/callout-box/lib.typ": callout` and get an
+  Obsidian-style admonition box.
+
+A plugin crate is a `cdylib` with three pieces:
+
+1. **`ockr_plugin::plugin_metadata!`** — declares `id`/`name`/`version` and
+   the capabilities the plugin needs (`file_read`, `vault_write`, `network`,
+   `console`). The host only grants what's declared here.
+2. **`ockr_init`** — called once at load. Call the SDK's registration
+   functions here: `register_command`, `register_typst_package`,
+   `register_panel`, or just `log`.
+3. **`ockr_dispatch_command`** — called when the user runs one of your
+   registered commands from the palette. Only needed if you called
+   `register_command`; a package-only plugin (like `ockr-plugin-typst-example`)
+   can skip it entirely.
+
+Each plugin crate needs its own empty `[workspace]` table in `Cargo.toml` —
+without it, `cargo build` from inside the plugin directory fails with
+*"current package believes it's in a workspace when it's not"*, since Cargo
+otherwise walks up and finds the host app's workspace root. Plugins build for
+`wasm32-unknown-unknown`:
 
 ```sh
 cargo build --target wasm32-unknown-unknown --release
 ```
+
+(Requires the `wasm32-unknown-unknown` target — `rustup target add
+wasm32-unknown-unknown` if `rustc --print target-list` doesn't already show
+it as installed.)
