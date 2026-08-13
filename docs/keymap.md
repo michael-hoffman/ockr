@@ -175,8 +175,10 @@ for commands also reachable through the command palette (`:`).
 | `Space r`   | Rename symbol at cursor |
 
 `Space a` / `Space r` need `tinymist` running (same requirement as `gd`/`K`).
-Edits from either only apply to the current file — a response touching other
-files skips those (this codebase can't mutate a buffer that isn't open).
+Edits spanning multiple files apply everywhere: a file open in any pane gets
+edited live (undo, dirty flag, recompile, same as any other edit); a file
+that isn't open gets written to disk directly, since there's no live buffer
+to route it to.
 
 The docked Outline/Backlinks panels (`Space o` / `Space b`) support keyboard
 nav once focused (click a row, or opening the panel focuses it automatically):

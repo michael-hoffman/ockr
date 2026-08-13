@@ -366,17 +366,7 @@ pub fn apply<B: Buffer>(
                     // coordinates aren't perturbed by later deletions.
                     ranges.sort_unstable_by(|a, b| b.cmp(a));
                     for &(start, end) in &ranges {
-                        if start.line == end.line {
-                            buf.delete_range(start.line, start.col, end.col);
-                        } else {
-                            let start_line_len = buf.line(start.line).len();
-                            buf.delete_range(start.line, start.col, start_line_len);
-                            buf.delete_range(end.line, 0, end.col);
-                            for _ in start.line + 1..end.line {
-                                buf.join_with_next(start.line);
-                            }
-                            buf.join_with_next(start.line);
-                        }
+                        buf.delete_span(start.line, start.col, end.line, end.col);
                     }
 
                     // Collapse each range to a cursor at its start, adjusted for
@@ -2188,6 +2178,22 @@ mod tests {
         assert_eq!(b.line(0), "aaa");
         assert_eq!(b.line(1), "ccc");
         assert_eq!(s3.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn delete_selection_char_wise_clears_fully_enclosed_middle_line() {
+        // A charwise selection spanning 3+ lines fully encloses the middle
+        // line(s) — their content must be gone, not silently preserved by
+        // the cross-line join (a real bug: join_with_next concatenates a
+        // line's full text, so a middle line skipped over by delete_range
+        // survives unless it's cleared first).
+        let mut b = buf("foo\nbar\nbaz");
+        let mut s = visual_char_state();
+        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(2, 1) };
+        let (s2, _) = apply(DeleteSelection, s, &mut b);
+        assert_eq!(b.line_count(), 1);
+        assert_eq!(b.line(0), "faz");
+        assert_eq!(s2.mode, Mode::Normal);
     }
 
     #[test]

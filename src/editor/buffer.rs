@@ -38,6 +38,32 @@ pub trait Buffer: Send + Sync + 'static {
     /// Split `line` at byte offset `col` by inserting a newline.
     fn split_line(&mut self, line: usize, col: usize);
 
+    /// Delete the exclusive span from `(start_line, start_col)` to
+    /// `(end_line, end_col)`, which may cross line boundaries.
+    ///
+    /// Any line strictly between `start_line` and `end_line` is entirely
+    /// inside the deleted span, so its whole content is cleared (not just
+    /// its line break) before the remaining pieces are joined — a bare
+    /// `join_with_next` per boundary would otherwise just concatenate that
+    /// line's untouched text back in.
+    fn delete_span(&mut self, start_line: usize, start_col: usize, end_line: usize, end_col: usize) {
+        if start_line == end_line {
+            self.delete_range(start_line, start_col, end_col);
+            return;
+        }
+        for l in (start_line + 1..end_line).rev() {
+            let len = self.line(l).len();
+            self.delete_range(l, 0, len);
+        }
+        let end_len = self.line(end_line).len();
+        self.delete_range(end_line, 0, end_col.min(end_len));
+        let start_len = self.line(start_line).len();
+        self.delete_range(start_line, start_col.min(start_len), start_len);
+        for _ in start_line..end_line {
+            self.join_with_next(start_line);
+        }
+    }
+
     /// Full document text (lines joined with `\n`).
     fn text(&self) -> String {
         let n = self.line_count();
@@ -191,6 +217,31 @@ mod tests {
         assert_eq!(b.line_count(), 2);
         assert_eq!(b.line(0), "hello");
         assert_eq!(b.line(1), "world");
+    }
+
+    #[test]
+    fn delete_span_same_line() {
+        let mut b = InMemoryBuffer::from_text("hello world");
+        b.delete_span(0, 5, 0, 11);
+        assert_eq!(b.line(0), "hello");
+    }
+
+    #[test]
+    fn delete_span_clears_fully_enclosed_middle_line() {
+        // A span from line 0 through line 2 fully encloses line 1 — its
+        // content must be gone, not silently preserved by the join.
+        let mut b = InMemoryBuffer::from_text("foo\nbar\nbaz");
+        b.delete_span(0, 1, 2, 1);
+        assert_eq!(b.line_count(), 1);
+        assert_eq!(b.line(0), "faz");
+    }
+
+    #[test]
+    fn delete_span_two_lines_no_middle() {
+        let mut b = InMemoryBuffer::from_text("foo\nbar");
+        b.delete_span(0, 1, 1, 1);
+        assert_eq!(b.line_count(), 1);
+        assert_eq!(b.line(0), "far");
     }
 
     #[test]

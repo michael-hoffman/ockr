@@ -44,6 +44,7 @@ use crate::actions::{
     SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
 };
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
+use crate::editor::buffer::Buffer as _;
 use crate::lsp::{self, LspHandle, LspMessage};
 use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
 use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
@@ -643,6 +644,9 @@ impl MainWindow {
                 EditorPaneEvent::SpaceMenu(id) => {
                     this.handle_palette_execute(id, cx);
                 }
+                EditorPaneEvent::ApplyWorkspaceEdits(edits) => {
+                    this.apply_workspace_edits(edits.clone(), cx);
+                }
             }
         }).detach();
     }
@@ -665,6 +669,31 @@ impl MainWindow {
     /// Returns the active editor entity.
     fn active_editor(&self) -> &Entity<EditorPane> {
         &self.panes[self.active_idx].editor
+    }
+
+    /// Apply a rename/code-action `WorkspaceEdit`, routed per file: a file
+    /// open in some pane (any pane, not just the active one — background
+    /// tabs re-read from disk when activated, so they're "not open" here)
+    /// gets the edit applied to that live buffer, with the pane's normal
+    /// undo/dirty/compile handling. A file that isn't open anywhere gets a
+    /// direct disk write instead — there's no live buffer to route it to,
+    /// and no undo history for a file nothing has touched this session.
+    fn apply_workspace_edits(&mut self, edits: crate::lsp::WorkspaceEdits, cx: &mut Context<Self>) {
+        for (uri, file_edits) in edits {
+            let open_pane = self.panes.iter()
+                .find(|p| p.editor.read(cx).current_uri().as_deref() == Some(uri.as_str()))
+                .map(|p| p.editor.clone());
+            if let Some(editor) = open_pane {
+                editor.update(cx, |pane, cx| pane.apply_lsp_edits(&file_edits, cx));
+            } else {
+                let path = crate::lsp::uri_to_path(&uri);
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    let mut buf = crate::editor::buffer::InMemoryBuffer::from_text(&text);
+                    crate::ui::editor_pane::apply_lsp_text_edits(&mut buf, &file_edits);
+                    let _ = std::fs::write(&path, buf.text());
+                }
+            }
+        }
     }
 
     // ── LSP message dispatch ──────────────────────────────────────────────────

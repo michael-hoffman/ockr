@@ -178,8 +178,8 @@ Persistent highlights: matches stay dimmed after search bar closes (Enter);
 | `Space p`    | Plugin manager                      | ✅     | |
 | `Space d`    | Daily note                          | ✅     | |
 | `Space n`    | New note                            | ✅     | |
-| `Space a` (code action) | Code action at cursor      | ✅     | `textDocument/codeAction`; single action applies directly, multiple show a picker; current-file edits only |
-| `Space r` (rename) | Rename symbol at cursor           | ✅     | `textDocument/rename`; prompts for new name; current-file edits only |
+| `Space a` (code action) | Code action at cursor      | ✅     | `textDocument/codeAction`; single action applies directly, multiple show a picker; edits route across every open pane, disk write for files not open |
+| `Space r` (rename) | Rename symbol at cursor           | ✅     | `textDocument/rename`; prompts for new name; cross-file, same routing as code action |
 | `Space w` (window menu) | —                         | ❌     | Split/close pane already have dedicated bindings; no menu wrapper |
 
 ---
@@ -196,7 +196,7 @@ not in `PATH`. `didOpen` on file load, `didChange` on every compile trigger.
 | `[d` / `]d`   | Prev / next diagnostic              | ✅     | Spans LSP + compiler diagnostics |
 | —             | Gutter diagnostic stripes           | ✅     | `publishDiagnostics` merged into gutter |
 | `Space a`     | Code action                         | ✅     | `textDocument/codeAction`; command-only actions (no `edit`) are skipped |
-| `Space r`     | Rename symbol                       | ✅     | `textDocument/rename`; applies to the current file only |
+| `Space r`     | Rename symbol                       | ✅     | `textDocument/rename`; cross-file (open pane or direct disk write) |
 
 ---
 

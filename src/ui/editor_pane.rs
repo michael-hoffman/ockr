@@ -204,6 +204,11 @@ pub enum EditorPaneEvent {
     /// `Space<c>` leader menu resolved to command-palette id `id` — MainWindow
     /// executes it via the same path as a palette selection.
     SpaceMenu(&'static str),
+    /// A rename or code-action result ready to apply. Routed through
+    /// MainWindow (not applied here) because the edits may target files this
+    /// pane doesn't have open — MainWindow can see every open pane, and falls
+    /// back to a direct disk write for files that aren't open anywhere.
+    ApplyWorkspaceEdits(crate::lsp::WorkspaceEdits),
 }
 
 impl EventEmitter<EditorPaneEvent> for EditorPane {}
@@ -1201,39 +1206,16 @@ impl EditorPane {
         cx.notify();
     }
 
-    /// Apply the given `LspTextEdit`s to this pane's buffer, converting each
-    /// UTF-16 range to a byte range and applying bottom-to-top so earlier
-    /// edits' positions aren't perturbed by later ones.
-    fn apply_lsp_edits(&mut self, edits: &[crate::lsp::LspTextEdit], cx: &mut Context<Self>) {
+    /// Apply the given `LspTextEdit`s to this pane's buffer (undo snapshot,
+    /// dirty flag, recompile — the full local-edit side effects). `MainWindow`
+    /// calls this directly for a rename/code-action edit group that targets
+    /// whichever file this pane currently has open.
+    pub(crate) fn apply_lsp_edits(&mut self, edits: &[crate::lsp::LspTextEdit], cx: &mut Context<Self>) {
         if edits.is_empty() {
             return;
         }
         self.push_undo();
-        let last_line = self.buffer.line_count().saturating_sub(1);
-        let mut byte_edits: Vec<(Pos, Pos, &str)> = edits.iter().map(|e| {
-            let start_line = e.range.start.line.min(last_line);
-            let end_line = e.range.end.line.min(last_line);
-            let start_col = utf16_to_byte(self.buffer.line(start_line), e.range.start.character);
-            let end_col = utf16_to_byte(self.buffer.line(end_line), e.range.end.character);
-            (Pos::new(start_line, start_col), Pos::new(end_line, end_col), e.new_text.as_str())
-        }).collect();
-        byte_edits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-
-        for (start, end, new_text) in byte_edits {
-            if start.line == end.line {
-                self.buffer.delete_range(start.line, start.col, end.col);
-                self.buffer.insert(start.line, start.col, new_text);
-            } else {
-                let start_line_len = self.buffer.line(start.line).len();
-                self.buffer.delete_range(start.line, start.col, start_line_len);
-                self.buffer.delete_range(end.line, 0, end.col);
-                for _ in start.line + 1..end.line {
-                    self.buffer.join_with_next(start.line);
-                }
-                self.buffer.join_with_next(start.line);
-                self.buffer.insert(start.line, start.col, new_text);
-            }
-        }
+        apply_lsp_text_edits(&mut self.buffer, edits);
         self.state.is_dirty = true;
         self.cached_doc_stats = None;
         self.update_viewport();
@@ -1241,25 +1223,19 @@ impl EditorPane {
         cx.notify();
     }
 
-    /// Apply the edit group matching this pane's own file from a
-    /// `WorkspaceEdit`; edits targeting other files are skipped (this
-    /// codebase has no way to mutate a buffer that isn't open in a pane).
-    fn apply_workspace_edits(&mut self, edits: &crate::lsp::WorkspaceEdits, cx: &mut Context<Self>) {
-        let Some(uri) = self.current_uri() else { return };
-        if let Some((_, file_edits)) = edits.iter().find(|(u, _)| *u == uri) {
-            let file_edits = file_edits.clone();
-            self.apply_lsp_edits(&file_edits, cx);
-        }
-    }
-
-    /// Handle a `textDocument/rename` response for this pane's outstanding request.
+    /// Handle a `textDocument/rename` response for this pane's outstanding
+    /// request. Forwarded to `MainWindow` (via `EditorPaneEvent`) rather than
+    /// applied here directly — a rename can touch files this pane doesn't
+    /// have open, and only `MainWindow` can see every open pane (to apply
+    /// there) or fall back to a direct disk write (for files that aren't open
+    /// anywhere).
     pub fn set_rename_result(&mut self, request_id: i64, result: Option<crate::lsp::WorkspaceEdits>, cx: &mut Context<Self>) {
         if self.rename_request_id != Some(request_id) {
             return;
         }
         self.rename_request_id = None;
         if let Some(edits) = result {
-            self.apply_workspace_edits(&edits, cx);
+            cx.emit(EditorPaneEvent::ApplyWorkspaceEdits(edits));
         }
     }
 
@@ -1289,7 +1265,7 @@ impl EditorPane {
             0 => self.hover_popup = Some("No code actions available.".to_string()),
             1 => {
                 let edits = actions.into_iter().next().unwrap().edits;
-                self.apply_workspace_edits(&edits, cx);
+                cx.emit(EditorPaneEvent::ApplyWorkspaceEdits(edits));
             }
             _ => self.code_action = Some(CodeActionState { actions, selected: 0 }),
         }
@@ -1313,7 +1289,7 @@ impl EditorPane {
             "enter" => {
                 if let Some(s) = self.code_action.take() {
                     if let Some(action) = s.actions.into_iter().nth(s.selected) {
-                        self.apply_workspace_edits(&action.edits, cx);
+                        cx.emit(EditorPaneEvent::ApplyWorkspaceEdits(action.edits));
                     }
                 }
             }
@@ -3703,6 +3679,32 @@ fn utf16_to_byte(line: &str, utf16_col: usize) -> usize {
     line.len()
 }
 
+/// Apply LSP text edits (UTF-16 ranges) to any buffer — converts each to a
+/// byte range and applies bottom-to-top so earlier edits' positions aren't
+/// perturbed by later ones. Pure buffer mutation: no undo/dirty/compile side
+/// effects, so it works equally for an open pane's live buffer (see
+/// `EditorPane::apply_lsp_edits`) and a throwaway buffer loaded from disk for
+/// a file that isn't open anywhere (see `MainWindow::apply_workspace_edits`).
+pub(crate) fn apply_lsp_text_edits(buf: &mut impl crate::editor::buffer::Buffer, edits: &[crate::lsp::LspTextEdit]) {
+    if edits.is_empty() {
+        return;
+    }
+    let last_line = buf.line_count().saturating_sub(1);
+    let mut byte_edits: Vec<(Pos, Pos, &str)> = edits.iter().map(|e| {
+        let start_line = e.range.start.line.min(last_line);
+        let end_line = e.range.end.line.min(last_line);
+        let start_col = utf16_to_byte(buf.line(start_line), e.range.start.character);
+        let end_col = utf16_to_byte(buf.line(end_line), e.range.end.character);
+        (Pos::new(start_line, start_col), Pos::new(end_line, end_col), e.new_text.as_str())
+    }).collect();
+    byte_edits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+    for (start, end, new_text) in byte_edits {
+        buf.delete_span(start.line, start.col, end.line, end.col);
+        buf.insert(start.line, start.col, new_text);
+    }
+}
+
 /// Return `true` when the byte range `[start, end)` within `line` is bounded
 /// by non-word characters (or the string edge) on both sides.
 ///
@@ -4451,6 +4453,47 @@ mod tests {
         keymap_helix::HelixKeymap,
         state::Mode,
     };
+
+    #[test]
+    fn apply_lsp_text_edits_applies_multiple_edits_correctly() {
+        use crate::lsp::{LspPosition, LspRange, LspTextEdit};
+        let mut buf = InMemoryBuffer::from_text("foo bar baz");
+        // Two same-line edits, given out of order — earlier edits must not
+        // be perturbed by later ones once applied bottom-to-top.
+        let edits = vec![
+            LspTextEdit {
+                range: LspRange {
+                    start: LspPosition { line: 0, character: 8 },
+                    end: LspPosition { line: 0, character: 11 },
+                },
+                new_text: "quux".to_string(),
+            },
+            LspTextEdit {
+                range: LspRange {
+                    start: LspPosition { line: 0, character: 0 },
+                    end: LspPosition { line: 0, character: 3 },
+                },
+                new_text: "hi".to_string(),
+            },
+        ];
+        apply_lsp_text_edits(&mut buf, &edits);
+        assert_eq!(buf.line(0), "hi bar quux");
+    }
+
+    #[test]
+    fn apply_lsp_text_edits_handles_cross_line_range() {
+        use crate::lsp::{LspPosition, LspRange, LspTextEdit};
+        let mut buf = InMemoryBuffer::from_text("foo\nbar\nbaz");
+        let edits = vec![LspTextEdit {
+            range: LspRange {
+                start: LspPosition { line: 0, character: 1 },
+                end: LspPosition { line: 2, character: 1 },
+            },
+            new_text: "X".to_string(),
+        }];
+        apply_lsp_text_edits(&mut buf, &edits);
+        assert_eq!(buf.text(), "fXaz");
+    }
 
     #[test]
     fn find_all_matches_supports_real_regex() {

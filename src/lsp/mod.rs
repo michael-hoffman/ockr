@@ -830,7 +830,7 @@ pub fn path_to_uri(path: &std::path::Path) -> String {
 }
 
 /// Convert a `file://` URI back to a path, percent-decoding the body.
-fn uri_to_path(uri: &str) -> PathBuf {
+pub fn uri_to_path(uri: &str) -> PathBuf {
     PathBuf::from(percent_decode(uri.trim_start_matches("file://")))
 }
 
