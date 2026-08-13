@@ -121,8 +121,8 @@ struct CompletionState {
 struct SearchState {
     /// Text typed so far.
     query: String,
-    /// All match start positions across the whole buffer (updated on every keystroke).
-    matches: Vec<Pos>,
+    /// All matches (start, end) across the whole buffer (updated on every keystroke).
+    matches: Vec<(Pos, Pos)>,
     /// Index into `matches` for the "current" focused match.
     current_idx: usize,
     /// Cursor position when search was opened — restored on Escape.
@@ -244,7 +244,7 @@ pub struct EditorPane {
     /// Populated when the search bar is closed (Enter) or when `*`/`#` fires.
     /// Rendered as dimmed highlights even after the bar is closed; `n`/`N`
     /// navigate through them.  Cleared by `:noh` or opening a new search.
-    search_highlight_matches: Vec<Pos>,
+    search_highlight_matches: Vec<(Pos, Pos)>,
     /// Index of the current (focused) match within `search_highlight_matches`.
     search_highlight_current: usize,
     /// Match position from the last `n`/`N` navigation: (current 1-indexed, total, wrapped).
@@ -1433,7 +1433,7 @@ impl EditorPane {
         } else if backward {
             let found = matches
                 .iter()
-                .rposition(|p| {
+                .rposition(|(p, _)| {
                     p.line < saved.line
                         || (p.line == saved.line && p.col <= saved.col)
                 });
@@ -1441,14 +1441,14 @@ impl EditorPane {
         } else {
             let found = matches
                 .iter()
-                .position(|p| {
+                .position(|(p, _)| {
                     p.line > saved.line
                         || (p.line == saved.line && p.col >= saved.col)
                 });
             (found.unwrap_or(0), found.is_none())
         };
 
-        let dest = matches.get(idx).copied();
+        let dest = matches.get(idx).map(|&(start, _)| start);
 
         if let Some(s) = &mut self.search {
             s.matches = matches;
@@ -1484,15 +1484,15 @@ impl EditorPane {
         let (idx, wrapped) = if backward {
             let found = matches
                 .iter()
-                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+                .rposition(|(p, _)| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
             (found.unwrap_or(matches.len() - 1), found.is_none())
         } else {
             let found = matches
                 .iter()
-                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+                .position(|(p, _)| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
             (found.unwrap_or(0), found.is_none())
         };
-        self.state.move_cursor_to(matches[idx]);
+        self.state.move_cursor_to(matches[idx].0);
         // Persist highlights so they remain visible after the bar closes.
         self.search_highlight_current = idx;
         self.search_highlight_matches = matches;
@@ -1519,15 +1519,15 @@ impl EditorPane {
         let (idx, wrapped) = if backward {
             let found = matches
                 .iter()
-                .position(|p| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+                .position(|(p, _)| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
             (found.unwrap_or(0), found.is_none())
         } else {
             let found = matches
                 .iter()
-                .rposition(|p| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+                .rposition(|(p, _)| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
             (found.unwrap_or(matches.len() - 1), found.is_none())
         };
-        self.state.move_cursor_to(matches[idx]);
+        self.state.move_cursor_to(matches[idx].0);
         // Persist highlights so they remain visible after the bar closes.
         self.search_highlight_current = idx;
         self.search_highlight_matches = matches;
@@ -1540,17 +1540,16 @@ impl EditorPane {
 
     /// Replace the current search match with the replacement string, then advance.
     fn replace_current(&mut self, cx: &mut Context<Self>) {
-        let (query, replace_str, match_pos) = {
+        let (replace_str, (start, end)) = {
             let Some(ref s) = self.search else { return };
             let Some(ref r) = s.replace else { return };
             if s.matches.is_empty() || s.query.is_empty() { return; }
-            (s.query.clone(), r.clone(), s.matches[s.current_idx])
+            (r.clone(), s.matches[s.current_idx])
         };
 
         self.push_undo();
-        let qlen = query.len();
-        self.buffer.delete_range(match_pos.line, match_pos.col, match_pos.col + qlen);
-        self.buffer.insert(match_pos.line, match_pos.col, &replace_str);
+        self.buffer.delete_range(start.line, start.col, end.col);
+        self.buffer.insert(start.line, start.col, &replace_str);
         self.state.is_dirty = true;
 
         // Recompute matches after the edit; advance to next.
@@ -1561,19 +1560,18 @@ impl EditorPane {
 
     /// Replace every occurrence of the search query with the replacement string.
     fn replace_all(&mut self, cx: &mut Context<Self>) {
-        let (query, replace_str, matches) = {
+        let (replace_str, matches) = {
             let Some(ref s) = self.search else { return };
             let Some(ref r) = s.replace else { return };
             if s.query.is_empty() || s.matches.is_empty() { return; }
-            (s.query.clone(), r.clone(), s.matches.clone())
+            (r.clone(), s.matches.clone())
         };
 
         self.push_undo();
-        let qlen = query.len();
         // Iterate in reverse so earlier positions stay valid after each deletion.
-        for m in matches.iter().rev() {
-            self.buffer.delete_range(m.line, m.col, m.col + qlen);
-            self.buffer.insert(m.line, m.col, &replace_str);
+        for &(start, end) in matches.iter().rev() {
+            self.buffer.delete_range(start.line, start.col, end.col);
+            self.buffer.insert(start.line, start.col, &replace_str);
         }
         self.state.is_dirty = true;
 
@@ -2021,7 +2019,10 @@ impl EditorPane {
             }
             KeymapResult::SearchWordForward => {
                 if let Some(word) = self.word_under_cursor() {
-                    self.last_search = Some(word);
+                    // `/` search is regex; `*`/`#` must stay literal even if
+                    // the "word" under the cursor happens to be punctuation
+                    // containing regex metacharacters.
+                    self.last_search = Some(regex::escape(&word));
                     self.last_search_backward = false;
                     self.last_search_whole_word = true;
                     // Clear bar-open state before navigating.
@@ -2032,7 +2033,7 @@ impl EditorPane {
             }
             KeymapResult::SearchWordBackward => {
                 if let Some(word) = self.word_under_cursor() {
-                    self.last_search = Some(word);
+                    self.last_search = Some(regex::escape(&word));
                     self.last_search_backward = true;
                     self.last_search_whole_word = true;
                     self.search_highlight_matches.clear();
@@ -2661,15 +2662,13 @@ impl Render for EditorPane {
 
         // Per-line search highlight data: bar-open takes precedence, otherwise
         // use the persistent highlights left over from the last completed search.
-        let (search_query_len, search_matches_ref): (usize, Option<(&Vec<Pos>, usize)>) =
-            if let Some(ref s) = self.search {
-                (s.query.len(), Some((&s.matches, s.current_idx)))
-            } else if !self.search_highlight_matches.is_empty() {
-                let qlen = self.last_search.as_deref().map(|q| q.len()).unwrap_or(0);
-                (qlen, Some((&self.search_highlight_matches, self.search_highlight_current)))
-            } else {
-                (0, None)
-            };
+        let search_matches_ref: Option<(&Vec<(Pos, Pos)>, usize)> = if let Some(ref s) = self.search {
+            Some((&s.matches, s.current_idx))
+        } else if !self.search_highlight_matches.is_empty() {
+            Some((&self.search_highlight_matches, self.search_highlight_current))
+        } else {
+            None
+        };
 
         let lnm = self.line_number_mode;
 
@@ -2737,21 +2736,17 @@ impl Render for EditorPane {
             // Collect search match byte-ranges that fall on this line.
             let (focused_match, other_matches): (Option<(usize, usize)>, Vec<(usize, usize)>) =
                 if let Some((matches, cur_idx)) = search_matches_ref {
-                    if search_query_len > 0 {
-                        let focused = matches
-                            .get(cur_idx)
-                            .filter(|p| p.line == i)
-                            .map(|p| (p.col, p.col + search_query_len));
-                        let others: Vec<_> = matches
-                            .iter()
-                            .enumerate()
-                            .filter(|&(idx, p)| p.line == i && idx != cur_idx)
-                            .map(|(_, p)| (p.col, p.col + search_query_len))
-                            .collect();
-                        (focused, others)
-                    } else {
-                        (None, vec![])
-                    }
+                    let focused = matches
+                        .get(cur_idx)
+                        .filter(|(start, _)| start.line == i)
+                        .map(|(start, end)| (start.col, end.col));
+                    let others: Vec<_> = matches
+                        .iter()
+                        .enumerate()
+                        .filter(|&(idx, (start, _))| start.line == i && idx != cur_idx)
+                        .map(|(_, &(start, end))| (start.col, end.col))
+                        .collect();
+                    (focused, others)
                 } else {
                     (None, vec![])
                 };
@@ -3721,24 +3716,29 @@ fn is_whole_word_match(line: &str, start: usize, end: usize) -> bool {
     before_ok && after_ok
 }
 
-/// Find all occurrences of `query` in `buf`, returning the start `Pos` of each.
-/// Returns an empty vec if `query` is empty.
+/// Find all regex matches of `pattern` in `buf` (searched line by line — `/`
+/// search doesn't span lines), returning each match's `(start, end)` `Pos`
+/// pair. Returns an empty vec if `pattern` is empty or fails to compile (a
+/// pattern mid-typing, e.g. an unbalanced paren, just shows "no matches"
+/// rather than a separate error state).
 /// When `whole_word` is `true`, only matches bounded by non-word characters are returned.
-fn find_all_matches(buf: &InMemoryBuffer, query: &str, whole_word: bool) -> Vec<Pos> {
+fn find_all_matches(buf: &InMemoryBuffer, pattern: &str, whole_word: bool) -> Vec<(Pos, Pos)> {
     let mut out = Vec::new();
-    if query.is_empty() {
+    if pattern.is_empty() {
         return out;
     }
+    let Ok(re) = regex::Regex::new(pattern) else {
+        return out;
+    };
     for line_idx in 0..buf.line_count() {
         let line = buf.line(line_idx);
-        let mut offset = 0usize;
-        while let Some(rel) = line[offset..].find(query) {
-            let abs = offset + rel;
-            if !whole_word || is_whole_word_match(line, abs, abs + query.len()) {
-                out.push(Pos::new(line_idx, abs));
+        for m in re.find_iter(line) {
+            if m.start() == m.end() {
+                continue; // zero-width matches aren't a navigable/highlightable span
             }
-            // Advance by at least 1 to avoid infinite loops on zero-width matches.
-            offset += rel + query.len().max(1);
+            if !whole_word || is_whole_word_match(line, m.start(), m.end()) {
+                out.push((Pos::new(line_idx, m.start()), Pos::new(line_idx, m.end())));
+            }
         }
     }
     out
@@ -4451,6 +4451,59 @@ mod tests {
         keymap_helix::HelixKeymap,
         state::Mode,
     };
+
+    #[test]
+    fn find_all_matches_supports_real_regex() {
+        let buf = InMemoryBuffer::from_text("a1 b22 c333");
+        let matches = find_all_matches(&buf, r"\d+", false);
+        assert_eq!(matches, vec![
+            (Pos::new(0, 1), Pos::new(0, 2)),
+            (Pos::new(0, 4), Pos::new(0, 6)),
+            (Pos::new(0, 8), Pos::new(0, 11)),
+        ]);
+    }
+
+    #[test]
+    fn find_all_matches_variable_length_within_one_line() {
+        // Matches of different widths on the same line — this is exactly
+        // what broke the old query.len()-assumes-fixed-width highlight math.
+        let buf = InMemoryBuffer::from_text("cat cats category");
+        let matches = find_all_matches(&buf, "cats?", false);
+        assert_eq!(matches, vec![
+            (Pos::new(0, 0), Pos::new(0, 3)),
+            (Pos::new(0, 4), Pos::new(0, 8)),
+            (Pos::new(0, 9), Pos::new(0, 12)),
+        ]);
+    }
+
+    #[test]
+    fn find_all_matches_invalid_pattern_is_empty_not_a_panic() {
+        let buf = InMemoryBuffer::from_text("foo(bar");
+        assert_eq!(find_all_matches(&buf, "(unclosed", false), vec![]);
+    }
+
+    #[test]
+    fn find_all_matches_empty_pattern_is_empty() {
+        let buf = InMemoryBuffer::from_text("hello");
+        assert_eq!(find_all_matches(&buf, "", false), vec![]);
+    }
+
+    #[test]
+    fn find_all_matches_zero_width_matches_are_skipped() {
+        // "a*" matches the empty string between every character too — those
+        // aren't a navigable/highlightable span and would previously have
+        // needed the "advance by at least 1" infinite-loop guard.
+        let buf = InMemoryBuffer::from_text("baaab");
+        let matches = find_all_matches(&buf, "a*", false);
+        assert_eq!(matches, vec![(Pos::new(0, 1), Pos::new(0, 4))]);
+    }
+
+    #[test]
+    fn find_all_matches_whole_word_filters_partial_matches() {
+        let buf = InMemoryBuffer::from_text("cat concatenate cat");
+        let matches = find_all_matches(&buf, "cat", true);
+        assert_eq!(matches, vec![(Pos::new(0, 0), Pos::new(0, 3)), (Pos::new(0, 16), Pos::new(0, 19))]);
+    }
 
     #[test]
     fn utf16_byte_roundtrip_ascii() {

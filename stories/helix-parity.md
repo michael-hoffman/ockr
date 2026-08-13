@@ -117,7 +117,7 @@ back into view if it scrolls off). Pure `viewport_top` ops, not `EditorCommand`
 
 | Key(s)        | Helix action                        | Status | Notes |
 |---------------|-------------------------------------|--------|-------|
-| `/`           | Search forward                      | ✅     | Live-update; Enter confirms, Escape restores cursor |
+| `/`           | Search forward                      | ✅     | Regex (Rust `regex` crate), matching Helix. Live-update; Enter confirms, Escape restores cursor |
 | `?`           | Search backward                     | ✅     | Same as `/` but initial match is before cursor |
 | `n`           | Repeat search forward               | ✅     | Repeats in the original search direction |
 | `N`           | Repeat search backward              | ✅     | Repeats in the opposite direction |

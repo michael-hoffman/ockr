@@ -187,6 +187,11 @@ to the same session file as open tabs/recent files — not `settings.toml`).
 
 ### Normal Mode — Search
 
+`/`/`?` search patterns are **regex** (Rust `regex` syntax), matching Helix.
+`*`/`#` (search word under cursor) always stay literal, even if the word
+happens to contain regex metacharacters. An invalid pattern just shows no
+matches — no separate error state.
+
 | Key           | Action                              |
 |---------------|-------------------------------------|
 | `/`           | Open forward search bar             |
