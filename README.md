@@ -35,7 +35,7 @@ See [docs/index.md](docs/index.md) for the full feature list and
 ### Homebrew (recommended)
 
 ```sh
-brew tap michael-hoffman/ockr
+brew tap michael-hoffman/ockr https://github.com/michael-hoffman/ockr
 brew install --cask ockr
 ```
 
