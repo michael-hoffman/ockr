@@ -32,7 +32,18 @@ See [docs/index.md](docs/index.md) for the full feature list and
 
 ## Install
 
-### Download (recommended)
+### Homebrew (recommended)
+
+```sh
+brew tap michael-hoffman/ockr
+brew install --cask ockr
+```
+
+The app isn't notarized yet (no Apple Developer ID), so a plain download
+would need a manual right-click → Open past Gatekeeper — the cask strips
+the quarantine attribute for you, so this just works.
+
+### Download
 
 Grab the latest `ockr-<version>.dmg` from
 [Releases](https://github.com/michael-hoffman/ockr/releases), open it, and drag
