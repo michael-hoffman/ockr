@@ -1942,8 +1942,8 @@ impl MainWindow {
                 });
             }
             "write-quit" => {
-                // Save the active editor, then quit — implement directly because the
-                // SaveFileAndQuit App-level action is a TODO stub.
+                // Save the active editor, then quit — direct call so focus
+                // state doesn't matter, same reasoning as "write" above.
                 self.active_editor().clone().update(cx, |pane, cx| {
                     pane.save(cx);
                 });

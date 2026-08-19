@@ -314,9 +314,6 @@ fn main() {
         });
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &ForceQuit, cx| cx.quit());
-        cx.on_action(|_: &SaveFileAndQuit, _cx| {
-            // TODO: trigger save on active editor then quit
-        });
         cx.on_action(|_: &ReloadFile, _cx| {
             // TODO: reload active file from disk
         });

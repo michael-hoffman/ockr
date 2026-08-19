@@ -16,7 +16,6 @@ actions!(
         // Vault / file operations
         NewNote,
         SaveFile,
-        SaveFileAndQuit,
         ReloadFile,
         OpenVault,
         // Layout
