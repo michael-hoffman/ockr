@@ -13,21 +13,29 @@ use std::collections::HashMap;
 
 use crate::vault::VaultFile;
 
-/// Rewrite all `[[wikilinks]]` in `source` to typst `#link(...)` calls.
+/// Build the normalised-title → vault-relative-path lookup `preprocess_wikilinks`
+/// resolves against.
 ///
-/// - `[[Note Title]]` → `#link("path/to/note.typ")[Note Title]`
-/// - `[[Note Title|Display Text]]` → `#link("path/to/note.typ")[Display Text]`
-/// - Unresolved links render as red text instead of causing a compile error.
-pub fn preprocess_wikilinks(source: &str, files: &[VaultFile]) -> String {
-    // Build normalised-title → vault-relative-path lookup.
-    let index: HashMap<String, String> = files
+/// Callers that preprocess repeatedly against the same file list (every
+/// compile debounce window) should build this once — e.g. `VaultState`
+/// builds it alongside `files` in `open()` — rather than pass `files` and
+/// have it rebuilt from scratch on every call.
+pub fn build_wikilink_index(files: &[VaultFile]) -> HashMap<String, String> {
+    files
         .iter()
         .map(|f| {
             let path = f.rel_path.to_string_lossy().replace('\\', "/");
             (normalise(&f.title), path)
         })
-        .collect();
+        .collect()
+}
 
+/// Rewrite all `[[wikilinks]]` in `source` to typst `#link(...)` calls.
+///
+/// - `[[Note Title]]` → `#link("path/to/note.typ")[Note Title]`
+/// - `[[Note Title|Display Text]]` → `#link("path/to/note.typ")[Display Text]`
+/// - Unresolved links render as red text instead of causing a compile error.
+pub fn preprocess_wikilinks(source: &str, index: &HashMap<String, String>) -> String {
     let mut result = source.to_owned();
     let mut offset = 0usize;
 
@@ -99,20 +107,20 @@ mod tests {
     #[test]
     fn resolves_exact_title() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
-        let out = preprocess_wikilinks("See [[Bayes Theorem]] for details.", &files);
+        let out = preprocess_wikilinks("See [[Bayes Theorem]] for details.", &build_wikilink_index(&files));
         assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes Theorem] for details.");
     }
 
     #[test]
     fn custom_display_text() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
-        let out = preprocess_wikilinks("See [[Bayes Theorem|Bayes]] for details.", &files);
+        let out = preprocess_wikilinks("See [[Bayes Theorem|Bayes]] for details.", &build_wikilink_index(&files));
         assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes] for details.");
     }
 
     #[test]
     fn broken_link_renders_as_red_text() {
-        let out = preprocess_wikilinks("See [[Missing Note]] here.", &[]);
+        let out = preprocess_wikilinks("See [[Missing Note]] here.", &build_wikilink_index(&[]));
         assert!(out.contains("Missing Note"), "display text must be preserved");
         assert!(!out.contains("[["), "wikilink syntax must be removed");
         assert!(out.contains("fill:") || out.contains("text"), "broken link must use #text");
@@ -121,7 +129,7 @@ mod tests {
     #[test]
     fn no_links_returns_source_unchanged() {
         let src = "No wikilinks here.";
-        assert_eq!(preprocess_wikilinks(src, &[]), src);
+        assert_eq!(preprocess_wikilinks(src, &build_wikilink_index(&[])), src);
     }
 
     #[test]
@@ -130,7 +138,7 @@ mod tests {
             file("alpha", "alpha.typ"),
             file("beta", "beta.typ"),
         ];
-        let out = preprocess_wikilinks("[[Alpha]] and [[Beta]].", &files);
+        let out = preprocess_wikilinks("[[Alpha]] and [[Beta]].", &build_wikilink_index(&files));
         assert!(out.contains("#link(\"ockr://alpha.typ\")[Alpha]"));
         assert!(out.contains("#link(\"ockr://beta.typ\")[Beta]"));
     }
@@ -139,7 +147,7 @@ mod tests {
     fn hyphen_underscore_normalisation() {
         let files = vec![file("my-note", "my-note.typ")];
         // "My Note" (spaces) should match "my-note" (hyphens) after normalisation.
-        let out = preprocess_wikilinks("[[My Note]]", &files);
+        let out = preprocess_wikilinks("[[My Note]]", &build_wikilink_index(&files));
         assert!(out.contains("#link(\"ockr://my-note.typ\")"), "hyphen↔space normalisation failed");
     }
 }

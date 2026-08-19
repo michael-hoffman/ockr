@@ -30,6 +30,12 @@ pub struct VaultState {
     pub root: Option<PathBuf>,
     /// All `.typ` files in the vault, sorted by title.
     pub files: Vec<VaultFile>,
+    /// Normalised-title → vault-relative-path lookup for `[[wikilink]]`
+    /// resolution, built alongside `files` so it's never stale — every
+    /// `files` mutation goes through `VaultState::open`, which rebuilds
+    /// both together. Compiling used to rebuild this from `files` on every
+    /// keystroke; now it's just read.
+    pub wikilink_index: std::collections::HashMap<String, String>,
     /// In-memory backlink graph. Updated on open and on each file save.
     pub backlinks: BacklinkIndex,
     /// `true` while the backlink index is being built on a background thread.
@@ -42,6 +48,7 @@ impl VaultState {
         Self {
             root: None,
             files: Vec::new(),
+            wikilink_index: std::collections::HashMap::new(),
             backlinks: BacklinkIndex::new(),
             indexing: false,
         }
@@ -60,12 +67,14 @@ impl VaultState {
         }
 
         let files = scan_for_typ_files(&root);
+        let wikilink_index = crate::compiler::preprocess::build_wikilink_index(&files);
 
         // Try the on-disk cache first (Story 37).
         if let Some(index) = backlinks::try_load_cache(&root, &files) {
             return Self {
                 root: Some(root),
                 files,
+                wikilink_index,
                 backlinks: index,
                 indexing: false,
             };
@@ -76,6 +85,7 @@ impl VaultState {
         Self {
             root: Some(root),
             files,
+            wikilink_index,
             backlinks: BacklinkIndex::new(),
             indexing: true,
         }

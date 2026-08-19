@@ -278,9 +278,12 @@ pub struct EditorPane {
     /// the compiler returns errors or warnings.  Used to render per-line
     /// indicator gutter marks.
     diagnostics: Vec<Diagnostic>,
-    /// Cached (word_count, char_count) — `None` means stale.
+    /// Cached (word_count, char_count, front_matter_end) — `None` means stale.
     /// Invalidated whenever the buffer mutates; recomputed lazily in `render()`.
-    cached_doc_stats: Option<(usize, usize)>,
+    /// front_matter_end shares this cache (rather than its own field with its
+    /// own invalidation sites) purely because it's invalidated by exactly the
+    /// same buffer mutations as the word/char counts already are.
+    cached_doc_meta: Option<(usize, usize, Option<usize>)>,
     /// Microseconds elapsed for the last `handle_key_down` call (perf overlay).
     last_key_micros: Option<u128>,
     /// Whether the `OCKR_PERF=1` timing overlay is enabled (set once at init).
@@ -435,7 +438,7 @@ impl EditorPane {
             compile_sequence: 0,
             viewport_top: 0,
             diagnostics: Vec::new(),
-            cached_doc_stats: None,
+            cached_doc_meta: None,
             last_key_micros: None,
             perf_overlay: std::env::var_os("OCKR_PERF").is_some(),
             recording_macro: None,
@@ -633,7 +636,7 @@ impl EditorPane {
         self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
-        self.cached_doc_stats = None;
+        self.cached_doc_meta = None;
         self.hover_popup = None;
         self.marks.clear();
     }
@@ -731,7 +734,7 @@ impl EditorPane {
         let (undo, redo) = crate::undo_store::load_undo_history(&file.abs_path);
         self.undo_history = undo;
         self.redo_history = redo;
-        self.cached_doc_stats = None;
+        self.cached_doc_meta = None;
         self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -744,8 +747,7 @@ impl EditorPane {
         self.hover_popup = None;
         if let (Some(ref lsp), Some(ref path)) = (&self.lsp, &self.state.path) {
             let uri = crate::lsp::path_to_uri(path);
-            let text = self.buffer.text().to_string();
-            lsp.notify_open(uri, text);
+            lsp.notify_open(uri, self.buffer.text());
             self.lsp_doc_opened = true;
             self.lsp_doc_version = 1;
         }
@@ -755,67 +757,76 @@ impl EditorPane {
 
     /// Schedule a compile after a 50 ms debounce.
     ///
-    /// Each call increments `compile_sequence`.  The spawned task captures
-    /// the current sequence number and drops the request if a newer call
-    /// arrived before the timer fires — giving a trailing debounce with no
-    /// extra dependencies.  Fast typists therefore produce at most ~20
-    /// compile requests per second instead of one per keystroke.
-    ///
-    /// Also marks the preview pane as stale immediately so the UI shows
-    /// visual feedback that a compile is pending.
+    /// Each call increments `compile_sequence` immediately, but everything
+    /// expensive (joining the buffer into one string, resolving wikilinks,
+    /// cloning the vault's file list, notifying the LSP) happens *inside*
+    /// the debounced task, not here — so a fast typist pays that cost once
+    /// per quiet window instead of once per keystroke. The task re-checks
+    /// `compile_sequence` right before doing that work, so a superseded
+    /// request (a newer keystroke already landed) skips it entirely rather
+    /// than building a `CompileRequest` just to throw it away.
     pub(crate) fn trigger_compile(&mut self, cx: &mut Context<Self>) {
-        // Notify LSP of the changed document content.
-        if self.lsp_doc_opened {
-            if let (Some(ref lsp), Some(ref path)) = (&self.lsp, &self.state.path) {
-                self.lsp_doc_version += 1;
-                let uri = crate::lsp::path_to_uri(path);
-                let version = self.lsp_doc_version;
-                let text = self.buffer.text().to_string();
-                lsp.notify_change(uri, version, text);
-            }
-        }
-
         let Some(compiler) = self.compiler.clone() else { return };
 
-        // Bump sequence — the old task will see a mismatch and drop.
+        // Bump sequence — an in-flight debounced task from an earlier
+        // keystroke will see this mismatch and drop itself.
         let seq = self.compile_sequence.wrapping_add(1);
         self.compile_sequence = seq;
 
-        // Build the compile request from current buffer state.
-        let files = self.vault.as_ref()
-            .map(|v| v.read(cx).files.clone())
-            .unwrap_or_default();
-        // Read the active preview mode from the GPUI global (set by MainWindow toggle).
-        let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
-
-        // Preprocess source: resolve wikilinks, then optionally prepend the
-        // HTML preamble that fixes inline-math paragraph splitting (a known
-        // Typst HTML-export limitation — `$x$` is treated as a block element
-        // unless wrapped with `box` via a show rule).
-        let preprocessed = preprocess_wikilinks(&self.buffer.text(), &files);
-        let source = if mode == PreviewMode::Html {
-            format!("{HTML_PREAMBLE}{preprocessed}")
-        } else {
-            preprocessed
-        };
-
-        let request = CompileRequest {
-            source,
-            vault_root: self.vault_root.clone(),
-            file_path: self.file_rel_path.clone(),
-            mode,
-            plugin_packages: self.plugin_packages.clone(),
-        };
-
         cx.spawn(async move |this, cx| {
-            // 50 ms trailing debounce.
             cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-            // Check if this request is still current.
-            let still_current = cx.update(|cx| {
-                this.update(cx, |pane, _| pane.compile_sequence == seq)
-                    .unwrap_or(false)
-            }).unwrap_or(false);
-            if still_current {
+
+            let request = cx.update(|cx| {
+                this.update(cx, |pane, cx| {
+                    if pane.compile_sequence != seq {
+                        return None;
+                    }
+
+                    // One buffer join, reused for both the LSP notify and
+                    // the wikilink preprocessing below (previously each
+                    // computed its own copy on every keystroke).
+                    let text = pane.buffer.text();
+
+                    if pane.lsp_doc_opened {
+                        if let (Some(lsp), Some(path)) = (pane.lsp.clone(), pane.state.path.clone()) {
+                            pane.lsp_doc_version += 1;
+                            let uri = crate::lsp::path_to_uri(&path);
+                            lsp.notify_change(uri, pane.lsp_doc_version, text.clone());
+                        }
+                    }
+
+                    // Read the active preview mode from the GPUI global (set by MainWindow toggle).
+                    let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+
+                    // Preprocess source: resolve wikilinks against the vault's
+                    // pre-built index (rebuilt only when files actually
+                    // change, in VaultState::open — not on every compile),
+                    // then optionally prepend the HTML preamble that fixes
+                    // inline-math paragraph splitting (a known Typst
+                    // HTML-export limitation — `$x$` is treated as a block
+                    // element unless wrapped with `box` via a show rule).
+                    let empty_index = std::collections::HashMap::new();
+                    let wikilink_index = pane.vault.as_ref()
+                        .map(|v| &v.read(cx).wikilink_index)
+                        .unwrap_or(&empty_index);
+                    let preprocessed = preprocess_wikilinks(&text, wikilink_index);
+                    let source = if mode == PreviewMode::Html {
+                        format!("{HTML_PREAMBLE}{preprocessed}")
+                    } else {
+                        preprocessed
+                    };
+
+                    Some(CompileRequest {
+                        source,
+                        vault_root: pane.vault_root.clone(),
+                        file_path: pane.file_rel_path.clone(),
+                        mode,
+                        plugin_packages: pane.plugin_packages.clone(),
+                    })
+                }).unwrap_or(None)
+            }).unwrap_or(None);
+
+            if let Some(request) = request {
                 compiler.send(request);
             }
         }).detach();
@@ -866,7 +877,7 @@ impl EditorPane {
         self.state.is_dirty = false;
         self.undo_history.clear();
         self.redo_history.clear();
-        self.cached_doc_stats = None;
+        self.cached_doc_meta = None;
         self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -1217,7 +1228,7 @@ impl EditorPane {
         self.push_undo();
         apply_lsp_text_edits(&mut self.buffer, edits);
         self.state.is_dirty = true;
-        self.cached_doc_stats = None;
+        self.cached_doc_meta = None;
         self.update_viewport();
         self.trigger_compile(cx);
         cx.notify();
@@ -1614,7 +1625,7 @@ impl EditorPane {
         let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
         self.state = new_state;
         if effect == SideEffect::BufferChanged {
-            self.cached_doc_stats = None;
+            self.cached_doc_meta = None;
             self.trigger_compile(cx);
         }
         self.update_viewport();
@@ -1640,7 +1651,7 @@ impl EditorPane {
             let (new_state, effect) = apply(op_cmd, prev2, &mut self.buffer);
             self.state = new_state;
             if effect == SideEffect::BufferChanged {
-                self.cached_doc_stats = None;
+                self.cached_doc_meta = None;
                 self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -2045,7 +2056,7 @@ impl EditorPane {
                 let (new_state, effect) = apply(cmd, prev, &mut self.buffer);
                 self.state = new_state;
                 if effect == SideEffect::BufferChanged {
-                    self.cached_doc_stats = None;
+                    self.cached_doc_meta = None;
                 self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -2446,7 +2457,7 @@ impl EditorPane {
             if handled {
                 // Buffer was already mutated for all cursors.  Apply side effects.
                 cx.stop_propagation();
-                self.cached_doc_stats = None;
+                self.cached_doc_meta = None;
                 self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -2519,7 +2530,7 @@ impl EditorPane {
             SideEffect::BufferChanged => {
                 // Record where the buffer was last mutated for `g.`.
                 self.state.last_modified_pos = Some(self.state.cursor());
-                self.cached_doc_stats = None;
+                self.cached_doc_meta = None;
                 self.spell_errors = None;
         self.spell_seq = self.spell_seq.wrapping_add(1);
         self.spell_pending = false;
@@ -2546,7 +2557,7 @@ impl EditorPane {
             self.state.move_cursor_to(pos);
             self.state.extra_cursors.clear();
             self.state.is_dirty = true;
-            self.cached_doc_stats = None;
+            self.cached_doc_meta = None;
             self.update_viewport();
             self.trigger_compile(cx);
             cx.notify();
@@ -2562,7 +2573,7 @@ impl EditorPane {
             self.state.move_cursor_to(pos);
             self.state.extra_cursors.clear();
             self.state.is_dirty = true;
-            self.cached_doc_stats = None;
+            self.cached_doc_meta = None;
             self.update_viewport();
             self.trigger_compile(cx);
             cx.notify();
@@ -2625,7 +2636,17 @@ impl Render for EditorPane {
         let mode = self.state.mode;
         let selection = self.state.selection;
 
-        let front_matter_end = front_matter_end(&self.buffer, line_count);
+        // Word/char counts and the front-matter boundary are invalidated by
+        // exactly the same buffer mutations, so they share one cache slot —
+        // recomputed together, lazily, at most once per edit instead of
+        // front_matter_end's previous every-render (including pure cursor
+        // motion) O(document) scan for the first heading.
+        if self.cached_doc_meta.is_none() {
+            let (words, chars) = self.compute_doc_stats();
+            let fm_end = front_matter_end(&self.buffer, line_count);
+            self.cached_doc_meta = Some((words, chars, fm_end));
+        }
+        let (word_count, char_count, front_matter_end) = self.cached_doc_meta.unwrap();
 
         // Compute matching bracket position (if cursor is on a bracket).
         let bracket_match = find_bracket_match(&self.buffer, cursor);
@@ -2761,11 +2782,6 @@ impl Render for EditorPane {
 
         // ── Document stats ─────────────────────────────────────────────────
         let line_count_total: usize = self.buffer.line_count();
-        if self.cached_doc_stats.is_none() {
-            let stats = self.compute_doc_stats();
-            self.cached_doc_stats = Some(stats);
-        }
-        let (word_count, char_count) = self.cached_doc_stats.unwrap();
         let doc_stats_label = if let Some(target) = self.word_target {
             let pct = ((word_count as f64 / target as f64) * 100.0).min(100.0) as usize;
             format!("{} / {} w ({}%) · {} ch · {} L", word_count, target, pct, char_count, line_count_total)
