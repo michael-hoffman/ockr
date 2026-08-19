@@ -915,24 +915,31 @@ impl EditorPane {
             .join("\n")
     }
 
-    /// Compute (word_count, char_count) by iterating lines directly.
-    /// Avoids allocating a full buffer join string — O(N) chars but no heap join.
-    /// Return the highest-severity diagnostic (compiler + LSP) on `line`,
-    /// or `None` if the line is clean.  Error beats Warning.
-    fn merged_diag_sev(&self, line: usize) -> Option<DiagnosticSeverity> {
-        let comp_any = self.diagnostics.iter().any(|d| d.line == Some(line));
-        let lsp_any = self.lsp_diagnostics.iter().any(|d| d.range.start.line == line);
-        if !comp_any && !lsp_any {
-            return None;
+    /// Build a per-line "worst severity" map from both diagnostic sources
+    /// (compiler + LSP) in one combined pass — error beats warning on a line
+    /// with both. Used to look up each visible line's gutter indicator in
+    /// O(1) instead of the previous per-line linear scan over both
+    /// diagnostic vectors (called up to `VIEWPORT_LINES` times per render).
+    fn merged_diag_sev_map(&self) -> std::collections::HashMap<usize, DiagnosticSeverity> {
+        let mut map = std::collections::HashMap::new();
+        for d in &self.diagnostics {
+            let Some(line) = d.line else { continue };
+            let entry = map.entry(line).or_insert(DiagnosticSeverity::Warning);
+            if matches!(d.severity, DiagnosticSeverity::Error) {
+                *entry = DiagnosticSeverity::Error;
+            }
         }
-        let has_error = self.diagnostics.iter().any(|d| {
-            d.line == Some(line) && matches!(d.severity, DiagnosticSeverity::Error)
-        }) || self.lsp_diagnostics.iter().any(|d| {
-            d.range.start.line == line && matches!(d.severity, LspSeverity::Error)
-        });
-        Some(if has_error { DiagnosticSeverity::Error } else { DiagnosticSeverity::Warning })
+        for d in &self.lsp_diagnostics {
+            let entry = map.entry(d.range.start.line).or_insert(DiagnosticSeverity::Warning);
+            if matches!(d.severity, LspSeverity::Error) {
+                *entry = DiagnosticSeverity::Error;
+            }
+        }
+        map
     }
 
+    /// Compute (word_count, char_count) by iterating lines directly.
+    /// Avoids allocating a full buffer join string — O(N) chars but no heap join.
     fn compute_doc_stats(&self) -> (usize, usize) {
         let mut words = 0usize;
         let mut chars = 0usize;
@@ -1696,12 +1703,13 @@ impl EditorPane {
             // Gather matching vault titles.
             let fragment_lower = fragment.to_ascii_lowercase();
             let candidates: Vec<String> = if let Some(ref vault_entity) = self.vault {
-                vault_entity
-                    .read(cx)
+                let vault = vault_entity.read(cx);
+                vault
                     .files
                     .iter()
-                    .filter(|f| f.title.to_ascii_lowercase().contains(&fragment_lower))
-                    .map(|f| f.title.clone())
+                    .zip(vault.title_lower.iter())
+                    .filter(|(_, tl)| tl.contains(&fragment_lower))
+                    .map(|(f, _)| f.title.clone())
                     .take(8)
                     .collect()
             } else {
@@ -2719,6 +2727,7 @@ impl Render for EditorPane {
             }
         }
         let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);
+        let diag_map = self.merged_diag_sev_map();
 
         let mut line_elements = Vec::with_capacity(last - first);
         for i in first..last {
@@ -2749,7 +2758,7 @@ impl Render for EditorPane {
                 };
 
             // Highest-severity diagnostic on this line (compiler + LSP; error beats warning).
-            let diag_sev = self.merged_diag_sev(i);
+            let diag_sev = diag_map.get(&i).copied();
 
             // Bracket match highlight: byte range on this line (if any).
             let bracket_range: Option<(usize, usize)> = bracket_match
@@ -3936,13 +3945,15 @@ fn render_line(
     let text_content: String = if eol_cursor || extra_eol {
         format!("{} ", text)
     } else {
-        text.clone()
+        text
     };
 
     for w in boundaries.windows(2) {
         let (a, b) = (w[0], w[1]);
         if a >= b { continue; }
-        if text.get(a..b).is_none() { continue; }
+        // `boundaries` are all `<= text_len`, so this slices the same bytes
+        // whether or not `text_content` carries the EOL padding space.
+        if text_content.get(a..b).is_none() { continue; }
 
         // Inline block cursor for Normal/Visual (flows with the wrapped text
         // layout).  Insert mode paints a thin bar via the caret canvas below,

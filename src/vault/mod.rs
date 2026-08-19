@@ -36,6 +36,11 @@ pub struct VaultState {
     /// both together. Compiling used to rebuild this from `files` on every
     /// keystroke; now it's just read.
     pub wikilink_index: std::collections::HashMap<String, String>,
+    /// Lowercased titles, parallel to `files` (same order/length) — built
+    /// alongside `files` in `open()` for the same reason as `wikilink_index`.
+    /// The wikilink-autocomplete filter used to lowercase every title on
+    /// every keystroke; now it just reads this.
+    pub title_lower: Vec<String>,
     /// In-memory backlink graph. Updated on open and on each file save.
     pub backlinks: BacklinkIndex,
     /// `true` while the backlink index is being built on a background thread.
@@ -49,6 +54,7 @@ impl VaultState {
             root: None,
             files: Vec::new(),
             wikilink_index: std::collections::HashMap::new(),
+            title_lower: Vec::new(),
             backlinks: BacklinkIndex::new(),
             indexing: false,
         }
@@ -68,6 +74,7 @@ impl VaultState {
 
         let files = scan_for_typ_files(&root);
         let wikilink_index = crate::compiler::preprocess::build_wikilink_index(&files);
+        let title_lower: Vec<String> = files.iter().map(|f| f.title.to_ascii_lowercase()).collect();
 
         // Try the on-disk cache first (Story 37).
         if let Some(index) = backlinks::try_load_cache(&root, &files) {
@@ -75,6 +82,7 @@ impl VaultState {
                 root: Some(root),
                 files,
                 wikilink_index,
+                title_lower,
                 backlinks: index,
                 indexing: false,
             };
@@ -86,6 +94,7 @@ impl VaultState {
             root: Some(root),
             files,
             wikilink_index,
+            title_lower,
             backlinks: BacklinkIndex::new(),
             indexing: true,
         }
