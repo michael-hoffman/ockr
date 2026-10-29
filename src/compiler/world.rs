@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use super::PluginPackages;
 
 use typst::diag::{EcoString, FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt, World};
@@ -64,7 +64,11 @@ impl OckrWorld {
     pub fn new() -> Self {
         let (fonts, book) = load_bundled_fonts();
         // Start with a placeholder id; `set_source` assigns the real one.
-        let main_id = FileId::new(None, VirtualPath::new("/main.typ"));
+        let main_id = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new("/main.typ").expect("valid path"),
+        )
+        .intern();
         let source = Source::new(main_id, String::new());
 
         // Enable the experimental HTML export feature so
@@ -122,7 +126,11 @@ impl OckrWorld {
     /// in-place so typst's incremental parser can diff the previous parse tree.
     pub fn set_source(&mut self, vault_rel_path: &str, text: String) {
         let vpath = format!("/{}", vault_rel_path.trim_start_matches('/'));
-        let new_id = FileId::new(None, VirtualPath::new(&vpath));
+        let new_id = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new(&vpath).expect("vault-relative path is valid"),
+        )
+        .intern();
 
         let mut src = self.source.lock().expect("mutex poisoned");
         if new_id == self.main_id {
@@ -217,16 +225,18 @@ impl World for OckrWorld {
         self.fonts.get(index).cloned()
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         // Use the `time` crate to get the current local or UTC date.
-        let now = if offset.is_none() {
+        let now = match offset {
             // Local time — may fail on some platforms; fall back to UTC.
-            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc())
-        } else {
-            let offset_hours = offset.unwrap_or(0);
-            let tz_offset =
-                time::UtcOffset::from_hms(offset_hours as i8, 0, 0).unwrap_or(time::UtcOffset::UTC);
-            time::OffsetDateTime::now_utc().to_offset(tz_offset)
+            None => time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
+            Some(offset) => {
+                let seconds = time::Duration::from(offset).whole_seconds() as i32;
+                let tz_offset =
+                    time::UtcOffset::from_whole_seconds(seconds).unwrap_or(time::UtcOffset::UTC);
+                time::OffsetDateTime::now_utc().to_offset(tz_offset)
+            }
         };
         Datetime::from_ymd_hms(
             now.year(),

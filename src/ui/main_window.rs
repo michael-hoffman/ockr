@@ -246,7 +246,7 @@ pub struct MainWindow {
     graph_view: Option<Entity<GraphView>>,
     recent_paths: Vec<PathBuf>,
     /// Last successfully compiled paged document (used for PDF export).
-    last_paged_doc: Option<std::sync::Arc<typst::layout::PagedDocument>>,
+    last_paged_doc: Option<std::sync::Arc<typst_layout::PagedDocument>>,
     /// Transient status message shown after export (cleared on next notify cycle).
     export_status: Option<String>,
     /// Shared map of `"@plugin/<name>/lib.typ"` → source, passed to compiler.
@@ -1022,6 +1022,7 @@ impl MainWindow {
             page_ranges: None,
             standards: typst_pdf::PdfStandards::default(),
             tagged: true,
+            ..Default::default()
         };
 
         match typst_pdf::pdf(&doc, &options) {

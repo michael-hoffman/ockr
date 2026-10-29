@@ -24,9 +24,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use typst::layout::PagedDocument;
-use typst::syntax::Span;
-use typst::World as _;
+use typst::syntax::DiagSpan;
+use typst::{World as _, WorldExt as _};
+use typst_layout::PagedDocument;
 
 use self::world::OckrWorld;
 
@@ -231,11 +231,10 @@ fn compiler_loop(
 ///
 /// Returns `None` when the span is detached, points to a different file, or
 /// resolution otherwise fails.
-fn span_to_line(world: &OckrWorld, span: Span) -> Option<usize> {
-    let file_id = span.id()?;
-    let source = world.source(file_id).ok()?;
-    let node = source.find(span)?;
-    let byte_offset = node.offset();
+fn span_to_line(world: &OckrWorld, span: impl Into<DiagSpan>) -> Option<usize> {
+    let span = span.into();
+    let source = world.source(span.id()?).ok()?;
+    let byte_offset = world.range(span)?.start;
     // Count newlines before the byte offset to get the 0-based line number.
     let text = source.text();
     let line = text[..byte_offset.min(text.len())]
@@ -280,7 +279,7 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
     let warned = typst::compile::<typst_html::HtmlDocument>(world);
 
     match warned.output {
-        Ok(doc) => match typst_html::html(&doc) {
+        Ok(doc) => match typst_html::html(&doc, &typst_html::HtmlOptions::default()) {
             Ok(html_string) => return CompileResult::OkHtml(html_string),
             Err(extra_diags) => {
                 let diags: Vec<Diagnostic> = extra_diags

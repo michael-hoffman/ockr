@@ -36,8 +36,9 @@ use gpui::{
 use crate::compiler::{Diagnostic, DiagnosticSeverity};
 use crate::ui::theme::ThemePalette;
 use image::Frame;
-use typst::layout::{FrameItem, PagedDocument};
+use typst::layout::FrameItem;
 use typst::model::Destination;
+use typst_layout::PagedDocument;
 
 /// Pixels per typst point for rasterisation (2 = 144 PPI, good for 2× HiDPI).
 const PIXELS_PER_PT: f32 = 2.0;
@@ -114,7 +115,7 @@ impl PreviewPane {
         self.image = image;
         self.image_px = px_size;
         self.link_regions = doc
-            .pages
+            .pages()
             .first()
             .map(|page| {
                 let mut regions = Vec::new();
@@ -465,13 +466,19 @@ fn extract_links(frame: &typst::layout::Frame, off_x: f32, off_y: f32, out: &mut
 /// Returns `(image, pixel_dimensions)`.  Both are `None` if the document has
 /// no pages or the raw bytes do not match the expected RGBA8 layout.
 fn rasterize(doc: &PagedDocument) -> (Option<Arc<RenderImage>>, Option<(u32, u32)>) {
-    let page = match doc.pages.first() {
+    let page = match doc.pages().first() {
         Some(p) => p,
         None => return (None, None),
     };
 
     // typst-render renders via tiny_skia; returns premultiplied RGBA8.
-    let pixmap = typst_render::render(page, PIXELS_PER_PT);
+    let pixmap = typst_render::render(
+        page,
+        &typst_render::RenderOptions {
+            pixel_per_pt: typst::utils::Scalar::new(PIXELS_PER_PT as f64),
+            ..Default::default()
+        },
+    );
     let w = pixmap.width();
     let h = pixmap.height();
 
