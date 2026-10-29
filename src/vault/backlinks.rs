@@ -67,25 +67,17 @@ impl BacklinkIndex {
     /// Returns an empty slice if none found.
     pub fn incoming_links(&self, rel_path: &Path) -> Vec<VaultFile> {
         // Derive the normalised key from the file stem.
-        let title = rel_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let title = rel_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let key = normalise(title);
-        self.incoming
-            .get(&key)
-            .cloned()
-            .unwrap_or_default()
+        self.incoming.get(&key).cloned().unwrap_or_default()
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
 
     fn index_file(&mut self, source: &VaultFile, content: &str, all_files: &[VaultFile]) {
         // Build lookup for resolving links (same normalisation as preprocess).
-        let file_keys: HashMap<String, &VaultFile> = all_files
-            .iter()
-            .map(|f| (normalise(&f.title), f))
-            .collect();
+        let file_keys: HashMap<String, &VaultFile> =
+            all_files.iter().map(|f| (normalise(&f.title), f)).collect();
 
         let mut new_keys: HashSet<String> = HashSet::new();
 

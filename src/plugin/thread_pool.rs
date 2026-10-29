@@ -1,6 +1,6 @@
 //! Background thread pool for dispatching plugin commands.
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use super::runtime::PluginInstance;
 
@@ -22,7 +22,7 @@ impl PluginThreadPool {
             let rx = Arc::clone(&rx);
             std::thread::spawn(move || loop {
                 let job = {
-                    let guard = rx.lock().unwrap();
+                    let guard = rx.lock().expect("mutex poisoned");
                     guard.recv()
                 };
                 match job {

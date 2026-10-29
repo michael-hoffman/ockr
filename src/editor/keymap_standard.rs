@@ -41,17 +41,14 @@ impl KeymapHandler for StandardKeymap {
         // Must be checked before plain Shift+Arrow so the more-specific binding wins.
         if k.modifiers.alt && k.modifiers.shift {
             let motion = match k.key.as_str() {
-                "left"  => Some(EditorCommand::MoveWordBackward),
+                "left" => Some(EditorCommand::MoveWordBackward),
                 "right" => Some(EditorCommand::MoveWordForward),
                 _ => None,
             };
             if let Some(motion) = motion {
                 if !matches!(state.mode, Mode::Visual(_)) {
                     // Enter visual char mode and extend by one word atomically.
-                    return KeymapResult::Commands(vec![
-                        EditorCommand::EnterVisualChar,
-                        motion,
-                    ]);
+                    return KeymapResult::Commands(vec![EditorCommand::EnterVisualChar, motion]);
                 }
                 return KeymapResult::Command(motion);
             }
@@ -60,12 +57,12 @@ impl KeymapHandler for StandardKeymap {
         // Shift+Arrow — extend (or start) a character selection.
         if k.modifiers.shift {
             let motion = match k.key.as_str() {
-                "left"  => Some(EditorCommand::MoveLeft),
+                "left" => Some(EditorCommand::MoveLeft),
                 "right" => Some(EditorCommand::MoveRight),
-                "up"    => Some(EditorCommand::MoveUp),
-                "down"  => Some(EditorCommand::MoveDown),
-                "home"  => Some(EditorCommand::MoveStartOfLine),
-                "end"   => Some(EditorCommand::MoveEndOfLine),
+                "up" => Some(EditorCommand::MoveUp),
+                "down" => Some(EditorCommand::MoveDown),
+                "home" => Some(EditorCommand::MoveStartOfLine),
+                "end" => Some(EditorCommand::MoveEndOfLine),
                 _ => None,
             };
             if let Some(motion) = motion {
@@ -73,10 +70,7 @@ impl KeymapHandler for StandardKeymap {
                     // First Shift+Arrow: enter visual char mode AND perform the
                     // motion in one step so the user sees a 1-character selection
                     // immediately (matches VS Code / standard-editor behaviour).
-                    return KeymapResult::Commands(vec![
-                        EditorCommand::EnterVisualChar,
-                        motion,
-                    ]);
+                    return KeymapResult::Commands(vec![EditorCommand::EnterVisualChar, motion]);
                 }
                 return KeymapResult::Command(motion);
             }
@@ -85,8 +79,8 @@ impl KeymapHandler for StandardKeymap {
         // Alt (Option) + arrow = word movement (no selection).
         if k.modifiers.alt {
             return match k.key.as_str() {
-                "left"      => KeymapResult::Command(EditorCommand::MoveWordBackward),
-                "right"     => KeymapResult::Command(EditorCommand::MoveWordForward),
+                "left" => KeymapResult::Command(EditorCommand::MoveWordBackward),
+                "right" => KeymapResult::Command(EditorCommand::MoveWordForward),
                 "backspace" => KeymapResult::Command(EditorCommand::DeleteWordBefore),
                 _ => KeymapResult::Passthrough,
             };
@@ -94,10 +88,10 @@ impl KeymapHandler for StandardKeymap {
 
         match k.key.as_str() {
             "backspace" => KeymapResult::Command(EditorCommand::DeleteCharBefore),
-            "delete"    => KeymapResult::Command(EditorCommand::DeleteCharAt),
-            "enter"     => KeymapResult::Command(EditorCommand::InsertNewline),
+            "delete" => KeymapResult::Command(EditorCommand::DeleteCharAt),
+            "enter" => KeymapResult::Command(EditorCommand::InsertNewline),
             // Explicit space binding so GPUI never swallows it before key_char is checked.
-            "space"     => KeymapResult::Command(EditorCommand::Insert(" ".to_string())),
+            "space" => KeymapResult::Command(EditorCommand::Insert(" ".to_string())),
             "left" => {
                 // Collapse to the LEFT end of the selection (VS Code behaviour).
                 if matches!(state.mode, Mode::Visual(_)) {
@@ -125,7 +119,7 @@ impl KeymapHandler for StandardKeymap {
                 KeymapResult::Command(EditorCommand::MoveDown)
             }
             "home" => KeymapResult::Command(EditorCommand::MoveStartOfLine),
-            "end"  => KeymapResult::Command(EditorCommand::MoveEndOfLine),
+            "end" => KeymapResult::Command(EditorCommand::MoveEndOfLine),
             "escape" => {
                 // In Standard mode, Escape collapses any active selection.
                 if matches!(state.mode, Mode::Visual(_)) {
@@ -169,7 +163,11 @@ mod tests {
             keystroke: Keystroke {
                 modifiers: Modifiers::default(),
                 key: key.to_string(),
-                key_char: if key.len() == 1 { Some(key.to_string()) } else { None },
+                key_char: if key.len() == 1 {
+                    Some(key.to_string())
+                } else {
+                    None
+                },
             },
             is_held: false,
         }

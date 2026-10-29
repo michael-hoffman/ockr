@@ -4,7 +4,7 @@
 //! All saves are best-effort: I/O errors are silently ignored so they never
 //! crash the app.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -52,15 +52,19 @@ fn write_session(session: &Session) {
 }
 
 fn read_session() -> Session {
-    let Some(p) = session_path() else { return Session::default() };
-    let Ok(json) = std::fs::read_to_string(&p) else { return Session::default() };
+    let Some(p) = session_path() else {
+        return Session::default();
+    };
+    let Ok(json) = std::fs::read_to_string(&p) else {
+        return Session::default();
+    };
     serde_json::from_str(&json).unwrap_or_default()
 }
 
 /// Save the last-opened vault path. Preserves existing tab data.
-pub fn save_last_vault(path: &PathBuf) {
+pub fn save_last_vault(path: &Path) {
     let mut session = read_session();
-    session.last_vault = Some(path.clone());
+    session.last_vault = Some(path.to_path_buf());
     // When the vault changes, clear stale tab paths.
     session.open_tabs.clear();
     session.active_tab = 0;
@@ -105,7 +109,8 @@ pub fn load_recent_paths() -> Vec<PathBuf> {
 /// Only returns paths that still exist on disk.
 pub fn load_open_tabs() -> (Vec<PathBuf>, usize) {
     let session = read_session();
-    let tabs: Vec<PathBuf> = session.open_tabs
+    let tabs: Vec<PathBuf> = session
+        .open_tabs
         .into_iter()
         .filter(|p| p.exists())
         .collect();

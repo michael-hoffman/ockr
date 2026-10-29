@@ -131,10 +131,7 @@ impl KeymapHandler for HelixKeymap {
         }
 
         // ── LSP completion (Ctrl-Space, any mode) ───────────────────────
-        if k.modifiers.control
-            && !k.modifiers.platform
-            && (k.key == " " || k.key == "space")
-        {
+        if k.modifiers.control && !k.modifiers.platform && (k.key == " " || k.key == "space") {
             return KeymapResult::RequestCompletion;
         }
 
@@ -171,7 +168,9 @@ impl KeymapHandler for HelixKeymap {
         {
             let d = k.key.as_str();
             let starts_count = d.len() == 1
-                && d.chars().next().is_some_and(|c| c.is_ascii_digit() && c != '0');
+                && d.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit() && c != '0');
             let extends_count = d == "0" && !self.count_buf.is_empty();
             if starts_count || extends_count {
                 self.count_buf.push_str(d);
@@ -282,7 +281,9 @@ impl KeymapHandler for HelixKeymap {
         }
         if matches!(
             self.pending,
-            PendingKey::SurroundDelete | PendingKey::SurroundReplaceFrom | PendingKey::SurroundReplaceTo(_)
+            PendingKey::SurroundDelete
+                | PendingKey::SurroundReplaceFrom
+                | PendingKey::SurroundReplaceTo(_)
         ) {
             let pending_kind = self.pending;
             self.pending = PendingKey::None;
@@ -401,17 +402,22 @@ impl KeymapHandler for HelixKeymap {
                 return KeymapResult::Pending;
             }
         }
-        if matches!(self.pending, PendingKey::OpenBracket | PendingKey::CloseBracket) {
+        if matches!(
+            self.pending,
+            PendingKey::OpenBracket | PendingKey::CloseBracket
+        ) {
             let forward = self.pending == PendingKey::CloseBracket;
             self.pending = PendingKey::None;
             if !k.modifiers.platform && !k.modifiers.control {
                 match k.key.as_str() {
                     "d" => return KeymapResult::JumpDiagnostic { forward },
-                    "p" => return KeymapResult::Command(if forward {
-                        EditorCommand::MoveParagraphForward
-                    } else {
-                        EditorCommand::MoveParagraphBack
-                    }),
+                    "p" => {
+                        return KeymapResult::Command(if forward {
+                            EditorCommand::MoveParagraphForward
+                        } else {
+                            EditorCommand::MoveParagraphBack
+                        })
+                    }
                     _ => {}
                 }
             }
@@ -522,7 +528,10 @@ impl KeymapHandler for HelixKeymap {
                 return KeymapResult::Command(EditorCommand::AddCursorAbove);
             }
             // , — keep only primary cursor.
-            if (k.key == "," || k.key_char.as_deref() == Some(",")) && !k.modifiers.alt && !k.modifiers.shift {
+            if (k.key == "," || k.key_char.as_deref() == Some(","))
+                && !k.modifiers.alt
+                && !k.modifiers.shift
+            {
                 return KeymapResult::Command(EditorCommand::KeepPrimaryCursor);
             }
             // Alt-, — remove primary cursor.
@@ -613,7 +622,10 @@ impl KeymapHandler for HelixKeymap {
         }
         if matches!(
             self.pending,
-            PendingKey::FindChar | PendingKey::FindCharBack | PendingKey::TillChar | PendingKey::TillCharBack
+            PendingKey::FindChar
+                | PendingKey::FindCharBack
+                | PendingKey::TillChar
+                | PendingKey::TillCharBack
         ) {
             let pending_kind = self.pending;
             self.pending = PendingKey::None;
@@ -668,12 +680,14 @@ impl KeymapHandler for HelixKeymap {
                 if let Some(reg) = k.key_char.as_ref().and_then(|s| s.chars().next()) {
                     return match pending_kind {
                         PendingKey::MarkSet => KeymapResult::SetMark(reg),
-                        PendingKey::MarkJumpExact => {
-                            KeymapResult::JumpToMark { reg, first_non_blank: false }
-                        }
-                        PendingKey::MarkJumpLine => {
-                            KeymapResult::JumpToMark { reg, first_non_blank: true }
-                        }
+                        PendingKey::MarkJumpExact => KeymapResult::JumpToMark {
+                            reg,
+                            first_non_blank: false,
+                        },
+                        PendingKey::MarkJumpLine => KeymapResult::JumpToMark {
+                            reg,
+                            first_non_blank: true,
+                        },
                         _ => unreachable!(),
                     };
                 }
@@ -1080,7 +1094,10 @@ mod surround_helper_tests {
     #[test]
     fn delim_kind_recognises_both_sides_of_each_pair() {
         for &c in &['(', ')', '{', '}', '[', ']', '<', '>', '"', '\'', '`', '$'] {
-            assert!(delim_text_object_kind(c).is_some(), "{c:?} should map to a TextObjectKind");
+            assert!(
+                delim_text_object_kind(c).is_some(),
+                "{c:?} should map to a TextObjectKind"
+            );
         }
         assert_eq!(delim_text_object_kind('x'), None);
     }
@@ -1100,7 +1117,10 @@ mod surround_helper_tests {
     #[test]
     fn space_menu_ids_are_recognised_and_unmapped_keys_are_none() {
         for &c in &["f", "s", "o", "b", "g", "p", "d", "n", "a", "r"] {
-            assert!(space_menu_id(c).is_some(), "{c:?} should map to a palette id");
+            assert!(
+                space_menu_id(c).is_some(),
+                "{c:?} should map to a palette id"
+            );
         }
         assert_eq!(space_menu_id("q"), None);
     }

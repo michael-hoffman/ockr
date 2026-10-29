@@ -4,8 +4,8 @@
 //! Shows each plugin's id, name, version, capabilities, and load status.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    Render, Window,
 };
 
 use crate::plugin::registry::{PluginInfo, PluginStatus};
@@ -29,10 +29,7 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
-    pub fn new(
-        mut plugins: Vec<(PluginInfo, PluginStatus)>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(mut plugins: Vec<(PluginInfo, PluginStatus)>, cx: &mut Context<Self>) -> Self {
         plugins.sort_by(|a, b| a.0.id.cmp(&b.0.id));
         Self {
             focus_handle: cx.focus_handle(),
@@ -40,12 +37,7 @@ impl PluginManager {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.key == "escape" {
             cx.emit(PluginManagerEvent::Close);
         }
@@ -80,8 +72,8 @@ impl Render for PluginManager {
         } else {
             for (info, status) in &self.plugins {
                 let (status_label, status_color) = match status {
-                    PluginStatus::Loaded    => ("loaded",  t.mode_insert),
-                    PluginStatus::Failed(_) => ("failed",  0xff5555u32),
+                    PluginStatus::Loaded => ("loaded", t.mode_insert),
+                    PluginStatus::Failed(_) => ("failed", 0xff5555u32),
                 };
                 let error_msg = match status {
                     PluginStatus::Failed(msg) => Some(msg.clone()),
@@ -90,10 +82,18 @@ impl Render for PluginManager {
 
                 // Capability pills
                 let mut caps: Vec<&'static str> = Vec::new();
-                if info.capabilities.file_read   { caps.push("file_read"); }
-                if info.capabilities.vault_write { caps.push("vault_write"); }
-                if info.capabilities.network     { caps.push("network"); }
-                if info.capabilities.console     { caps.push("console"); }
+                if info.capabilities.file_read {
+                    caps.push("file_read");
+                }
+                if info.capabilities.vault_write {
+                    caps.push("vault_write");
+                }
+                if info.capabilities.network {
+                    caps.push("network");
+                }
+                if info.capabilities.console {
+                    caps.push("console");
+                }
                 let caps_str = if caps.is_empty() {
                     "no capabilities".to_string()
                 } else {
@@ -162,7 +162,11 @@ impl Render for PluginManager {
 
                 // Error detail (if failed)
                 if let Some(msg) = error_msg {
-                    let short = if msg.len() > 120 { format!("{}…", &msg[..120]) } else { msg };
+                    let short = if msg.len() > 120 {
+                        format!("{}…", &msg[..120])
+                    } else {
+                        msg
+                    };
                     row = row.child(
                         div()
                             .mt(px(4.0))
@@ -237,10 +241,9 @@ impl Render for PluginManager {
                             .flex_col()
                             .max_h(px(480.0))
                             .overflow_hidden()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                |_, _, cx| { cx.stop_propagation(); },
-                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
                             .children(rows),
                     ),
             )

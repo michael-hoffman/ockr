@@ -22,7 +22,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct ThemeFile {
     pub name: String,
-    #[allow(dead_code)] pub variant: String, // "dark" | "light"
+    #[allow(dead_code)]
+    pub variant: String, // "dark" | "light"
 
     pub bg_base: String,
     pub bg_panel: String,
@@ -110,8 +111,7 @@ impl ThemePalette {
     ///
     /// WCAG AA contrast failures are logged as warnings.
     pub fn from_toml(src: &str) -> Result<Self, String> {
-        let raw: ThemeFile =
-            toml::from_str(src).map_err(|e| format!("theme parse error: {e}"))?;
+        let raw: ThemeFile = toml::from_str(src).map_err(|e| format!("theme parse error: {e}"))?;
         let p = Self::from_file(raw);
         p.validate_wcag_aa();
         Ok(p)
@@ -143,20 +143,17 @@ impl ThemePalette {
             syntax_link: hex(&f.syntax_link),
             syntax_code: hex(&f.syntax_code),
             syntax_comment: hex(&f.syntax_comment),
-            bracket_match_bg: f.bracket_match_bg
-                .as_deref()
-                .map(hex)
-                .unwrap_or(0x2A3B2A), // fallback: subtle dark-green
+            bracket_match_bg: f.bracket_match_bg.as_deref().map(hex).unwrap_or(0x2a3b2a), // fallback: subtle dark-green
         }
     }
 
     /// Log a warning for any text/background pair that fails WCAG AA (4.5 : 1).
     fn validate_wcag_aa(&self) {
         let pairs: &[(&str, u32, u32)] = &[
-            ("text on bg_panel",   self.text,        self.bg_panel),
+            ("text on bg_panel", self.text, self.bg_panel),
             ("text_muted on bg_panel", self.text_muted, self.bg_panel),
-            ("text on bg_surface", self.text,        self.bg_surface),
-            ("ochre on bg_base",   self.ochre,       self.bg_base),
+            ("text on bg_surface", self.text, self.bg_surface),
+            ("ochre on bg_base", self.ochre, self.bg_base),
         ];
         for &(label, fg, bg) in pairs {
             let ratio = contrast_ratio(fg, bg);
@@ -189,7 +186,7 @@ fn hex(s: &str) -> u32 {
     let s = s.trim_start_matches('#');
     u32::from_str_radix(s, 16).unwrap_or_else(|_| {
         eprintln!("[ockr theme] invalid colour value: #{s}");
-        0xFF00FF // hot-pink sentinel so bad values are immediately visible
+        0xff00ff // hot-pink sentinel so bad values are immediately visible
     })
 }
 
@@ -202,9 +199,9 @@ fn contrast_ratio(fg: u32, bg: u32) -> f64 {
 }
 
 fn relative_luminance(color: u32) -> f64 {
-    let r = linearise(((color >> 16) & 0xFF) as f64 / 255.0);
-    let g = linearise(((color >> 8) & 0xFF) as f64 / 255.0);
-    let b = linearise((color & 0xFF) as f64 / 255.0);
+    let r = linearise(((color >> 16) & 0xff) as f64 / 255.0);
+    let g = linearise(((color >> 8) & 0xff) as f64 / 255.0);
+    let b = linearise((color & 0xff) as f64 / 255.0);
     0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
@@ -229,7 +226,7 @@ mod tests {
         // Assert properties, not exact hex, so palette refinements don't
         // break the test: near-black background, near-white text.
         assert!(p.bg_base < 0x202020, "oxide bg should be near-black");
-        assert!(p.text > 0xD0D0D0, "oxide text should be near-white");
+        assert!(p.text > 0xd0d0d0, "oxide text should be near-white");
     }
 
     #[test]
@@ -241,14 +238,17 @@ mod tests {
 
     #[test]
     fn contrast_ratio_black_white() {
-        let ratio = contrast_ratio(0xFFFFFF, 0x000000);
-        assert!((ratio - 21.0).abs() < 0.1, "black/white should be 21:1, got {ratio}");
+        let ratio = contrast_ratio(0xffffff, 0x000000);
+        assert!(
+            (ratio - 21.0).abs() < 0.1,
+            "black/white should be 21:1, got {ratio}"
+        );
     }
 
     #[test]
     fn hex_parsing() {
-        assert_eq!(hex("#CC7722"), 0xCC7722);
-        assert_eq!(hex("CC7722"), 0xCC7722);
-        assert_eq!(hex("#0A0A0A"), 0x0A0A0A);
+        assert_eq!(hex("#CC7722"), 0xcc7722);
+        assert_eq!(hex("CC7722"), 0xcc7722);
+        assert_eq!(hex("#0A0A0A"), 0x0a0a0a);
     }
 }

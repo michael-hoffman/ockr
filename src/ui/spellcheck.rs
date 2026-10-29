@@ -67,14 +67,15 @@ pub fn request(text: &str, seq: u64, tx: UnboundedSender<SpellResult>) {
     );
 
     unsafe {
-        checker.requestCheckingOfString_range_types_options_inSpellDocumentWithTag_completionHandler(
-            &ns_text,
-            NSRange::new(0, len_utf16),
-            NSTextCheckingType::Spelling.0,
-            None,
-            0,
-            Some(&handler),
-        );
+        checker
+            .requestCheckingOfString_range_types_options_inSpellDocumentWithTag_completionHandler(
+                &ns_text,
+                NSRange::new(0, len_utf16),
+                NSTextCheckingType::Spelling.0,
+                None,
+                0,
+                Some(&handler),
+            );
     }
 }
 
@@ -93,10 +94,7 @@ fn map_utf16_range(text: &str, location: usize, length: usize) -> Option<SpellSp
 
     // Locate the line containing start_byte and its starting byte offset.
     let line = text[..start_byte].bytes().filter(|&b| b == b'\n').count();
-    let line_start = text[..start_byte]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let line_start = text[..start_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
 
     Some((line, start_byte - line_start, end_byte - line_start))
 }

@@ -61,10 +61,18 @@ struct SettingsOverlay {
 impl Settings {
     /// Merge an overlay on top of self, replacing only the fields that are `Some`.
     fn merge(&mut self, overlay: SettingsOverlay) {
-        if let Some(v) = overlay.keyboard_mode { self.keyboard_mode = v; }
-        if let Some(v) = overlay.theme { self.theme = v; }
-        if let Some(v) = overlay.line_number_mode { self.line_number_mode = v; }
-        if let Some(v) = overlay.preview_mode { self.preview_mode = v; }
+        if let Some(v) = overlay.keyboard_mode {
+            self.keyboard_mode = v;
+        }
+        if let Some(v) = overlay.theme {
+            self.theme = v;
+        }
+        if let Some(v) = overlay.line_number_mode {
+            self.line_number_mode = v;
+        }
+        if let Some(v) = overlay.preview_mode {
+            self.preview_mode = v;
+        }
     }
 }
 

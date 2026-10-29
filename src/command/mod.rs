@@ -65,9 +65,7 @@ impl CommandRegistry {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| {
-                e.name.to_lowercase().contains(&q) || e.id.to_lowercase().contains(&q)
-            })
+            .filter(|(_, e)| e.name.to_lowercase().contains(&q) || e.id.to_lowercase().contains(&q))
             .map(|(i, _)| i)
             .collect()
     }

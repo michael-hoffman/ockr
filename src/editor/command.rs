@@ -184,7 +184,10 @@ pub enum EditorCommand {
     ///
     /// Helix grammar: user selects with `mi<char>` / `ma<char>`, then acts
     /// (`d`, `y`, `c`).  `inner = true` ↔ `i` (no delimiters/trailing space).
-    SelectObject { inner: bool, kind: TextObjectKind },
+    SelectObject {
+        inner: bool,
+        kind: TextObjectKind,
+    },
 
     // ── Multi-select (Helix `s` / `S`) ──────────────────────────────────────
     /// Select every regex match within the current Visual selection as an

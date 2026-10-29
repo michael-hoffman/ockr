@@ -41,18 +41,25 @@ pub fn preprocess_wikilinks(source: &str, index: &HashMap<String, String>) -> St
 
     loop {
         // Find the next `[[` at or after `offset`.
-        let Some(rel_open) = result[offset..].find("[[") else { break };
+        let Some(rel_open) = result[offset..].find("[[") else {
+            break;
+        };
         let open = offset + rel_open;
 
         // Find the closing `]]` after the opening `[[`.
-        let Some(rel_close) = result[open + 2..].find("]]") else { break };
+        let Some(rel_close) = result[open + 2..].find("]]") else {
+            break;
+        };
         let close = open + 2 + rel_close;
 
         let inner = result[open + 2..close].to_owned();
 
         // Split on the first `|` for an optional display-text override.
         let (target, display) = match inner.find('|') {
-            Some(pipe) => (inner[..pipe].trim().to_owned(), inner[pipe + 1..].trim().to_owned()),
+            Some(pipe) => (
+                inner[..pipe].trim().to_owned(),
+                inner[pipe + 1..].trim().to_owned(),
+            ),
             None => (inner.trim().to_owned(), inner.trim().to_owned()),
         };
 
@@ -107,23 +114,41 @@ mod tests {
     #[test]
     fn resolves_exact_title() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
-        let out = preprocess_wikilinks("See [[Bayes Theorem]] for details.", &build_wikilink_index(&files));
-        assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes Theorem] for details.");
+        let out = preprocess_wikilinks(
+            "See [[Bayes Theorem]] for details.",
+            &build_wikilink_index(&files),
+        );
+        assert_eq!(
+            out,
+            "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes Theorem] for details."
+        );
     }
 
     #[test]
     fn custom_display_text() {
         let files = vec![file("bayes-theorem", "zettels/bayes-theorem.typ")];
-        let out = preprocess_wikilinks("See [[Bayes Theorem|Bayes]] for details.", &build_wikilink_index(&files));
-        assert_eq!(out, "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes] for details.");
+        let out = preprocess_wikilinks(
+            "See [[Bayes Theorem|Bayes]] for details.",
+            &build_wikilink_index(&files),
+        );
+        assert_eq!(
+            out,
+            "See #link(\"ockr://zettels/bayes-theorem.typ\")[Bayes] for details."
+        );
     }
 
     #[test]
     fn broken_link_renders_as_red_text() {
         let out = preprocess_wikilinks("See [[Missing Note]] here.", &build_wikilink_index(&[]));
-        assert!(out.contains("Missing Note"), "display text must be preserved");
+        assert!(
+            out.contains("Missing Note"),
+            "display text must be preserved"
+        );
         assert!(!out.contains("[["), "wikilink syntax must be removed");
-        assert!(out.contains("fill:") || out.contains("text"), "broken link must use #text");
+        assert!(
+            out.contains("fill:") || out.contains("text"),
+            "broken link must use #text"
+        );
     }
 
     #[test]
@@ -134,10 +159,7 @@ mod tests {
 
     #[test]
     fn multiple_links_in_one_source() {
-        let files = vec![
-            file("alpha", "alpha.typ"),
-            file("beta", "beta.typ"),
-        ];
+        let files = vec![file("alpha", "alpha.typ"), file("beta", "beta.typ")];
         let out = preprocess_wikilinks("[[Alpha]] and [[Beta]].", &build_wikilink_index(&files));
         assert!(out.contains("#link(\"ockr://alpha.typ\")[Alpha]"));
         assert!(out.contains("#link(\"ockr://beta.typ\")[Beta]"));
@@ -148,6 +170,9 @@ mod tests {
         let files = vec![file("my-note", "my-note.typ")];
         // "My Note" (spaces) should match "my-note" (hyphens) after normalisation.
         let out = preprocess_wikilinks("[[My Note]]", &build_wikilink_index(&files));
-        assert!(out.contains("#link(\"ockr://my-note.typ\")"), "hyphen↔space normalisation failed");
+        assert!(
+            out.contains("#link(\"ockr://my-note.typ\")"),
+            "hyphen↔space normalisation failed"
+        );
     }
 }

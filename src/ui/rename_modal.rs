@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, Render, Window, div,
-    prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -22,7 +22,10 @@ use crate::ui::theme::ThemePalette;
 pub enum RenameModalEvent {
     Close,
     /// Commit the rename: (original absolute path, new file stem).
-    Submit { original: PathBuf, new_stem: String },
+    Submit {
+        original: PathBuf,
+        new_stem: String,
+    },
 }
 
 impl EventEmitter<RenameModalEvent> for RenameModal {}
@@ -161,11 +164,7 @@ impl Render for RenameModal {
                                     .text_color(gpui::rgb(t.text))
                                     .child(format!("{}|", self.value)),
                             )
-                            .child(
-                                div()
-                                    .text_color(gpui::rgb(t.text_faint))
-                                    .child(suffix),
-                            ),
+                            .child(div().text_color(gpui::rgb(t.text_faint)).child(suffix)),
                     )
                     .child(
                         div()

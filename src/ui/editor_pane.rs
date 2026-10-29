@@ -45,13 +45,15 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    MouseButton, MouseDownEvent, Render, Window, div, prelude::*, px, rgba,
+    div, prelude::*, px, rgba, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Render, Window,
 };
 
 use crate::actions::{FollowLink, OpenReplace, OpenSearch, SaveFile};
-use crate::compiler::{preprocess::{normalise, preprocess_wikilinks}, CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode};
-use crate::lsp::{CompletionItem, LspDiagnostic, LspHandle, LspSeverity};
+use crate::compiler::preprocess::{normalise, preprocess_wikilinks};
+use crate::compiler::{
+    CompileRequest, CompilerHandle, Diagnostic, DiagnosticSeverity, PluginPackages, PreviewMode,
+};
 use crate::editor::buffer::Buffer as _;
 use crate::editor::{
     apply::{apply, SideEffect},
@@ -61,6 +63,7 @@ use crate::editor::{
     keymap_helix::{delim_pair_for, delim_text_object_kind},
     state::{EditorState, Mode, Pos, Selection, VisualKind},
 };
+use crate::lsp::{CompletionItem, LspDiagnostic, LspHandle, LspSeverity};
 use crate::ui::preview::PreviewPane;
 use crate::ui::theme::ThemePalette;
 use crate::vault::{VaultFile, VaultState};
@@ -322,7 +325,6 @@ pub struct EditorPane {
     spell_scheduled: bool,
 
     // ── LSP (tinymist) ────────────────────────────────────────────────────────
-
     /// Handle to the `tinymist` LSP background thread.  `None` when tinymist
     /// is not installed or has not been connected yet.
     lsp: Option<LspHandle>,
@@ -375,7 +377,8 @@ pub struct EditorPane {
 
 impl EditorPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let keymap: Box<dyn KeymapHandler> = if cx.try_global::<crate::settings::Settings>()
+        let keymap: Box<dyn KeymapHandler> = if cx
+            .try_global::<crate::settings::Settings>()
             .is_some_and(|s| s.keyboard_mode == "standard")
         {
             Box::new(crate::editor::keymap_standard::StandardKeymap::new())
@@ -516,7 +519,6 @@ impl EditorPane {
         self.file_rel_path.as_deref()
     }
 
-
     /// Current cursor position.
     pub fn cursor_pos(&self) -> Pos {
         self.state.cursor()
@@ -526,7 +528,6 @@ impl EditorPane {
     pub fn viewport_top(&self) -> usize {
         self.viewport_top
     }
-
 
     /// Restore cursor position and viewport after switching back to a tab.
     pub fn restore_cursor_and_viewport(&mut self, pos: Pos, viewport: usize) {
@@ -685,7 +686,9 @@ impl EditorPane {
     /// the mark's line instead of its exact column (`'reg` vs `` `reg ``).
     /// Records the origin in the jump list, like Vim's mark jumps do.
     fn jump_to_mark(&mut self, reg: char, first_non_blank: bool) {
-        let Some(&mark) = self.marks.get(&reg) else { return };
+        let Some(&mark) = self.marks.get(&reg) else {
+            return;
+        };
         let line_count = self.buffer.line_count();
         if mark.line >= line_count {
             return; // stale mark past the end of a since-shortened buffer
@@ -712,7 +715,6 @@ impl EditorPane {
         self.state.path.as_deref().map(crate::lsp::path_to_uri)
     }
 
-
     pub fn open_file_no_focus(
         &mut self,
         file: &VaultFile,
@@ -725,7 +727,8 @@ impl EditorPane {
         self.state.path = Some(file.abs_path.clone());
         self.state.is_dirty = false;
         // Compute vault-relative path for correct import resolution.
-        self.file_rel_path = file.abs_path
+        self.file_rel_path = file
+            .abs_path
             .strip_prefix(&vault_root)
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
@@ -766,7 +769,9 @@ impl EditorPane {
     /// request (a newer keystroke already landed) skips it entirely rather
     /// than building a `CompileRequest` just to throw it away.
     pub(crate) fn trigger_compile(&mut self, cx: &mut Context<Self>) {
-        let Some(compiler) = self.compiler.clone() else { return };
+        let Some(compiler) = self.compiler.clone() else {
+            return;
+        };
 
         // Bump sequence — an in-flight debounced task from an earlier
         // keystroke will see this mismatch and drop itself.
@@ -774,62 +779,72 @@ impl EditorPane {
         self.compile_sequence = seq;
 
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
 
-            let request = cx.update(|cx| {
-                this.update(cx, |pane, cx| {
-                    if pane.compile_sequence != seq {
-                        return None;
-                    }
-
-                    // One buffer join, reused for both the LSP notify and
-                    // the wikilink preprocessing below (previously each
-                    // computed its own copy on every keystroke).
-                    let text = pane.buffer.text();
-
-                    if pane.lsp_doc_opened {
-                        if let (Some(lsp), Some(path)) = (pane.lsp.clone(), pane.state.path.clone()) {
-                            pane.lsp_doc_version += 1;
-                            let uri = crate::lsp::path_to_uri(&path);
-                            lsp.notify_change(uri, pane.lsp_doc_version, text.clone());
+            let request = cx
+                .update(|cx| {
+                    this.update(cx, |pane, cx| {
+                        if pane.compile_sequence != seq {
+                            return None;
                         }
-                    }
 
-                    // Read the active preview mode from the GPUI global (set by MainWindow toggle).
-                    let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+                        // One buffer join, reused for both the LSP notify and
+                        // the wikilink preprocessing below (previously each
+                        // computed its own copy on every keystroke).
+                        let text = pane.buffer.text();
 
-                    // Preprocess source: resolve wikilinks against the vault's
-                    // pre-built index (rebuilt only when files actually
-                    // change, in VaultState::open — not on every compile),
-                    // then optionally prepend the HTML preamble that fixes
-                    // inline-math paragraph splitting (a known Typst
-                    // HTML-export limitation — `$x$` is treated as a block
-                    // element unless wrapped with `box` via a show rule).
-                    let empty_index = std::collections::HashMap::new();
-                    let wikilink_index = pane.vault.as_ref()
-                        .map(|v| &v.read(cx).wikilink_index)
-                        .unwrap_or(&empty_index);
-                    let preprocessed = preprocess_wikilinks(&text, wikilink_index);
-                    let source = if mode == PreviewMode::Html {
-                        format!("{HTML_PREAMBLE}{preprocessed}")
-                    } else {
-                        preprocessed
-                    };
+                        if pane.lsp_doc_opened {
+                            if let (Some(lsp), Some(path)) =
+                                (pane.lsp.clone(), pane.state.path.clone())
+                            {
+                                pane.lsp_doc_version += 1;
+                                let uri = crate::lsp::path_to_uri(&path);
+                                lsp.notify_change(uri, pane.lsp_doc_version, text.clone());
+                            }
+                        }
 
-                    Some(CompileRequest {
-                        source,
-                        vault_root: pane.vault_root.clone(),
-                        file_path: pane.file_rel_path.clone(),
-                        mode,
-                        plugin_packages: pane.plugin_packages.clone(),
+                        // Read the active preview mode from the GPUI global (set by MainWindow toggle).
+                        let mode = cx.try_global::<PreviewMode>().copied().unwrap_or_default();
+
+                        // Preprocess source: resolve wikilinks against the vault's
+                        // pre-built index (rebuilt only when files actually
+                        // change, in VaultState::open — not on every compile),
+                        // then optionally prepend the HTML preamble that fixes
+                        // inline-math paragraph splitting (a known Typst
+                        // HTML-export limitation — `$x$` is treated as a block
+                        // element unless wrapped with `box` via a show rule).
+                        let empty_index = std::collections::HashMap::new();
+                        let wikilink_index = pane
+                            .vault
+                            .as_ref()
+                            .map(|v| &v.read(cx).wikilink_index)
+                            .unwrap_or(&empty_index);
+                        let preprocessed = preprocess_wikilinks(&text, wikilink_index);
+                        let source = if mode == PreviewMode::Html {
+                            format!("{HTML_PREAMBLE}{preprocessed}")
+                        } else {
+                            preprocessed
+                        };
+
+                        Some(CompileRequest {
+                            source,
+                            vault_root: pane.vault_root.clone(),
+                            file_path: pane.file_rel_path.clone(),
+                            mode,
+                            plugin_packages: pane.plugin_packages.clone(),
+                        })
                     })
-                }).unwrap_or(None)
-            }).unwrap_or(None);
+                    .unwrap_or(None)
+                })
+                .unwrap_or(None);
 
             if let Some(request) = request {
                 compiler.send(request);
             }
-        }).detach();
+        })
+        .detach();
     }
 
     /// Keep the cursor visible within the viewport.
@@ -856,7 +871,9 @@ impl EditorPane {
     /// Preserves the cursor position (clamped to the new line count) and the
     /// current mode.  Clears undo/redo history and all caches.
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.path.clone() else {
+            return;
+        };
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
@@ -868,12 +885,15 @@ impl EditorPane {
         let saved_mode = self.state.mode;
         self.buffer = InMemoryBuffer::from_text(&text);
         // Clamp cursor to new bounds.
-        let new_line = saved_cursor.line.min(self.buffer.line_count().saturating_sub(1));
+        let new_line = saved_cursor
+            .line
+            .min(self.buffer.line_count().saturating_sub(1));
         let new_col = saved_cursor.col.min(self.buffer.line(new_line).len());
         self.state = EditorState::new();
         self.state.path = Some(path);
         self.state.mode = saved_mode;
-        self.state.move_cursor_to(crate::editor::state::Pos::new(new_line, new_col));
+        self.state
+            .move_cursor_to(crate::editor::state::Pos::new(new_line, new_col));
         self.state.is_dirty = false;
         self.undo_history.clear();
         self.redo_history.clear();
@@ -930,7 +950,9 @@ impl EditorPane {
             }
         }
         for d in &self.lsp_diagnostics {
-            let entry = map.entry(d.range.start.line).or_insert(DiagnosticSeverity::Warning);
+            let entry = map
+                .entry(d.range.start.line)
+                .or_insert(DiagnosticSeverity::Warning);
             if matches!(d.severity, LspSeverity::Error) {
                 *entry = DiagnosticSeverity::Error;
             }
@@ -1018,7 +1040,9 @@ impl EditorPane {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.path.clone() else {
+            return;
+        };
         let content = self.buffer.text();
         let _ = std::fs::write(&path, &content);
         self.state.is_dirty = false;
@@ -1065,7 +1089,12 @@ impl EditorPane {
     fn push_undo_impl(&mut self) {
         let snapshot = (self.buffer.text(), self.state.cursor());
         // Deduplicate: don't push if identical to the most recent snapshot.
-        if self.undo_history.last().map(|(t, _)| t == &snapshot.0).unwrap_or(false) {
+        if self
+            .undo_history
+            .last()
+            .map(|(t, _)| t == &snapshot.0)
+            .unwrap_or(false)
+        {
             return;
         }
         self.undo_history.push(snapshot);
@@ -1169,8 +1198,13 @@ impl EditorPane {
             }
             _ => {
                 if !k.modifiers.platform && !k.modifiers.control {
-                    let ch_opt = k.key_char.as_deref()
-                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    let ch_opt = k.key_char.as_deref().or_else(|| {
+                        if k.key == "space" {
+                            Some(" ")
+                        } else {
+                            None
+                        }
+                    });
                     if let (Some(ch), Some(ref mut p)) = (ch_opt, self.regex_prompt.as_mut()) {
                         p.query.push_str(ch);
                     }
@@ -1187,7 +1221,9 @@ impl EditorPane {
             cx.notify();
             return;
         }
-        self.rename_prompt = Some(RenamePromptState { query: String::new() });
+        self.rename_prompt = Some(RenamePromptState {
+            query: String::new(),
+        });
     }
 
     /// Route a keystroke to the rename prompt while it is open.
@@ -1201,7 +1237,8 @@ impl EditorPane {
                     if !p.query.is_empty() {
                         if let (Some(lsp), Some(uri)) = (self.lsp.clone(), self.current_uri()) {
                             let (line, col) = self.cursor_lsp_pos();
-                            self.rename_request_id = Some(lsp.request_rename(uri, line, col, p.query));
+                            self.rename_request_id =
+                                Some(lsp.request_rename(uri, line, col, p.query));
                         }
                     }
                 }
@@ -1213,8 +1250,13 @@ impl EditorPane {
             }
             _ => {
                 if !k.modifiers.platform && !k.modifiers.control {
-                    let ch_opt = k.key_char.as_deref()
-                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    let ch_opt = k.key_char.as_deref().or_else(|| {
+                        if k.key == "space" {
+                            Some(" ")
+                        } else {
+                            None
+                        }
+                    });
                     if let (Some(ch), Some(ref mut p)) = (ch_opt, self.rename_prompt.as_mut()) {
                         p.query.push_str(ch);
                     }
@@ -1228,7 +1270,11 @@ impl EditorPane {
     /// dirty flag, recompile — the full local-edit side effects). `MainWindow`
     /// calls this directly for a rename/code-action edit group that targets
     /// whichever file this pane currently has open.
-    pub(crate) fn apply_lsp_edits(&mut self, edits: &[crate::lsp::LspTextEdit], cx: &mut Context<Self>) {
+    pub(crate) fn apply_lsp_edits(
+        &mut self,
+        edits: &[crate::lsp::LspTextEdit],
+        cx: &mut Context<Self>,
+    ) {
         if edits.is_empty() {
             return;
         }
@@ -1247,7 +1293,12 @@ impl EditorPane {
     /// have open, and only `MainWindow` can see every open pane (to apply
     /// there) or fall back to a direct disk write (for files that aren't open
     /// anywhere).
-    pub fn set_rename_result(&mut self, request_id: i64, result: Option<crate::lsp::WorkspaceEdits>, cx: &mut Context<Self>) {
+    pub fn set_rename_result(
+        &mut self,
+        request_id: i64,
+        result: Option<crate::lsp::WorkspaceEdits>,
+        cx: &mut Context<Self>,
+    ) {
         if self.rename_request_id != Some(request_id) {
             return;
         }
@@ -1274,7 +1325,12 @@ impl EditorPane {
     /// Handle a `textDocument/codeAction` response for this pane's outstanding
     /// request. Zero actions shows a hint; one applies immediately; more than
     /// one opens the picker.
-    pub fn set_code_action_result(&mut self, request_id: i64, actions: Vec<crate::lsp::CodeAction>, cx: &mut Context<Self>) {
+    pub fn set_code_action_result(
+        &mut self,
+        request_id: i64,
+        actions: Vec<crate::lsp::CodeAction>,
+        cx: &mut Context<Self>,
+    ) {
         if self.code_action_request_id != Some(request_id) {
             return;
         }
@@ -1282,10 +1338,19 @@ impl EditorPane {
         match actions.len() {
             0 => self.hover_popup = Some("No code actions available.".to_string()),
             1 => {
-                let edits = actions.into_iter().next().unwrap().edits;
+                let edits = actions
+                    .into_iter()
+                    .next()
+                    .expect("non-empty action list")
+                    .edits;
                 cx.emit(EditorPaneEvent::ApplyWorkspaceEdits(edits));
             }
-            _ => self.code_action = Some(CodeActionState { actions, selected: 0 }),
+            _ => {
+                self.code_action = Some(CodeActionState {
+                    actions,
+                    selected: 0,
+                })
+            }
         }
         cx.notify();
     }
@@ -1335,7 +1400,9 @@ impl EditorPane {
 
     /// Route a keystroke to the search bar (or its replace row) while it is open.
     fn handle_search_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
-        let in_replace = self.search.as_ref()
+        let in_replace = self
+            .search
+            .as_ref()
             .map(|s| s.replace.is_some() && s.replace_focused)
             .unwrap_or(false);
 
@@ -1379,12 +1446,16 @@ impl EditorPane {
             "backspace" => {
                 if let Some(ref mut s) = self.search {
                     if in_replace {
-                        if let Some(ref mut r) = s.replace { r.pop(); }
+                        if let Some(ref mut r) = s.replace {
+                            r.pop();
+                        }
                     } else {
                         s.query.pop();
                     }
                 }
-                if !in_replace { self.update_search_matches(cx); }
+                if !in_replace {
+                    self.update_search_matches(cx);
+                }
             }
             "a" if k.modifiers.control && in_replace => {
                 // Ctrl-A in replace row: replace all matches.
@@ -1393,17 +1464,26 @@ impl EditorPane {
             _ => {
                 if !k.modifiers.platform && !k.modifiers.control {
                     // Use key_char when present; fall back to explicit "space" key name.
-                    let ch_opt = k.key_char.as_deref()
-                        .or_else(|| if k.key == "space" { Some(" ") } else { None });
+                    let ch_opt = k.key_char.as_deref().or_else(|| {
+                        if k.key == "space" {
+                            Some(" ")
+                        } else {
+                            None
+                        }
+                    });
                     if let Some(ch) = ch_opt {
                         if let Some(ref mut s) = self.search {
                             if in_replace {
-                                if let Some(ref mut r) = s.replace { r.push_str(ch); }
+                                if let Some(ref mut r) = s.replace {
+                                    r.push_str(ch);
+                                }
                             } else {
                                 s.query.push_str(ch);
                             }
                         }
-                        if !in_replace { self.update_search_matches(cx); }
+                        if !in_replace {
+                            self.update_search_matches(cx);
+                        }
                     }
                 }
             }
@@ -1425,20 +1505,14 @@ impl EditorPane {
         let (idx, wrapped) = if matches.is_empty() {
             (0, false)
         } else if backward {
-            let found = matches
-                .iter()
-                .rposition(|(p, _)| {
-                    p.line < saved.line
-                        || (p.line == saved.line && p.col <= saved.col)
-                });
+            let found = matches.iter().rposition(|(p, _)| {
+                p.line < saved.line || (p.line == saved.line && p.col <= saved.col)
+            });
             (found.unwrap_or(matches.len() - 1), found.is_none())
         } else {
-            let found = matches
-                .iter()
-                .position(|(p, _)| {
-                    p.line > saved.line
-                        || (p.line == saved.line && p.col >= saved.col)
-                });
+            let found = matches.iter().position(|(p, _)| {
+                p.line > saved.line || (p.line == saved.line && p.col >= saved.col)
+            });
             (found.unwrap_or(0), found.is_none())
         };
 
@@ -1476,14 +1550,14 @@ impl EditorPane {
         }
         let cursor = self.state.cursor();
         let (idx, wrapped) = if backward {
-            let found = matches
-                .iter()
-                .rposition(|(p, _)| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+            let found = matches.iter().rposition(|(p, _)| {
+                p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col)
+            });
             (found.unwrap_or(matches.len() - 1), found.is_none())
         } else {
-            let found = matches
-                .iter()
-                .position(|(p, _)| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+            let found = matches.iter().position(|(p, _)| {
+                p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col)
+            });
             (found.unwrap_or(0), found.is_none())
         };
         self.state.move_cursor_to(matches[idx].0);
@@ -1511,14 +1585,14 @@ impl EditorPane {
         let cursor = self.state.cursor();
         // `N` is always the reverse of `n`.
         let (idx, wrapped) = if backward {
-            let found = matches
-                .iter()
-                .position(|(p, _)| p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col));
+            let found = matches.iter().position(|(p, _)| {
+                p.line > cursor.line || (p.line == cursor.line && p.col > cursor.col)
+            });
             (found.unwrap_or(0), found.is_none())
         } else {
-            let found = matches
-                .iter()
-                .rposition(|(p, _)| p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col));
+            let found = matches.iter().rposition(|(p, _)| {
+                p.line < cursor.line || (p.line == cursor.line && p.col < cursor.col)
+            });
             (found.unwrap_or(matches.len() - 1), found.is_none())
         };
         self.state.move_cursor_to(matches[idx].0);
@@ -1537,7 +1611,9 @@ impl EditorPane {
         let (replace_str, (start, end)) = {
             let Some(ref s) = self.search else { return };
             let Some(ref r) = s.replace else { return };
-            if s.matches.is_empty() || s.query.is_empty() { return; }
+            if s.matches.is_empty() || s.query.is_empty() {
+                return;
+            }
             (r.clone(), s.matches[s.current_idx])
         };
 
@@ -1557,7 +1633,9 @@ impl EditorPane {
         let (replace_str, matches) = {
             let Some(ref s) = self.search else { return };
             let Some(ref r) = s.replace else { return };
-            if s.query.is_empty() || s.matches.is_empty() { return; }
+            if s.query.is_empty() || s.matches.is_empty() {
+                return;
+            }
             (r.clone(), s.matches.clone())
         };
 
@@ -1623,7 +1701,10 @@ impl EditorPane {
         self.push_undo();
         let cursor = self.state.cursor();
         self.state.mode = Mode::Visual(VisualKind::Char);
-        self.state.selection = Selection { anchor: cursor, cursor };
+        self.state.selection = Selection {
+            anchor: cursor,
+            cursor,
+        };
         let prev = std::mem::take(&mut self.state);
         let (sel_state, _) = apply(motion, prev, &mut self.buffer);
         self.state = sel_state;
@@ -1649,8 +1730,11 @@ impl EditorPane {
     ) {
         self.push_undo();
         let prev = std::mem::take(&mut self.state);
-        let (sel_state, _) =
-            apply(EditorCommand::SelectObject { inner, kind }, prev, &mut self.buffer);
+        let (sel_state, _) = apply(
+            EditorCommand::SelectObject { inner, kind },
+            prev,
+            &mut self.buffer,
+        );
         self.state = sel_state;
         if matches!(self.state.mode, Mode::Visual(_)) {
             let op_cmd = operator_kind_to_command(op);
@@ -1660,8 +1744,8 @@ impl EditorPane {
             if effect == SideEffect::BufferChanged {
                 self.cached_doc_meta = None;
                 self.spell_errors = None;
-        self.spell_seq = self.spell_seq.wrapping_add(1);
-        self.spell_pending = false;
+                self.spell_seq = self.spell_seq.wrapping_add(1);
+                self.spell_pending = false;
                 self.trigger_compile(cx);
             }
         }
@@ -1742,9 +1826,7 @@ impl EditorPane {
     /// Apply the currently selected wikilink completion, replacing `[[fragment` with `[[title]]`.
     fn apply_wikilink_completion(&mut self, cx: &mut Context<Self>) {
         let (open_col, title) = match &self.wikilink_complete {
-            Some(s) if !s.candidates.is_empty() => {
-                (s.open_col, s.candidates[s.selected].clone())
-            }
+            Some(s) if !s.candidates.is_empty() => (s.open_col, s.candidates[s.selected].clone()),
             _ => return,
         };
 
@@ -1818,7 +1900,11 @@ impl EditorPane {
                 if let Some(text) = item.text() {
                     self.push_undo();
                     let prev = std::mem::take(&mut self.state);
-                    let (new_state, _) = apply(EditorCommand::PasteFromClipboard(text), prev, &mut self.buffer);
+                    let (new_state, _) = apply(
+                        EditorCommand::PasteFromClipboard(text),
+                        prev,
+                        &mut self.buffer,
+                    );
                     self.state = new_state;
                     self.update_viewport();
                     self.trigger_compile(cx);
@@ -1947,7 +2033,10 @@ impl EditorPane {
                 Mode::Visual(VisualKind::Line) => {
                     let start = self.state.selection.start().line;
                     let end = self.state.selection.end().line;
-                    (start..=end).map(|l| self.buffer.line(l)).collect::<Vec<_>>().join("\n")
+                    (start..=end)
+                        .map(|l| self.buffer.line(l))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
                 _ => self.buffer.line(self.state.cursor().line).to_string(),
             };
@@ -1973,13 +2062,12 @@ impl EditorPane {
     }
 
     /// Execute a `KeymapResult` produced by the keymap handler.
-    fn execute_keymap_result(
-        &mut self,
-        result: KeymapResult,
-        cx: &mut Context<Self>,
-    ) {
+    fn execute_keymap_result(&mut self, result: KeymapResult, cx: &mut Context<Self>) {
         // Dismiss the hover popup on any action except ShowHover itself.
-        if !matches!(result, KeymapResult::ShowHover | KeymapResult::Pending | KeymapResult::Passthrough) {
+        if !matches!(
+            result,
+            KeymapResult::ShowHover | KeymapResult::Pending | KeymapResult::Passthrough
+        ) {
             if self.hover_popup.is_some() {
                 self.hover_popup = None;
             }
@@ -2065,9 +2153,9 @@ impl EditorPane {
                 self.state = new_state;
                 if effect == SideEffect::BufferChanged {
                     self.cached_doc_meta = None;
-                self.spell_errors = None;
-        self.spell_seq = self.spell_seq.wrapping_add(1);
-        self.spell_pending = false;
+                    self.spell_errors = None;
+                    self.spell_seq = self.spell_seq.wrapping_add(1);
+                    self.spell_pending = false;
                     self.trigger_compile(cx);
                 }
                 self.update_viewport();
@@ -2089,10 +2177,18 @@ impl EditorPane {
                     .chain(self.lsp_diagnostics.iter().map(|d| d.range.start.line))
                     .collect();
                 let dest = if forward {
-                    all_lines.iter().copied().filter(|&l| l > cursor_line).min()
+                    all_lines
+                        .iter()
+                        .copied()
+                        .filter(|&l| l > cursor_line)
+                        .min()
                         .or_else(|| all_lines.iter().copied().min())
                 } else {
-                    all_lines.iter().copied().filter(|&l| l < cursor_line).max()
+                    all_lines
+                        .iter()
+                        .copied()
+                        .filter(|&l| l < cursor_line)
+                        .max()
                         .or_else(|| all_lines.iter().copied().max())
                 };
                 if let Some(line) = dest {
@@ -2141,11 +2237,12 @@ impl EditorPane {
                         self.viewport_top = cursor_line.saturating_sub(VIEWPORT_LINES / 2);
                     }
                     ViewportAlign::Bottom => {
-                        self.viewport_top = cursor_line.saturating_sub(VIEWPORT_LINES.saturating_sub(1));
+                        self.viewport_top =
+                            cursor_line.saturating_sub(VIEWPORT_LINES.saturating_sub(1));
                     }
                     ViewportAlign::LineDown => {
-                        self.viewport_top = (self.viewport_top + 1)
-                            .min(line_count.saturating_sub(1));
+                        self.viewport_top =
+                            (self.viewport_top + 1).min(line_count.saturating_sub(1));
                         // If cursor scrolled above the viewport, pull it down.
                         if cursor_line < self.viewport_top {
                             let col = self.state.cursor().col;
@@ -2153,9 +2250,10 @@ impl EditorPane {
                                 let line = self.buffer.line(self.viewport_top);
                                 col.min(line.len())
                             };
-                            self.state.move_cursor_to(
-                                crate::editor::state::Pos::new(self.viewport_top, new_col)
-                            );
+                            self.state.move_cursor_to(crate::editor::state::Pos::new(
+                                self.viewport_top,
+                                new_col,
+                            ));
                         }
                     }
                     ViewportAlign::LineUp => {
@@ -2169,9 +2267,8 @@ impl EditorPane {
                                 let line = self.buffer.line(new_line);
                                 col.min(line.len())
                             };
-                            self.state.move_cursor_to(
-                                crate::editor::state::Pos::new(new_line, new_col)
-                            );
+                            self.state
+                                .move_cursor_to(crate::editor::state::Pos::new(new_line, new_col));
                         }
                     }
                 }
@@ -2203,7 +2300,10 @@ impl EditorPane {
                 cx.stop_propagation();
                 self.marks.insert(reg, self.state.cursor());
             }
-            KeymapResult::JumpToMark { reg, first_non_blank } => {
+            KeymapResult::JumpToMark {
+                reg,
+                first_non_blank,
+            } => {
                 cx.stop_propagation();
                 self.jump_to_mark(reg, first_non_blank);
                 cx.notify();
@@ -2316,11 +2416,15 @@ impl EditorPane {
                 }
                 // The primary cursor gets the result of the primary position.
                 // Find which index corresponds to the original primary.
-                let primary_new = all.iter().zip(new_positions.iter())
+                let primary_new = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
                     .map(|(_, &np)| np)
                     .unwrap_or(Pos::new(primary.line, primary.col + text.len()));
-                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                let extras: Vec<Pos> = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
                     .map(|(_, &np)| np)
                     .collect();
@@ -2356,11 +2460,15 @@ impl EditorPane {
                         new_positions.push(Some(*pos));
                     }
                 }
-                let primary_new = all.iter().zip(new_positions.iter())
+                let primary_new = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
                     .and_then(|(_, &np)| np)
                     .unwrap_or(primary);
-                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                let extras: Vec<Pos> = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
                     .filter_map(|(_, &np)| np)
                     .collect();
@@ -2377,12 +2485,19 @@ impl EditorPane {
                 for pos in &all {
                     let line_str = self.buffer.line(pos.line).to_string();
                     // Compute smart indent (match previous line + extra for openers).
-                    let leading_ws: String = line_str.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                    let leading_ws: String = line_str
+                        .chars()
+                        .take_while(|c| *c == ' ' || *c == '\t')
+                        .collect();
                     let before = &line_str[..pos.col.min(line_str.len())];
                     let extra = if before.trim_end().ends_with('{')
                         || before.trim_end().ends_with('[')
                         || before.trim_end().ends_with('(')
-                    { "  " } else { "" };
+                    {
+                        "  "
+                    } else {
+                        ""
+                    };
                     self.buffer.split_line(pos.line, pos.col);
                     let indent = format!("{}{}", leading_ws, extra);
                     let indent_len = indent.len();
@@ -2391,11 +2506,15 @@ impl EditorPane {
                     }
                     new_positions.push(Pos::new(pos.line + 1, indent_len));
                 }
-                let primary_new = all.iter().zip(new_positions.iter())
+                let primary_new = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .find(|(&p, _)| p.line == primary.line && p.col == primary.col)
                     .map(|(_, &np)| np)
                     .unwrap_or(Pos::new(primary.line + 1, 0));
-                let extras: Vec<Pos> = all.iter().zip(new_positions.iter())
+                let extras: Vec<Pos> = all
+                    .iter()
+                    .zip(new_positions.iter())
                     .filter(|(&p, _)| !(p.line == primary.line && p.col == primary.col))
                     .map(|(_, &np)| np)
                     .collect();
@@ -2409,13 +2528,16 @@ impl EditorPane {
             cmd if is_movement_command(cmd) => {
                 // Apply the same movement to each extra cursor via a temporary state.
                 let extra = std::mem::take(&mut self.state.extra_cursors);
-                let new_extra: Vec<Pos> = extra.into_iter().map(|pos| {
-                    let mut tmp = crate::editor::state::EditorState::new();
-                    tmp.mode = self.state.mode;
-                    tmp.move_cursor_to(pos);
-                    let (new_tmp, _) = apply(cmd.clone(), tmp, &mut self.buffer);
-                    new_tmp.cursor()
-                }).collect();
+                let new_extra: Vec<Pos> = extra
+                    .into_iter()
+                    .map(|pos| {
+                        let mut tmp = crate::editor::state::EditorState::new();
+                        tmp.mode = self.state.mode;
+                        tmp.move_cursor_to(pos);
+                        let (new_tmp, _) = apply(cmd.clone(), tmp, &mut self.buffer);
+                        new_tmp.cursor()
+                    })
+                    .collect();
                 self.state.extra_cursors = new_extra;
                 // Don't return true — let execute_command handle primary cursor.
                 false
@@ -2435,11 +2557,7 @@ impl EditorPane {
         }
     }
 
-    fn execute_command(
-        &mut self,
-        cmd: EditorCommand,
-        cx: &mut Context<Self>,
-    ) {
+    fn execute_command(&mut self, cmd: EditorCommand, cx: &mut Context<Self>) {
         // We are handling this key — tell GPUI so macOS doesn't double-insert.
         cx.stop_propagation();
 
@@ -2454,11 +2572,12 @@ impl EditorPane {
         // For movement commands, it propagates the motion to extra cursors and
         // returns `false` so the primary cursor is still handled below.
         // Skip this for commands that are themselves multi-cursor management.
-        let is_multi_mgmt = matches!(cmd,
+        let is_multi_mgmt = matches!(
+            cmd,
             EditorCommand::AddCursorBelow
-            | EditorCommand::AddCursorAbove
-            | EditorCommand::KeepPrimaryCursor
-            | EditorCommand::RemovePrimaryCursor
+                | EditorCommand::AddCursorAbove
+                | EditorCommand::KeepPrimaryCursor
+                | EditorCommand::RemovePrimaryCursor
         );
         if !is_multi_mgmt && !self.state.extra_cursors.is_empty() {
             let handled = self.apply_to_extra_cursors(&cmd);
@@ -2467,8 +2586,8 @@ impl EditorPane {
                 cx.stop_propagation();
                 self.cached_doc_meta = None;
                 self.spell_errors = None;
-        self.spell_seq = self.spell_seq.wrapping_add(1);
-        self.spell_pending = false;
+                self.spell_seq = self.spell_seq.wrapping_add(1);
+                self.spell_pending = false;
                 self.update_viewport();
                 self.trigger_compile(cx);
                 cx.notify();
@@ -2540,8 +2659,8 @@ impl EditorPane {
                 self.state.last_modified_pos = Some(self.state.cursor());
                 self.cached_doc_meta = None;
                 self.spell_errors = None;
-        self.spell_seq = self.spell_seq.wrapping_add(1);
-        self.spell_pending = false;
+                self.spell_seq = self.spell_seq.wrapping_add(1);
+                self.spell_pending = false;
                 self.trigger_compile(cx);
                 cx.notify();
             }
@@ -2612,8 +2731,8 @@ impl EditorPane {
         };
         // Translate the clicked visual row (relative to top of viewport) into
         // an absolute buffer line, then clamp to the document.
-        let line = (self.viewport_top + visual_line)
-            .min(self.buffer.line_count().saturating_sub(1));
+        let line =
+            (self.viewport_top + visual_line).min(self.buffer.line_count().saturating_sub(1));
 
         let raw_x = (f32::from(event.position.x) - padding).max(0.0);
         let col_approx = (raw_x / char_width) as usize;
@@ -2654,7 +2773,8 @@ impl Render for EditorPane {
             let fm_end = front_matter_end(&self.buffer, line_count);
             self.cached_doc_meta = Some((words, chars, fm_end));
         }
-        let (word_count, char_count, front_matter_end) = self.cached_doc_meta.unwrap();
+        let (word_count, char_count, front_matter_end) =
+            self.cached_doc_meta.expect("cached_doc_meta set above");
 
         // Compute matching bracket position (if cursor is on a bracket).
         let bracket_match = find_bracket_match(&self.buffer, cursor);
@@ -2667,10 +2787,14 @@ impl Render for EditorPane {
 
         // Per-line search highlight data: bar-open takes precedence, otherwise
         // use the persistent highlights left over from the last completed search.
-        let search_matches_ref: Option<(&Vec<(Pos, Pos)>, usize)> = if let Some(ref s) = self.search {
+        let search_matches_ref: Option<(&Vec<(Pos, Pos)>, usize)> = if let Some(ref s) = self.search
+        {
             Some((&s.matches, s.current_idx))
         } else if !self.search_highlight_matches.is_empty() {
-            Some((&self.search_highlight_matches, self.search_highlight_current))
+            Some((
+                &self.search_highlight_matches,
+                self.search_highlight_current,
+            ))
         } else {
             None
         };
@@ -2736,7 +2860,11 @@ impl Render for EditorPane {
             // extra_selections range (from `s`/`S` multi-select) — same
             // whole-line granularity the primary selection already uses.
             let in_selection = is_line_in_visual_selection(i, mode, &selection)
-                || self.state.extra_selections.iter().any(|s| is_line_in_visual_selection(i, mode, s));
+                || self
+                    .state
+                    .extra_selections
+                    .iter()
+                    .any(|s| is_line_in_visual_selection(i, mode, s));
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
 
             // Collect search match byte-ranges that fall on this line.
@@ -2761,31 +2889,51 @@ impl Render for EditorPane {
             let diag_sev = diag_map.get(&i).copied();
 
             // Bracket match highlight: byte range on this line (if any).
-            let bracket_range: Option<(usize, usize)> = bracket_match
-                .filter(|m| m.line == i)
-                .map(|m| {
+            let bracket_range: Option<(usize, usize)> =
+                bracket_match.filter(|m| m.line == i).map(|m| {
                     let row = self.buffer.line(i);
-                    let end = m.col + row[m.col..].chars().next()
-                        .map(|c| c.len_utf8()).unwrap_or(1);
+                    let end = m.col
+                        + row[m.col..]
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(1);
                     (m.col, end)
                 });
 
             // Collect spell error byte-ranges for this line.
-            let line_spell_errors: Vec<(usize, usize)> = spell_errors_cache.iter()
+            let line_spell_errors: Vec<(usize, usize)> = spell_errors_cache
+                .iter()
                 .filter(|&&(l, _, _)| l == i)
                 .map(|&(_, s, e)| (s, e))
                 .collect();
 
             // Extra cursor byte-columns on this line.
-            let line_extra_cursors: Vec<usize> = self.state.extra_cursors.iter()
+            let line_extra_cursors: Vec<usize> = self
+                .state
+                .extra_cursors
+                .iter()
                 .filter(|p| p.line == i)
                 .map(|p| p.col)
                 .collect();
 
             line_elements.push(render_line(
-                i, text, cursor, mode, in_selection, is_front_matter,
-                lnm, line_count, &other_matches, focused_match, diag_sev,
-                bracket_range, &line_spell_errors, &line_extra_cursors, text_w, &t,
+                i,
+                text,
+                cursor,
+                mode,
+                in_selection,
+                is_front_matter,
+                lnm,
+                line_count,
+                &other_matches,
+                focused_match,
+                diag_sev,
+                bracket_range,
+                &line_spell_errors,
+                &line_extra_cursors,
+                text_w,
+                &t,
             ));
         }
 
@@ -2793,26 +2941,34 @@ impl Render for EditorPane {
         let line_count_total: usize = self.buffer.line_count();
         let doc_stats_label = if let Some(target) = self.word_target {
             let pct = ((word_count as f64 / target as f64) * 100.0).min(100.0) as usize;
-            format!("{} / {} w ({}%) · {} ch · {} L", word_count, target, pct, char_count, line_count_total)
+            format!(
+                "{} / {} w ({}%) · {} ch · {} L",
+                word_count, target, pct, char_count, line_count_total
+            )
         } else {
-            format!("{} w · {} ch · {} L", word_count, char_count, line_count_total)
+            format!(
+                "{} w · {} ch · {} L",
+                word_count, char_count, line_count_total
+            )
         };
 
         // When a Visual selection is active, also show per-selection stats.
         let sel_stats_label: Option<String> = if matches!(mode, Mode::Visual(_)) {
-            let sel   = &self.state.selection;
+            let sel = &self.state.selection;
             let start = sel.start();
-            let end   = sel.end();
+            let end = sel.end();
             if start != end {
                 let selected: String = if start.line == end.line {
-                    self.buffer.line(start.line)
+                    self.buffer
+                        .line(start.line)
                         .get(start.col..end.col)
                         .unwrap_or("")
                         .to_string()
                 } else {
                     let mut parts: Vec<String> = Vec::new();
                     parts.push(
-                        self.buffer.line(start.line)
+                        self.buffer
+                            .line(start.line)
                             .get(start.col..)
                             .unwrap_or("")
                             .to_string(),
@@ -2821,7 +2977,8 @@ impl Render for EditorPane {
                         parts.push(self.buffer.line(l).to_string());
                     }
                     parts.push(
-                        self.buffer.line(end.line)
+                        self.buffer
+                            .line(end.line)
                             .get(..end.col)
                             .unwrap_or("")
                             .to_string(),
@@ -2910,7 +3067,10 @@ impl Render for EditorPane {
             div()
                 .font_family("Menlo")
                 .text_color(gpui::rgb(t.ochre))
-                .child(format!("{} selections", self.state.extra_selections.len() + 1))
+                .child(format!(
+                    "{} selections",
+                    self.state.extra_selections.len() + 1
+                ))
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -2946,7 +3106,12 @@ impl Render for EditorPane {
             (e, w)
         };
         let diag_indicator: gpui::AnyElement = if diag_errors + diag_warnings > 0 {
-            let mut row = div().flex().flex_row().items_center().gap_2().font_family("Menlo");
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .font_family("Menlo");
             if diag_errors > 0 {
                 row = row.child(
                     div()
@@ -3031,33 +3196,35 @@ impl Render for EditorPane {
                     .font_family("Menlo")
                     .child(doc_stats_label),
             )
-            .child(if let Some((cur, total, wrapped)) = self.search_nav_status {
-                // Show match position from the last n/N navigation when the
-                // search bar is closed.
-                if self.search.is_none() {
-                    let label = if wrapped {
-                        format!("{}/{} ↩", cur, total)
+            .child(
+                if let Some((cur, total, wrapped)) = self.search_nav_status {
+                    // Show match position from the last n/N navigation when the
+                    // search bar is closed.
+                    if self.search.is_none() {
+                        let label = if wrapped {
+                            format!("{}/{} ↩", cur, total)
+                        } else {
+                            format!("{}/{}", cur, total)
+                        };
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_color(gpui::rgb(t.text_faint))
+                                    .font_family("Menlo")
+                                    .child(label),
+                            )
+                            .into_any_element()
                     } else {
-                        format!("{}/{}", cur, total)
-                    };
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_color(gpui::rgb(t.text_faint))
-                                .font_family("Menlo")
-                                .child(label),
-                        )
-                        .into_any_element()
+                        div().into_any_element()
+                    }
                 } else {
                     div().into_any_element()
-                }
-            } else {
-                div().into_any_element()
-            })
+                },
+            )
             // Spacer — everything after is right-aligned.
             .child(div().flex_1())
             .child(diag_indicator)
@@ -3077,7 +3244,7 @@ impl Render for EditorPane {
                 div().into_any_element()
             } else if s.matches.is_empty() {
                 div()
-                    .text_color(gpui::rgb(0xF87171))
+                    .text_color(gpui::rgb(0xf87171))
                     .child("  no matches")
                     .into_any_element()
             } else {
@@ -3087,16 +3254,8 @@ impl Render for EditorPane {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(
-                        div()
-                            .text_color(gpui::rgb(t.text_faint))
-                            .child(count_str),
-                    )
-                    .child(
-                        div()
-                            .text_color(gpui::rgb(t.ochre))
-                            .child(wrap_str),
-                    )
+                    .child(div().text_color(gpui::rgb(t.text_faint)).child(count_str))
+                    .child(div().text_color(gpui::rgb(t.ochre)).child(wrap_str))
                     .into_any_element()
             };
 
@@ -3147,7 +3306,11 @@ impl Render for EditorPane {
                     .text_sm()
                     .font_family("Menlo")
                     .child(div().text_color(gpui::rgb(t.text_subtle)).child("→"))
-                    .child(div().text_color(gpui::rgb(t.text)).child(replace_text.clone()))
+                    .child(
+                        div()
+                            .text_color(gpui::rgb(t.text))
+                            .child(replace_text.clone()),
+                    )
                     .when(s.replace_focused, |r| {
                         r.child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
                     })
@@ -3176,7 +3339,11 @@ impl Render for EditorPane {
                 .child(div().text_color(gpui::rgb(t.ochre)).child(label))
                 .child(div().text_color(gpui::rgb(t.text)).child(p.query.clone()))
                 .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
-                .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
+                .child(
+                    div()
+                        .text_color(gpui::rgb(t.text_faint))
+                        .child("  ↵ confirm  esc cancel"),
+                )
         });
 
         // ── Rename-prompt bar (`Space r`) ───────────────────────────────────────
@@ -3196,22 +3363,35 @@ impl Render for EditorPane {
                 .child(div().text_color(gpui::rgb(t.ochre)).child("rename» "))
                 .child(div().text_color(gpui::rgb(t.text)).child(p.query.clone()))
                 .child(div().text_color(gpui::rgb(t.mode_insert)).child("▌"))
-                .child(div().text_color(gpui::rgb(t.text_faint)).child("  ↵ confirm  esc cancel"))
+                .child(
+                    div()
+                        .text_color(gpui::rgb(t.text_faint))
+                        .child("  ↵ confirm  esc cancel"),
+                )
         });
 
         // ── Code-action picker bar (`Space a`) ──────────────────────────────────
         let code_action_bar = self.code_action.as_ref().map(|s| {
-            let rows: Vec<gpui::AnyElement> = s.actions.iter().enumerate().map(|(i, a)| {
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_sm()
-                    .font_family("Menlo")
-                    .text_color(gpui::rgb(if i == s.selected { t.text } else { t.text_muted }))
-                    .when(i == s.selected, |d| d.bg(gpui::rgb(t.bg_hover)))
-                    .child(a.title.clone())
-                    .into_any_element()
-            }).collect();
+            let rows: Vec<gpui::AnyElement> = s
+                .actions
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .font_family("Menlo")
+                        .text_color(gpui::rgb(if i == s.selected {
+                            t.text
+                        } else {
+                            t.text_muted
+                        }))
+                        .when(i == s.selected, |d| d.bg(gpui::rgb(t.bg_hover)))
+                        .child(a.title.clone())
+                        .into_any_element()
+                })
+                .collect();
             div()
                 .w_full()
                 .flex()
@@ -3220,7 +3400,11 @@ impl Render for EditorPane {
                 .border_b_1()
                 .border_color(gpui::rgb(t.border_subtle))
                 .child(
-                    div().px_4().py_1().text_xs().font_family("Menlo")
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_xs()
+                        .font_family("Menlo")
                         .text_color(gpui::rgb(t.text_faint))
                         .child("Code actions — ↑↓ select, ↵ apply, esc cancel"),
                 )
@@ -3229,8 +3413,10 @@ impl Render for EditorPane {
 
         // Whether any bottom bar (search, regex-prompt, rename, code-action)
         // is showing — popups below reserve the same 28px either way.
-        let bar_open = search_bar.is_some() || regex_bar.is_some()
-            || rename_bar.is_some() || code_action_bar.is_some();
+        let bar_open = search_bar.is_some()
+            || regex_bar.is_some()
+            || rename_bar.is_some()
+            || code_action_bar.is_some();
 
         // ── Wikilink autocomplete popup ───────────────────────────────────────
         // Positioned immediately below and to the right of the `[[` opening on
@@ -3247,11 +3433,9 @@ impl Render for EditorPane {
             // Leave vertical room for the search bar when it is open.
             let search_h = if bar_open { 28.0_f32 } else { 0.0 };
             let popup_left = px(PADDING + gutter_w + wl.open_col as f32 * CHAR_W);
-            let popup_top = px(
-                search_h
-                    + PADDING
-                    + (cursor.line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H,
-            );
+            let popup_top = px(search_h
+                + PADDING
+                + (cursor.line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H);
 
             let items: Vec<gpui::AnyElement> = wl
                 .candidates
@@ -3296,11 +3480,9 @@ impl Render for EditorPane {
             };
             let search_h = if bar_open { 28.0_f32 } else { 0.0 };
             let left = px(PADDING + gutter_w + c.anchor_col as f32 * CHAR_W);
-            let top = px(
-                search_h
-                    + PADDING
-                    + (c.anchor_line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H,
-            );
+            let top = px(search_h
+                + PADDING
+                + (c.anchor_line.saturating_sub(self.viewport_top) + 1) as f32 * LINE_H);
 
             let rows: Vec<gpui::AnyElement> = c
                 .items
@@ -3435,7 +3617,11 @@ impl Render for EditorPane {
             .when_some(completion_popup, |root, popup| root.child(popup))
             .when_some(hover_popup, |root, popup| root.child(popup))
             .when_some(
-                if self.perf_overlay { self.last_key_micros } else { None },
+                if self.perf_overlay {
+                    self.last_key_micros
+                } else {
+                    None
+                },
                 |root, micros| {
                     let label = if micros >= 1_000 {
                         format!("{:.1} ms", micros as f64 / 1_000.0)
@@ -3497,10 +3683,15 @@ fn front_matter_end(buffer: &InMemoryBuffer, line_count: usize) -> Option<usize>
 /// Number of digits needed to display line numbers up to `count`.
 /// Minimum of 2 so the gutter always has a reasonable width.
 fn gutter_digits(count: usize) -> usize {
-    if count < 10 { 2 }
-    else if count < 100 { 3 }
-    else if count < 1000 { 4 }
-    else { 5 }
+    if count < 10 {
+        2
+    } else if count < 100 {
+        3
+    } else if count < 1000 {
+        4
+    } else {
+        5
+    }
 }
 
 /// A single syntax-highlight span on a line.
@@ -3515,10 +3706,22 @@ struct SyntaxSpan {
 
 impl SyntaxSpan {
     fn new(start: usize, end: usize, color: u32) -> Self {
-        Self { start, end, color, bold: false, italic: false }
+        Self {
+            start,
+            end,
+            color,
+            bold: false,
+            italic: false,
+        }
     }
-    fn bold(mut self) -> Self { self.bold = true; self }
-    fn italic(mut self) -> Self { self.italic = true; self }
+    fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+    fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
 }
 
 /// Compute syntax-highlight spans for a single line.
@@ -3614,10 +3817,7 @@ fn highlight_spans(line: &str, t: &ThemePalette, is_front_matter: bool) -> Vec<S
         }
 
         // `#keyword` — Typst directive
-        if b[i] == b'#'
-            && i + 1 < n
-            && (b[i + 1].is_ascii_alphabetic() || b[i + 1] == b'_')
-        {
+        if b[i] == b'#' && i + 1 < n && (b[i + 1].is_ascii_alphabetic() || b[i + 1] == b'_') {
             let start = i;
             i += 1;
             while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
@@ -3638,7 +3838,7 @@ fn operator_kind_to_command(op: OperatorKind) -> EditorCommand {
     match op {
         OperatorKind::Delete => EditorCommand::DeleteSelection,
         OperatorKind::Change => EditorCommand::ChangeSelection,
-        OperatorKind::Yank   => EditorCommand::YankSelection,
+        OperatorKind::Yank => EditorCommand::YankSelection,
     }
 }
 
@@ -3647,8 +3847,12 @@ fn operator_kind_to_command(op: OperatorKind) -> EditorCommand {
 /// there is no frontmatter or no matching key.
 fn parse_word_target_from_buffer(buf: &InMemoryBuffer) -> Option<usize> {
     let line_count = buf.line_count();
-    if line_count < 2 { return None; }
-    if buf.line(0).trim() != "---" { return None; }
+    if line_count < 2 {
+        return None;
+    }
+    if buf.line(0).trim() != "---" {
+        return None;
+    }
     // Find closing `---`.
     let end = (1..line_count).find(|&i| buf.line(i).trim() == "---")?;
     for i in 1..end {
@@ -3710,18 +3914,28 @@ fn utf16_to_byte(line: &str, utf16_col: usize) -> usize {
 /// effects, so it works equally for an open pane's live buffer (see
 /// `EditorPane::apply_lsp_edits`) and a throwaway buffer loaded from disk for
 /// a file that isn't open anywhere (see `MainWindow::apply_workspace_edits`).
-pub(crate) fn apply_lsp_text_edits(buf: &mut impl crate::editor::buffer::Buffer, edits: &[crate::lsp::LspTextEdit]) {
+pub(crate) fn apply_lsp_text_edits(
+    buf: &mut impl crate::editor::buffer::Buffer,
+    edits: &[crate::lsp::LspTextEdit],
+) {
     if edits.is_empty() {
         return;
     }
     let last_line = buf.line_count().saturating_sub(1);
-    let mut byte_edits: Vec<(Pos, Pos, &str)> = edits.iter().map(|e| {
-        let start_line = e.range.start.line.min(last_line);
-        let end_line = e.range.end.line.min(last_line);
-        let start_col = utf16_to_byte(buf.line(start_line), e.range.start.character);
-        let end_col = utf16_to_byte(buf.line(end_line), e.range.end.character);
-        (Pos::new(start_line, start_col), Pos::new(end_line, end_col), e.new_text.as_str())
-    }).collect();
+    let mut byte_edits: Vec<(Pos, Pos, &str)> = edits
+        .iter()
+        .map(|e| {
+            let start_line = e.range.start.line.min(last_line);
+            let end_line = e.range.end.line.min(last_line);
+            let start_col = utf16_to_byte(buf.line(start_line), e.range.start.character);
+            let end_col = utf16_to_byte(buf.line(end_line), e.range.end.character);
+            (
+                Pos::new(start_line, start_col),
+                Pos::new(end_line, end_col),
+                e.new_text.as_str(),
+            )
+        })
+        .collect();
     byte_edits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
     for (start, end, new_text) in byte_edits {
@@ -3736,10 +3950,8 @@ pub(crate) fn apply_lsp_text_edits(buf: &mut impl crate::editor::buffer::Buffer,
 /// Used by `*`/`#` whole-word matching.
 fn is_whole_word_match(line: &str, start: usize, end: usize) -> bool {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let before_ok = start == 0
-        || !is_word(line[..start].chars().next_back().unwrap_or(' '));
-    let after_ok = end >= line.len()
-        || !is_word(line[end..].chars().next().unwrap_or(' '));
+    let before_ok = start == 0 || !is_word(line[..start].chars().next_back().unwrap_or(' '));
+    let after_ok = end >= line.len() || !is_word(line[end..].chars().next().unwrap_or(' '));
     before_ok && after_ok
 }
 
@@ -3794,19 +4006,24 @@ fn render_line(
     let line_height = px(20.0);
     let is_cursor_line = line_idx == cursor.line;
     let text_len = text.len();
-    let default_fg = if is_front_matter { t.text_faint } else { t.text_muted };
+    let default_fg = if is_front_matter {
+        t.text_faint
+    } else {
+        t.text_muted
+    };
 
     // ── Gutter ────────────────────────────────────────────────────────────────
     let gutter_cell = if line_number_mode != LineNumberMode::Off {
         let w = gutter_digits(total_lines);
         let (label, color) = if is_cursor_line {
-            (format!("{:>width$}", line_idx + 1, width = w), t.text_subtle)
+            (
+                format!("{:>width$}", line_idx + 1, width = w),
+                t.text_subtle,
+            )
         } else {
             let n: isize = match line_number_mode {
                 LineNumberMode::Absolute => (line_idx + 1) as isize,
-                LineNumberMode::Relative => {
-                    (line_idx as isize - cursor.line as isize).abs()
-                }
+                LineNumberMode::Relative => (line_idx as isize - cursor.line as isize).abs(),
                 LineNumberMode::Off => unreachable!(),
             };
             (format!("{:>width$}", n, width = w), t.text_faint)
@@ -3840,7 +4057,9 @@ fn render_line(
             if spans.iter().any(|sp| sp.start < e && s < sp.end) {
                 return false;
             }
-            let Some(word) = text.get(s..e) else { return false };
+            let Some(word) = text.get(s..e) else {
+                return false;
+            };
             if word.chars().any(|c| {
                 c.is_ascii_digit() || matches!(c, '#' | '/' | '.' | '_' | '(' | ')' | '@' | '\\')
             }) {
@@ -3859,7 +4078,11 @@ fn render_line(
     let spell_errors: &[(usize, usize)] = &spell_errors;
 
     // ── Cursor character bounds ───────────────────────────────────────────────
-    let cursor_col = if is_cursor_line { cursor.col.min(text_len) } else { usize::MAX };
+    let cursor_col = if is_cursor_line {
+        cursor.col.min(text_len)
+    } else {
+        usize::MAX
+    };
     let cursor_end = if is_cursor_line && cursor_col < text_len {
         text[cursor_col..]
             .char_indices()
@@ -3917,14 +4140,14 @@ fn render_line(
 
     // ── Mode-derived colours ──────────────────────────────────────────────────
     let cursor_bg: gpui::Hsla = match mode {
-        Mode::Insert   => gpui::rgb(t.mode_insert).into(),
-        Mode::Normal   => gpui::rgb(t.mode_normal).into(),
-        Mode::Visual(_)=> gpui::rgb(t.mode_visual).into(),
+        Mode::Insert => gpui::rgb(t.mode_insert).into(),
+        Mode::Normal => gpui::rgb(t.mode_normal).into(),
+        Mode::Visual(_) => gpui::rgb(t.mode_visual).into(),
     };
     let cursor_fg: gpui::Hsla = gpui::rgb(t.cursor_fg).into();
-    let sel_bg: gpui::Hsla    = gpui::rgb(t.ochre_dim).into();
+    let sel_bg: gpui::Hsla = gpui::rgb(t.ochre_dim).into();
     // Non-current match: translucent ochre tint.
-    let match_bg: gpui::Hsla  = rgba(((t.ochre as u64) << 8 | 0x55) as u32).into();
+    let match_bg: gpui::Hsla = rgba(((t.ochre as u64) << 8 | 0x55) as u32).into();
     // Current (focused) match: solid ochre, inverted text.
     let focused_bg: gpui::Hsla = gpui::rgb(t.ochre).into();
     // Matching bracket highlight.
@@ -3950,10 +4173,14 @@ fn render_line(
 
     for w in boundaries.windows(2) {
         let (a, b) = (w[0], w[1]);
-        if a >= b { continue; }
+        if a >= b {
+            continue;
+        }
         // `boundaries` are all `<= text_len`, so this slices the same bytes
         // whether or not `text_content` carries the EOL padding space.
-        if text_content.get(a..b).is_none() { continue; }
+        if text_content.get(a..b).is_none() {
+            continue;
+        }
 
         // Inline block cursor for Normal/Visual (flows with the wrapped text
         // layout).  Insert mode paints a thin bar via the caret canvas below,
@@ -3963,15 +4190,22 @@ fn render_line(
 
         // Foreground and font attributes from syntax spans (or default).
         let active_span = spans.iter().find(|sp| sp.start <= a && a < sp.end);
-        let syn_fg: gpui::Hsla = gpui::rgb(
-            active_span.map(|sp| sp.color).unwrap_or(default_fg)
-        ).into();
-        let syn_bold   = active_span.map(|sp| sp.bold).unwrap_or(false);
+        let syn_fg: gpui::Hsla =
+            gpui::rgb(active_span.map(|sp| sp.color).unwrap_or(default_fg)).into();
+        let syn_bold = active_span.map(|sp| sp.bold).unwrap_or(false);
         let syn_italic = active_span.map(|sp| sp.italic).unwrap_or(false);
 
         let font = gpui::Font {
-            weight: if syn_bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL },
-            style:  if syn_italic { gpui::FontStyle::Italic } else { gpui::FontStyle::Normal },
+            weight: if syn_bold {
+                gpui::FontWeight::BOLD
+            } else {
+                gpui::FontWeight::NORMAL
+            },
+            style: if syn_italic {
+                gpui::FontStyle::Italic
+            } else {
+                gpui::FontStyle::Normal
+            },
             ..base_font.clone()
         };
 
@@ -3988,9 +4222,8 @@ fn render_line(
 
         // Extra cursor block — slightly dimmer than the primary cursor.
         // (Insert mode: extra carets are thin bars from the canvas instead.)
-        let is_extra_cursor_block = mode != Mode::Insert
-            && extra_cursors.iter().any(|&ec| ec == a)
-            && a < text_len;
+        let is_extra_cursor_block =
+            mode != Mode::Insert && extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
         let extra_cursor_bg: gpui::Hsla = {
             // 60% opacity version of cursor_bg — mix toward background.
             let mut c = cursor_bg;
@@ -4069,45 +4302,44 @@ fn render_line(
         // position of each caret — including which soft-wrapped row it landed
         // on.  A canvas sibling paints 2px bars at those window coordinates.
         // No simulation: the layout that wrapped the text answers directly.
-        let caret_canvas: Option<gpui::AnyElement> = if mode == Mode::Insert
-            && (is_cursor_line || !extra_cursors.is_empty())
-        {
-            let layout = styled.layout().clone();
-            let mut carets: Vec<(usize, f32)> = Vec::new(); // (byte index, opacity)
-            if is_cursor_line {
-                carets.push((cursor_col.min(text_len), 1.0));
-            }
-            for &ec in extra_cursors {
-                carets.push((ec.min(text_len), 0.6));
-            }
-            let bar_color: gpui::Hsla = gpui::rgb(t.mode_insert).into();
-            Some(
-                gpui::canvas(
-                    |_, _, _| {},
-                    move |_, _, window, _| {
-                        let line_height = layout.line_height();
-                        for (ix, opacity) in carets {
-                            if let Some(pos) = layout.position_for_index(ix) {
-                                let mut color = bar_color;
-                                color.a *= opacity;
-                                window.paint_quad(gpui::fill(
-                                    gpui::Bounds {
-                                        origin: pos,
-                                        size: gpui::size(px(2.0), line_height),
-                                    },
-                                    color,
-                                ));
+        let caret_canvas: Option<gpui::AnyElement> =
+            if mode == Mode::Insert && (is_cursor_line || !extra_cursors.is_empty()) {
+                let layout = styled.layout().clone();
+                let mut carets: Vec<(usize, f32)> = Vec::new(); // (byte index, opacity)
+                if is_cursor_line {
+                    carets.push((cursor_col.min(text_len), 1.0));
+                }
+                for &ec in extra_cursors {
+                    carets.push((ec.min(text_len), 0.6));
+                }
+                let bar_color: gpui::Hsla = gpui::rgb(t.mode_insert).into();
+                Some(
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            let line_height = layout.line_height();
+                            for (ix, opacity) in carets {
+                                if let Some(pos) = layout.position_for_index(ix) {
+                                    let mut color = bar_color;
+                                    color.a *= opacity;
+                                    window.paint_quad(gpui::fill(
+                                        gpui::Bounds {
+                                            origin: pos,
+                                            size: gpui::size(px(2.0), line_height),
+                                        },
+                                        color,
+                                    ));
+                                }
                             }
-                        }
-                    },
+                        },
+                    )
+                    .absolute()
+                    .size_full()
+                    .into_any_element(),
                 )
-                .absolute()
-                .size_full()
-                .into_any_element(),
-            )
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         div()
             .relative()
@@ -4125,16 +4357,12 @@ fn render_line(
     // default flex-shrink of 1 crushes each row toward its min-height — a
     // soft-wrapped row squeezed to one line-height paints its extra lines over
     // the rows below.
-    let mut row = div()
-        .min_h(line_height)
-        .flex_shrink_0()
-        .flex()
-        .flex_row();
+    let mut row = div().min_h(line_height).flex_shrink_0().flex().flex_row();
 
     // Diagnostic left-border indicator: red stripe for errors, amber for warnings.
     if let Some(sev) = diag_sev {
         let stripe_color = match sev {
-            DiagnosticSeverity::Error   => gpui::rgb(0xff5555u32),
+            DiagnosticSeverity::Error => gpui::rgb(0xff5555u32),
             DiagnosticSeverity::Warning => gpui::rgb(0xffb86cu32),
         };
         row = row.border_l_2().border_color(stripe_color);
@@ -4147,7 +4375,6 @@ fn render_line(
 }
 
 // ── Key translation ───────────────────────────────────────────────────────────
-
 
 /// Returns true if the command will modify the buffer (used to decide whether
 /// to push an undo snapshot before applying).
@@ -4249,8 +4476,9 @@ fn find_bracket_match(buf: &InMemoryBuffer, cursor: Pos) -> Option<Pos> {
             let scan_from = if l == cursor.line { start_col } else { 0 };
             for (byte_idx, c) in row[scan_from..].char_indices() {
                 let col = scan_from + byte_idx;
-                if c == open  { depth += 1; }
-                else if c == close {
+                if c == open {
+                    depth += 1;
+                } else if c == close {
                     depth -= 1;
                     if depth == 0 {
                         return Some(Pos::new(l, col));
@@ -4269,8 +4497,9 @@ fn find_bracket_match(buf: &InMemoryBuffer, cursor: Pos) -> Option<Pos> {
             // Collect char positions in reverse order.
             let chars: Vec<(usize, char)> = slice.char_indices().collect();
             for &(byte_idx, c) in chars.iter().rev() {
-                if c == close { depth += 1; }
-                else if c == open {
+                if c == close {
+                    depth += 1;
+                } else if c == open {
                     depth -= 1;
                     if depth == 0 {
                         return Some(Pos::new(l, byte_idx));
@@ -4316,21 +4545,27 @@ impl EditorPane {
     /// caller then falls through to the regular `DeleteCharBefore` path.
     fn handle_pair_backspace(&mut self) -> bool {
         let cursor = self.state.cursor();
-        if cursor.col == 0 { return false; }
+        if cursor.col == 0 {
+            return false;
+        }
 
         let line = self.buffer.line(cursor.line).to_string();
 
         // Character immediately before the cursor (the potential opener).
-        let before = line.get(..cursor.col)
+        let before = line
+            .get(..cursor.col)
             .and_then(|s| s.chars().last())
             .map(|c| c.to_string());
         // Character at the cursor (the potential closer).
-        let at = line.get(cursor.col..)
+        let at = line
+            .get(cursor.col..)
             .and_then(|s| s.chars().next())
             .map(|c| c.to_string());
 
         let Some(open) = before else { return false };
-        let Some(close_at_cursor) = at else { return false };
+        let Some(close_at_cursor) = at else {
+            return false;
+        };
 
         // Only fire when open + close form a recognised pair.
         if insert_auto_close_pair(&open) != Some(close_at_cursor.as_str()) {
@@ -4340,7 +4575,7 @@ impl EditorPane {
         self.push_undo();
         // Delete open and close in one range: [cursor.col-open.len(), cursor.col+close.len())
         let del_start = cursor.col - open.len();
-        let del_end   = cursor.col + close_at_cursor.len();
+        let del_end = cursor.col + close_at_cursor.len();
         self.buffer.delete_range(cursor.line, del_start, del_end);
         self.state.move_cursor_to(Pos::new(cursor.line, del_start));
         self.state.is_dirty = true;
@@ -4363,7 +4598,8 @@ impl EditorPane {
         let line_text = self.buffer.line(cursor.line).to_string();
 
         // Check the character currently at the cursor position.
-        let char_at_cursor = line_text.get(cursor.col..)
+        let char_at_cursor = line_text
+            .get(cursor.col..)
             .and_then(|s| s.get(..typed.len()))
             .map(str::to_string);
 
@@ -4371,15 +4607,18 @@ impl EditorPane {
         // when the auto-inserted closing char is already there.
         let is_close = matches!(typed.as_str(), ")" | "]" | "}" | "\"" | "$");
         if is_close && char_at_cursor.as_deref() == Some(typed.as_str()) {
-            self.state.move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
+            self.state
+                .move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
             return true; // no buffer change, no undo snapshot needed
         }
 
         // Auto-close: insert the pair and place cursor between them.
         if let Some(close) = insert_auto_close_pair(&typed) {
             self.push_undo();
-            self.buffer.insert(cursor.line, cursor.col, &format!("{}{}", typed, close));
-            self.state.move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
+            self.buffer
+                .insert(cursor.line, cursor.col, &format!("{}{}", typed, close));
+            self.state
+                .move_cursor_to(Pos::new(cursor.line, cursor.col + typed.len()));
             self.state.is_dirty = true;
             return true;
         }
@@ -4398,7 +4637,7 @@ impl EditorPane {
         self.push_undo();
 
         let start = self.state.selection.start();
-        let end   = self.state.selection.end();
+        let end = self.state.selection.end();
 
         // Insert close first (at the character after the selection end).
         self.buffer.insert(end.line, end.col + 1, close);
@@ -4428,7 +4667,8 @@ impl EditorPane {
     /// `mi`/`ma` already use.
     fn find_surround_pair(&self, delim: char) -> Option<(Pos, Pos)> {
         let kind = delim_text_object_kind(delim)?;
-        let (open, end) = crate::editor::apply::text_object_span(&self.buffer, self.state.cursor(), false, kind)?;
+        let (open, end) =
+            crate::editor::apply::text_object_span(&self.buffer, self.state.cursor(), false, kind)?;
         // The "around" span is `[open_col, close_col_exclusive)` (Rust-slice
         // style) — the close delimiter's own byte sits one before that
         // exclusive end. All supported delimiters are single-byte ASCII.
@@ -4442,7 +4682,8 @@ impl EditorPane {
         };
         self.push_undo();
         // Delete the closing delimiter first so the open position stays valid.
-        self.buffer.delete_range(close.line, close.col, close.col + 1);
+        self.buffer
+            .delete_range(close.line, close.col, close.col + 1);
         self.buffer.delete_range(open.line, open.col, open.col + 1);
         self.state.move_cursor_to(open);
         self.state.is_dirty = true;
@@ -4459,7 +4700,8 @@ impl EditorPane {
         self.push_undo();
         let (open_delim, close_delim) = delim_pair_for(to);
         // Replace the closing delimiter first so the open position stays valid.
-        self.buffer.delete_range(close.line, close.col, close.col + 1);
+        self.buffer
+            .delete_range(close.line, close.col, close.col + 1);
         self.buffer.insert(close.line, close.col, &close_delim);
         self.buffer.delete_range(open.line, open.col, open.col + 1);
         self.buffer.insert(open.line, open.col, &open_delim);
@@ -4475,10 +4717,7 @@ impl EditorPane {
 mod tests {
     use super::*;
     use crate::editor::{
-        command::EditorCommand,
-        keymap::KeymapHandler,
-        keymap_helix::HelixKeymap,
-        state::Mode,
+        command::EditorCommand, keymap::KeymapHandler, keymap_helix::HelixKeymap, state::Mode,
     };
 
     #[test]
@@ -4490,15 +4729,27 @@ mod tests {
         let edits = vec![
             LspTextEdit {
                 range: LspRange {
-                    start: LspPosition { line: 0, character: 8 },
-                    end: LspPosition { line: 0, character: 11 },
+                    start: LspPosition {
+                        line: 0,
+                        character: 8,
+                    },
+                    end: LspPosition {
+                        line: 0,
+                        character: 11,
+                    },
                 },
                 new_text: "quux".to_string(),
             },
             LspTextEdit {
                 range: LspRange {
-                    start: LspPosition { line: 0, character: 0 },
-                    end: LspPosition { line: 0, character: 3 },
+                    start: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: LspPosition {
+                        line: 0,
+                        character: 3,
+                    },
                 },
                 new_text: "hi".to_string(),
             },
@@ -4513,8 +4764,14 @@ mod tests {
         let mut buf = InMemoryBuffer::from_text("foo\nbar\nbaz");
         let edits = vec![LspTextEdit {
             range: LspRange {
-                start: LspPosition { line: 0, character: 1 },
-                end: LspPosition { line: 2, character: 1 },
+                start: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+                end: LspPosition {
+                    line: 2,
+                    character: 1,
+                },
             },
             new_text: "X".to_string(),
         }];
@@ -4526,11 +4783,14 @@ mod tests {
     fn find_all_matches_supports_real_regex() {
         let buf = InMemoryBuffer::from_text("a1 b22 c333");
         let matches = find_all_matches(&buf, r"\d+", false);
-        assert_eq!(matches, vec![
-            (Pos::new(0, 1), Pos::new(0, 2)),
-            (Pos::new(0, 4), Pos::new(0, 6)),
-            (Pos::new(0, 8), Pos::new(0, 11)),
-        ]);
+        assert_eq!(
+            matches,
+            vec![
+                (Pos::new(0, 1), Pos::new(0, 2)),
+                (Pos::new(0, 4), Pos::new(0, 6)),
+                (Pos::new(0, 8), Pos::new(0, 11)),
+            ]
+        );
     }
 
     #[test]
@@ -4539,11 +4799,14 @@ mod tests {
         // what broke the old query.len()-assumes-fixed-width highlight math.
         let buf = InMemoryBuffer::from_text("cat cats category");
         let matches = find_all_matches(&buf, "cats?", false);
-        assert_eq!(matches, vec![
-            (Pos::new(0, 0), Pos::new(0, 3)),
-            (Pos::new(0, 4), Pos::new(0, 8)),
-            (Pos::new(0, 9), Pos::new(0, 12)),
-        ]);
+        assert_eq!(
+            matches,
+            vec![
+                (Pos::new(0, 0), Pos::new(0, 3)),
+                (Pos::new(0, 4), Pos::new(0, 8)),
+                (Pos::new(0, 9), Pos::new(0, 12)),
+            ]
+        );
     }
 
     #[test]
@@ -4572,7 +4835,13 @@ mod tests {
     fn find_all_matches_whole_word_filters_partial_matches() {
         let buf = InMemoryBuffer::from_text("cat concatenate cat");
         let matches = find_all_matches(&buf, "cat", true);
-        assert_eq!(matches, vec![(Pos::new(0, 0), Pos::new(0, 3)), (Pos::new(0, 16), Pos::new(0, 19))]);
+        assert_eq!(
+            matches,
+            vec![
+                (Pos::new(0, 0), Pos::new(0, 3)),
+                (Pos::new(0, 16), Pos::new(0, 19))
+            ]
+        );
     }
 
     #[test]
@@ -4593,7 +4862,7 @@ mod tests {
         assert_eq!(byte_to_utf16(s, 1), 1); // after 'a'
         assert_eq!(byte_to_utf16(s, 3), 2); // after 'é' (1 unit)
         assert_eq!(byte_to_utf16(s, 7), 4); // after '😀' (2 units)
-        // Reverse.
+                                            // Reverse.
         assert_eq!(utf16_to_byte(s, 0), 0);
         assert_eq!(utf16_to_byte(s, 2), 3);
         assert_eq!(utf16_to_byte(s, 4), 7);
@@ -4602,7 +4871,7 @@ mod tests {
     #[test]
     fn utf16_to_byte_lands_on_boundary_when_out_of_range() {
         let s = "aé"; // 3 bytes
-        // A UTF-16 col past the end clamps to len, never mid-codepoint.
+                      // A UTF-16 col past the end clamps to len, never mid-codepoint.
         let b = utf16_to_byte(s, 99);
         assert_eq!(b, s.len());
         assert!(s.is_char_boundary(b));
@@ -4620,7 +4889,11 @@ mod tests {
             keystroke: Keystroke {
                 modifiers: Modifiers::default(),
                 key: key.to_string(),
-                key_char: if key.len() == 1 { Some(key.to_string()) } else { None },
+                key_char: if key.len() == 1 {
+                    Some(key.to_string())
+                } else {
+                    None
+                },
             },
             is_held: false,
         }
@@ -4632,7 +4905,9 @@ mod tests {
         let mut state = EditorState::new();
         state.mode = Mode::Insert;
         let event = make_key("a");
-        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::Insert(ref s)) if s == "a"));
+        assert!(
+            matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::Insert(ref s)) if s == "a")
+        );
     }
 
     #[test]
@@ -4641,7 +4916,10 @@ mod tests {
         let mut state = EditorState::new();
         state.mode = Mode::Insert;
         let event = make_key("escape");
-        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::EnterNormal)));
+        assert!(matches!(
+            km.handle_key(&event, &state),
+            KeymapResult::Command(EditorCommand::EnterNormal)
+        ));
     }
 
     #[test]
@@ -4650,7 +4928,10 @@ mod tests {
         let mut state = EditorState::new();
         state.mode = Mode::Normal;
         let event = make_key("h");
-        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::MoveLeft)));
+        assert!(matches!(
+            km.handle_key(&event, &state),
+            KeymapResult::Command(EditorCommand::MoveLeft)
+        ));
     }
 
     #[test]
@@ -4659,7 +4940,10 @@ mod tests {
         let mut state = EditorState::new();
         state.mode = Mode::Normal;
         let event = make_key("x");
-        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::SelectCurrentLine)));
+        assert!(matches!(
+            km.handle_key(&event, &state),
+            KeymapResult::Command(EditorCommand::SelectCurrentLine)
+        ));
     }
 
     #[test]
@@ -4668,6 +4952,9 @@ mod tests {
         let mut state = EditorState::new();
         state.mode = Mode::Visual(VisualKind::Char);
         let event = make_key("d");
-        assert!(matches!(km.handle_key(&event, &state), KeymapResult::Command(EditorCommand::DeleteSelection)));
+        assert!(matches!(
+            km.handle_key(&event, &state),
+            KeymapResult::Command(EditorCommand::DeleteSelection)
+        ));
     }
 }

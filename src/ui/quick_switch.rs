@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -71,12 +71,7 @@ impl QuickSwitch {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {

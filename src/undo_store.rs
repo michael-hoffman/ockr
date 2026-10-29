@@ -63,12 +63,10 @@ fn undo_path_for(file: &Path) -> Option<PathBuf> {
 /// Persist the undo and redo stacks for `file_path`.
 ///
 /// Silently ignores I/O errors — undo persistence is best-effort.
-pub fn save_undo_history(
-    file_path: &Path,
-    undo: &[(String, Pos)],
-    redo: &[(String, Pos)],
-) {
-    let Some(p) = undo_path_for(file_path) else { return };
+pub fn save_undo_history(file_path: &Path, undo: &[(String, Pos)], redo: &[(String, Pos)]) {
+    let Some(p) = undo_path_for(file_path) else {
+        return;
+    };
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -80,11 +78,18 @@ pub fn save_undo_history(
             .rev()
             .take(MAX_PERSISTED)
             .rev()
-            .map(|(text, pos)| UndoEntry { text: text.clone(), line: pos.line, col: pos.col })
+            .map(|(text, pos)| UndoEntry {
+                text: text.clone(),
+                line: pos.line,
+                col: pos.col,
+            })
             .collect()
     };
 
-    let file = UndoFile { undo: to_entries(undo), redo: to_entries(redo) };
+    let file = UndoFile {
+        undo: to_entries(undo),
+        redo: to_entries(redo),
+    };
     if let Ok(json) = serde_json::to_string(&file) {
         let _ = std::fs::write(&p, json);
     }
@@ -94,9 +99,15 @@ pub fn save_undo_history(
 ///
 /// Returns empty vecs if no history file exists or parsing fails.
 pub fn load_undo_history(file_path: &Path) -> (Vec<(String, Pos)>, Vec<(String, Pos)>) {
-    let Some(p) = undo_path_for(file_path) else { return (vec![], vec![]) };
-    let Ok(json) = std::fs::read_to_string(&p) else { return (vec![], vec![]) };
-    let Ok(file) = serde_json::from_str::<UndoFile>(&json) else { return (vec![], vec![]) };
+    let Some(p) = undo_path_for(file_path) else {
+        return (vec![], vec![]);
+    };
+    let Ok(json) = std::fs::read_to_string(&p) else {
+        return (vec![], vec![]);
+    };
+    let Ok(file) = serde_json::from_str::<UndoFile>(&json) else {
+        return (vec![], vec![]);
+    };
 
     let to_stack = |entries: Vec<UndoEntry>| -> Vec<(String, Pos)> {
         entries

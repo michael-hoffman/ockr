@@ -25,52 +25,52 @@
 //! Each handle is a 4 px strip.  Dragging updates the adjacent width.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Render, Window, div, prelude::*, px,
+    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Window,
 };
 
 use crate::actions::{
     BufferClose, BufferNext, BufferPrevious, ClosePane, ExportPdf, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, NewNote, OpenBacklinks, OpenCommandPalette,
-    OpenDailyNote, OpenFilePicker, OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles,
-    LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative,
-    OpenSettings, OpenVault, OpenVaultSearch, ReloadFile, SplitPaneHorizontal,
-    SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
+    FocusPaneRight, FocusPaneUp, LineNumbersAbsolute, LineNumbersOff, LineNumbersRelative, NewNote,
+    OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenFilePicker, OpenGraphView, OpenOutline,
+    OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenSettings, OpenVault, OpenVaultSearch,
+    ReloadFile, SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar,
+    ToggleZenMode,
 };
+use crate::command::CommandEntry;
 use crate::compiler::{spawn_compiler_thread, CompileResult, CompilerHandle, PreviewMode};
 use crate::editor::buffer::Buffer as _;
-use crate::lsp::{self, LspHandle, LspMessage};
-use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
-use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
-use crate::ui::graph_view::{GraphView, GraphViewEvent};
-use crate::ui::command_palette::{CommandPalette, PaletteEvent};
-use crate::ui::html_preview::HtmlWebView;
-use crate::ui::file_picker::{FilePicker, FilePickerEvent};
-use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
-use crate::ui::rename_modal::{RenameModal, RenameModalEvent};
-use crate::ui::settings_panel::{SettingKey, SettingsPanel, SettingsPanelEvent};
-use crate::ui::template_picker::{
-    TemplatePicker, TemplatePickerEvent, heading_to_filename_stem, scan_templates,
-};
-use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
 use crate::editor::state::Pos;
-use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
-use crate::ui::preview::{PreviewEvent, PreviewPane};
-use crate::ui::sidebar::{Sidebar, SidebarEvent};
-use crate::command::CommandEntry;
+use crate::lsp::{self, LspHandle, LspMessage};
 use crate::plugin::loader::load_vault_plugins;
 use crate::plugin::registry::{PluginInfo, PluginRegistry, PluginStatus};
 use crate::plugin::runtime::{PluginEvent, PluginInstance, PluginMetadataJson};
 use crate::plugin::thread_pool::{PluginJob, PluginThreadPool};
-use crate::ui::plugin_panel::{PluginPanel, PluginPanelEvent};
+use crate::ui::backlink_panel::{BacklinkPanel, BacklinkPanelEvent};
+use crate::ui::command_palette::{CommandPalette, PaletteEvent};
+use crate::ui::editor_pane::{EditorPane, EditorPaneEvent};
+use crate::ui::file_picker::{FilePicker, FilePickerEvent};
+use crate::ui::graph_view::{GraphView, GraphViewEvent};
+use crate::ui::html_preview::HtmlWebView;
+use crate::ui::outline_panel::{OutlinePanel, OutlinePanelEvent};
 use crate::ui::plugin_manager::{PluginManager, PluginManagerEvent};
+use crate::ui::plugin_panel::{PluginPanel, PluginPanelEvent};
+use crate::ui::preview::{PreviewEvent, PreviewPane};
+use crate::ui::quick_switch::{QuickSwitch, QuickSwitchEvent};
+use crate::ui::rename_modal::{RenameModal, RenameModalEvent};
+use crate::ui::settings_panel::{SettingKey, SettingsPanel, SettingsPanelEvent};
+use crate::ui::sidebar::{Sidebar, SidebarEvent};
+use crate::ui::template_picker::{
+    heading_to_filename_stem, scan_templates, TemplatePicker, TemplatePickerEvent,
+};
 use crate::ui::theme::ThemePalette;
+use crate::ui::vault_search::{VaultSearch, VaultSearchEvent};
 use crate::vault::VaultState;
 
 // ── Split layout ──────────────────────────────────────────────────────────────
@@ -290,7 +290,9 @@ impl MainWindow {
 
         // Restore the docked sidebar panel and width from the last session.
         let (saved_panel, saved_width) = crate::session::load_sidebar_state();
-        let sidebar_panel = saved_panel.map(|p| SidebarPanel::from_str(&p)).unwrap_or_default();
+        let sidebar_panel = saved_panel
+            .map(|p| SidebarPanel::from_str(&p))
+            .unwrap_or_default();
         let sidebar_width = saved_width.unwrap_or(220.0);
 
         // ── Compiler thread ──────────────────────────────────────────────────
@@ -304,25 +306,29 @@ impl MainWindow {
         // clicks an ockr:// link in the HTML preview.  We keep the sender so
         // we can pass it to HtmlWebView when it is created lazily on first
         // render (stored in html_link_sender below).
-        let (link_tx, mut link_rx) =
-            futures::channel::mpsc::unbounded::<String>();
+        let (link_tx, mut link_rx) = futures::channel::mpsc::unbounded::<String>();
 
         // Spawn an async task to drain the channel and open clicked links.
         {
             let vault_for_links = vault.clone();
             cx.spawn(async move |this, cx| {
                 while let Some(rel_path) = link_rx.next().await {
-                    let path = cx.update(|cx| {
-                        let root = vault_for_links.read(cx).root.clone()?;
-                        Some(root.join(&rel_path))
-                    }).ok().flatten();
+                    let path = cx
+                        .update(|cx| {
+                            let root = vault_for_links.read(cx).root.clone()?;
+                            Some(root.join(&rel_path))
+                        })
+                        .ok()
+                        .flatten();
                     if let Some(abs_path) = path {
                         cx.update(|cx| {
                             this.update(cx, |win, cx| win.open_path(abs_path, cx)).ok();
-                        }).ok();
+                        })
+                        .ok();
                     }
                 }
-            }).detach();
+            })
+            .detach();
         }
 
         // ── Plugin system ─────────────────────────────────────────────────────
@@ -373,15 +379,13 @@ impl MainWindow {
         }
 
         // Spawn a 100ms polling task to drain plugin events onto the UI thread.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let _ = cx.update(|cx| {
-                    let _ = this.update(cx, |win, cx| win.drain_plugin_events(cx));
-                });
-            }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let _ = cx.update(|cx| {
+                let _ = this.update(cx, |win, cx| win.drain_plugin_events(cx));
+            });
         })
         .detach();
 
@@ -412,7 +416,8 @@ impl MainWindow {
                                 if let Some(ref wv) = win.html_webview {
                                     wv.load_html(&html);
                                 }
-                            }).ok();
+                            })
+                            .ok();
                         }
                         CompileResult::Ok(ref doc) => {
                             let doc = doc.clone();
@@ -422,23 +427,27 @@ impl MainWindow {
                                     pane.editor.update(cx, |ep, _cx| ep.clear_diagnostics());
                                 }
                                 win.last_paged_doc = Some(doc.clone());
-                            }).ok();
+                            })
+                            .ok();
                             preview.update(cx, |pane, cx| pane.set_document(doc, cx));
                         }
                         CompileResult::Err(ref diags) => {
-                            let first_msg = diags.first()
+                            let first_msg = diags
+                                .first()
                                 .map(|d| d.message.clone())
                                 .unwrap_or_else(|| "Unknown error".to_string());
                             let diags = diags.clone();
                             this.update(cx, |win, cx| {
                                 // Forward diagnostics to the active editor pane.
                                 if let Some(pane) = win.panes.get(win.active_idx) {
-                                    pane.editor.update(cx, |ep, _cx| ep.set_diagnostics(diags.clone()));
+                                    pane.editor
+                                        .update(cx, |ep, _cx| ep.set_diagnostics(diags.clone()));
                                 }
                                 if let Some(ref wv) = win.html_webview {
                                     wv.load_error(&first_msg);
                                 }
-                            }).ok();
+                            })
+                            .ok();
                             preview.update(cx, |pane, cx| pane.set_diagnostics(diags, cx));
                         }
                         CompileResult::Panicked(ref msg) => {
@@ -447,13 +456,16 @@ impl MainWindow {
                                 if let Some(ref wv) = win.html_webview {
                                     wv.load_error(&msg);
                                 }
-                            }).ok();
+                            })
+                            .ok();
                             preview.update(cx, |pane, cx| pane.set_error(msg, cx));
                         }
                     }
-                }).ok();
+                })
+                .ok();
             }
-        }).detach();
+        })
+        .detach();
 
         // ── Paged preview → open wikilink ─────────────────────────────────────
         // When the user clicks an ockr:// link in the rasterised preview,
@@ -468,7 +480,8 @@ impl MainWindow {
                     this.open_path(abs_path, cx);
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         // ── Sidebar → active editor ───────────────────────────────────────────
         cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| {
@@ -489,7 +502,10 @@ impl MainWindow {
                         .arg(abs_path)
                         .spawn();
                 }
-                SidebarEvent::OpenPluginPanel { plugin_id, panel_id } => {
+                SidebarEvent::OpenPluginPanel {
+                    plugin_id,
+                    panel_id,
+                } => {
                     // Look up the RegisteredPanel from the registry and open it.
                     let panel = cx
                         .global::<PluginRegistry>()
@@ -502,7 +518,8 @@ impl MainWindow {
                     }
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         // ── Vault change → reload plugins + kick background backlink build ────
         cx.observe(&vault, |this, vault_entity, cx| {
@@ -515,7 +532,8 @@ impl MainWindow {
             if vault_entity.read(cx).indexing {
                 this.spawn_backlink_build_if_needed(cx);
             }
-        }).detach();
+        })
+        .detach();
 
         // ── Story 36: kick off background backlink build if vault was opened ─
         // Spawn immediately so the window is visible before the index builds.
@@ -544,12 +562,10 @@ impl MainWindow {
         // Spawn a tinymist LSP client for the current vault root (if installed).
         // Results arrive via an unbounded channel and are dispatched to the
         // active editor pane on the GPUI UI thread.
-        let (lsp_tx, mut lsp_rx) =
-            futures::channel::mpsc::unbounded::<LspMessage>();
-        let lsp_handle = lsp::spawn_lsp(
-            vault.read(cx).root.clone(),
-            move |msg| { let _ = lsp_tx.unbounded_send(msg); },
-        );
+        let (lsp_tx, mut lsp_rx) = futures::channel::mpsc::unbounded::<LspMessage>();
+        let lsp_handle = lsp::spawn_lsp(vault.read(cx).root.clone(), move |msg| {
+            let _ = lsp_tx.unbounded_send(msg);
+        });
         // Wire the handle into the initial pane so it can send notifications.
         if let Some(ref handle) = lsp_handle {
             editor.update(cx, |pane, _| pane.set_lsp(handle.clone()));
@@ -573,7 +589,11 @@ impl MainWindow {
         // ── Initial editor event subscription ────────────────────────────────
         Self::subscribe_pane(cx, &editor);
 
-        let panes = vec![PaneEntry { editor, tabs: Vec::new(), active_tab: 0 }];
+        let panes = vec![PaneEntry {
+            editor,
+            tabs: Vec::new(),
+            active_tab: 0,
+        }];
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -632,23 +652,22 @@ impl MainWindow {
 
     /// Subscribe to events from an editor pane.
     fn subscribe_pane(cx: &mut Context<Self>, editor: &Entity<EditorPane>) {
-        cx.subscribe(editor, |this, _, event: &EditorPaneEvent, cx| {
-            match event {
-                EditorPaneEvent::OpenFile(path) => {
-                    this.open_path(path.clone(), cx);
-                }
-                EditorPaneEvent::OpenPalette => {
-                    this.open_palette_pending = true;
-                    cx.notify();
-                }
-                EditorPaneEvent::SpaceMenu(id) => {
-                    this.handle_palette_execute(id, cx);
-                }
-                EditorPaneEvent::ApplyWorkspaceEdits(edits) => {
-                    this.apply_workspace_edits(edits.clone(), cx);
-                }
+        cx.subscribe(editor, |this, _, event: &EditorPaneEvent, cx| match event {
+            EditorPaneEvent::OpenFile(path) => {
+                this.open_path(path.clone(), cx);
             }
-        }).detach();
+            EditorPaneEvent::OpenPalette => {
+                this.open_palette_pending = true;
+                cx.notify();
+            }
+            EditorPaneEvent::SpaceMenu(id) => {
+                this.handle_palette_execute(id, cx);
+            }
+            EditorPaneEvent::ApplyWorkspaceEdits(edits) => {
+                this.apply_workspace_edits(edits.clone(), cx);
+            }
+        })
+        .detach();
     }
 
     /// Spawn a new pane, wire compiler + vault + LSP, subscribe events.
@@ -680,7 +699,9 @@ impl MainWindow {
     /// and no undo history for a file nothing has touched this session.
     fn apply_workspace_edits(&mut self, edits: crate::lsp::WorkspaceEdits, cx: &mut Context<Self>) {
         for (uri, file_edits) in edits {
-            let open_pane = self.panes.iter()
+            let open_pane = self
+                .panes
+                .iter()
                 .find(|p| p.editor.read(cx).current_uri().as_deref() == Some(uri.as_str()))
                 .map(|p| p.editor.clone());
             if let Some(editor) = open_pane {
@@ -723,9 +744,12 @@ impl MainWindow {
             LspMessage::DefinitionResult { request_id, result } => {
                 if let Some(def) = result {
                     // Find the pane that made this request.
-                    let matched = self.panes.iter().enumerate().find(|(_, e)| {
-                        e.editor.read(cx).is_waiting_for_definition(request_id)
-                    }).map(|(i, _)| i);
+                    let matched = self
+                        .panes
+                        .iter()
+                        .enumerate()
+                        .find(|(_, e)| e.editor.read(cx).is_waiting_for_definition(request_id))
+                        .map(|(i, _)| i);
 
                     if let Some(pane_idx) = matched {
                         let target_uri = crate::lsp::path_to_uri(&def.path);
@@ -771,7 +795,10 @@ impl MainWindow {
                     });
                 }
             }
-            LspMessage::CodeActionResult { request_id, actions } => {
+            LspMessage::CodeActionResult {
+                request_id,
+                actions,
+            } => {
                 for entry in &self.panes {
                     entry.editor.update(cx, |pane, cx| {
                         pane.set_code_action_result(request_id, actions.clone(), cx);
@@ -787,7 +814,9 @@ impl MainWindow {
 
     /// Focus a pane by index, triggering a recompile so the preview updates.
     fn focus_pane(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if idx >= self.panes.len() { return; }
+        if idx >= self.panes.len() {
+            return;
+        }
         self.active_idx = idx;
         let editor = self.panes[idx].editor.clone();
         editor.read(cx).focus_handle(cx).focus(window);
@@ -815,7 +844,11 @@ impl MainWindow {
         // Mirror the active pane's tabs into the new pane entry.
         let tabs = self.panes[self.active_idx].tabs.clone();
         let active_tab = self.panes[self.active_idx].active_tab;
-        self.panes.push(PaneEntry { editor: new_editor, tabs, active_tab });
+        self.panes.push(PaneEntry {
+            editor: new_editor,
+            tabs,
+            active_tab,
+        });
         self.split_layout = SplitLayout::Vertical;
         self.pane_split_frac = 0.5;
         let new_idx = self.panes.len() - 1;
@@ -837,7 +870,11 @@ impl MainWindow {
         self.copy_file_to_new_pane(&new_editor, cx);
         let tabs = self.panes[self.active_idx].tabs.clone();
         let active_tab = self.panes[self.active_idx].active_tab;
-        self.panes.push(PaneEntry { editor: new_editor, tabs, active_tab });
+        self.panes.push(PaneEntry {
+            editor: new_editor,
+            tabs,
+            active_tab,
+        });
         self.split_layout = SplitLayout::Horizontal;
         self.pane_split_frac = 0.5;
         let new_idx = self.panes.len() - 1;
@@ -862,12 +899,7 @@ impl MainWindow {
         }
     }
 
-    fn close_pane(
-        &mut self,
-        _: &ClosePane,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         if self.panes.len() <= 1 {
             // Never close the last pane.
             return;
@@ -886,7 +918,12 @@ impl MainWindow {
         }
     }
 
-    fn focus_pane_right(&mut self, _: &FocusPaneRight, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_pane_right(
+        &mut self,
+        _: &FocusPaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.split_layout == SplitLayout::Vertical && self.active_idx == 0 {
             self.focus_pane(1, window, cx);
         }
@@ -925,12 +962,7 @@ impl MainWindow {
         cx.notify();
     }
 
-    fn toggle_zen_mode(
-        &mut self,
-        _: &ToggleZenMode,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn toggle_zen_mode(&mut self, _: &ToggleZenMode, _window: &mut Window, cx: &mut Context<Self>) {
         if self.zen_mode {
             // Exit Zen Mode — restore saved layout state.
             self.sidebar_visible = self.zen_saved_sidebar;
@@ -962,12 +994,7 @@ impl MainWindow {
         self.set_preview_mode(next, cx);
     }
 
-    fn export_pdf(
-        &mut self,
-        _: &ExportPdf,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn export_pdf(&mut self, _: &ExportPdf, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(doc) = self.last_paged_doc.clone() else {
             self.export_status = Some("No compiled document to export".to_string());
             cx.notify();
@@ -998,22 +1025,22 @@ impl MainWindow {
         };
 
         match typst_pdf::pdf(&doc, &options) {
-            Ok(bytes) => {
-                match std::fs::write(&pdf_path, &bytes) {
-                    Ok(()) => {
-                        let name = pdf_path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("output.pdf")
-                            .to_string();
-                        self.export_status = Some(format!("Exported → {name}"));
-                    }
-                    Err(e) => {
-                        self.export_status = Some(format!("Write failed: {e}"));
-                    }
+            Ok(bytes) => match std::fs::write(&pdf_path, &bytes) {
+                Ok(()) => {
+                    let name = pdf_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("output.pdf")
+                        .to_string();
+                    self.export_status = Some(format!("Exported → {name}"));
                 }
-            }
+                Err(e) => {
+                    self.export_status = Some(format!("Write failed: {e}"));
+                }
+            },
             Err(e) => {
-                let msg = e.first()
+                let msg = e
+                    .first()
                     .map(|d| d.message.to_string())
                     .unwrap_or_else(|| "Unknown error".to_string());
                 self.export_status = Some(format!("PDF error: {msg}"));
@@ -1022,19 +1049,18 @@ impl MainWindow {
         cx.notify();
     }
 
-    fn open_daily_note(
-        &mut self,
-        _: &OpenDailyNote,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(root) = self.vault.read(cx).root.clone() else { return };
+    fn open_daily_note(&mut self, _: &OpenDailyNote, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.vault.read(cx).root.clone() else {
+            return;
+        };
 
-        let today = time::OffsetDateTime::now_local()
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let today =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         let date_str = format!(
             "{:04}-{:02}-{:02}",
-            today.year(), today.month() as u8, today.day()
+            today.year(),
+            today.month() as u8,
+            today.day()
         );
 
         let daily_dir = root.join(".ockr").join("daily");
@@ -1070,7 +1096,9 @@ impl MainWindow {
         self.recent_paths = crate::session::load_recent_paths();
 
         let (tabs, active_idx) = crate::session::load_open_tabs();
-        if tabs.is_empty() { return; }
+        if tabs.is_empty() {
+            return;
+        }
         for path in tabs {
             self.open_tab_in_pane(0, path, cx);
         }
@@ -1082,7 +1110,9 @@ impl MainWindow {
 
     /// Persist the current tab list (active pane only) to the session file.
     fn persist_tabs(&self) {
-        if self.panes.is_empty() { return; }
+        if self.panes.is_empty() {
+            return;
+        }
         let pane = &self.panes[self.active_idx];
         let paths: Vec<PathBuf> = pane.tabs.iter().map(|t| t.path.clone()).collect();
         crate::session::save_open_tabs(&paths, pane.active_tab);
@@ -1120,7 +1150,12 @@ impl MainWindow {
         // Add or replace a tab entry.
         // Strategy: add after the currently active tab so new tabs feel adjacent.
         let insert_at = self.panes[pane_idx].active_tab + 1;
-        let new_tab = TabInfo { path: abs_path.clone(), title, cursor: Pos::new(0, 0), viewport_top: 0 };
+        let new_tab = TabInfo {
+            path: abs_path.clone(),
+            title,
+            cursor: Pos::new(0, 0),
+            viewport_top: 0,
+        };
         if insert_at >= self.panes[pane_idx].tabs.len() {
             self.panes[pane_idx].tabs.push(new_tab);
             self.panes[pane_idx].active_tab = self.panes[pane_idx].tabs.len() - 1;
@@ -1139,9 +1174,13 @@ impl MainWindow {
 
     /// Switch the active tab of `pane_idx` to `tab_idx`, loading that file.
     fn switch_tab_in_pane(&mut self, pane_idx: usize, tab_idx: usize, cx: &mut Context<Self>) {
-        if pane_idx >= self.panes.len() { return; }
+        if pane_idx >= self.panes.len() {
+            return;
+        }
         let pane = &self.panes[pane_idx];
-        if tab_idx >= pane.tabs.len() || tab_idx == pane.active_tab { return; }
+        if tab_idx >= pane.tabs.len() || tab_idx == pane.active_tab {
+            return;
+        }
 
         // Save cursor / viewport of the departing tab.
         let departing = pane.active_tab;
@@ -1166,27 +1205,21 @@ impl MainWindow {
         self.persist_tabs();
     }
 
-    fn buffer_next(
-        &mut self,
-        _: &BufferNext,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn buffer_next(&mut self, _: &BufferNext, _window: &mut Window, cx: &mut Context<Self>) {
         let pane = &self.panes[self.active_idx];
-        if pane.tabs.len() <= 1 { return; }
+        if pane.tabs.len() <= 1 {
+            return;
+        }
         let next = (pane.active_tab + 1) % pane.tabs.len();
         self.switch_tab_in_pane(self.active_idx, next, cx);
         cx.notify();
     }
 
-    fn buffer_prev(
-        &mut self,
-        _: &BufferPrevious,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn buffer_prev(&mut self, _: &BufferPrevious, _window: &mut Window, cx: &mut Context<Self>) {
         let pane = &self.panes[self.active_idx];
-        if pane.tabs.len() <= 1 { return; }
+        if pane.tabs.len() <= 1 {
+            return;
+        }
         let prev = if pane.active_tab == 0 {
             pane.tabs.len() - 1
         } else {
@@ -1196,12 +1229,7 @@ impl MainWindow {
         cx.notify();
     }
 
-    fn buffer_close_tab(
-        &mut self,
-        _: &BufferClose,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn buffer_close_tab(&mut self, _: &BufferClose, window: &mut Window, cx: &mut Context<Self>) {
         let pane_idx = self.active_idx;
         let tab_idx = self.panes[pane_idx].active_tab;
         self.close_tab_at(pane_idx, tab_idx, window, cx);
@@ -1286,7 +1314,10 @@ impl MainWindow {
             if pane.tabs.is_empty() {
                 pane.active_tab = 0;
                 let editor = pane.editor.clone();
-                editor.update(cx, |p, c| { p.close_document(); c.notify(); });
+                editor.update(cx, |p, c| {
+                    p.close_document();
+                    c.notify();
+                });
             } else {
                 if pane.active_tab >= pane.tabs.len() {
                     pane.active_tab = pane.tabs.len() - 1;
@@ -1312,8 +1343,9 @@ impl MainWindow {
     /// Open the rename modal for `path` and wire its events.
     fn open_rename_modal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let modal = cx.new(|cx| RenameModal::new(path, cx));
-        cx.subscribe(&modal, |this, _, event: &RenameModalEvent, cx| {
-            match event {
+        cx.subscribe(
+            &modal,
+            |this, _, event: &RenameModalEvent, cx| match event {
                 RenameModalEvent::Close => {
                     this.rename_modal = None;
                     cx.notify();
@@ -1323,8 +1355,8 @@ impl MainWindow {
                     this.rename_file(original.clone(), new_stem.clone(), cx);
                     cx.notify();
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.rename_modal = Some(modal);
         self.rename_modal_focus_pending = true;
@@ -1334,8 +1366,14 @@ impl MainWindow {
     /// Rename a vault file to `new_stem` (extension + parent dir preserved),
     /// update any open tab pointing at it, and rescan the vault.
     fn rename_file(&mut self, original: PathBuf, new_stem: String, cx: &mut Context<Self>) {
-        let parent = original.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let ext = original.extension().and_then(|e| e.to_str()).unwrap_or("typ");
+        let parent = original
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let ext = original
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("typ");
         let dest = parent.join(format!("{new_stem}.{ext}"));
 
         if dest == original {
@@ -1398,17 +1436,20 @@ impl MainWindow {
         self.file_picker = None;
         self.rename_modal = None;
         let panel = cx.new(|cx| SettingsPanel::new(cx));
-        cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| match event {
-            SettingsPanelEvent::Close => {
-                this.settings_panel = None;
-                this.refocus_editor_pending = true;
-                cx.notify();
-            }
-            SettingsPanelEvent::Cycle(key) => {
-                this.apply_setting(*key, cx);
-                cx.notify();
-            }
-        })
+        cx.subscribe(
+            &panel,
+            |this, _, event: &SettingsPanelEvent, cx| match event {
+                SettingsPanelEvent::Close => {
+                    this.settings_panel = None;
+                    this.refocus_editor_pending = true;
+                    cx.notify();
+                }
+                SettingsPanelEvent::Cycle(key) => {
+                    this.apply_setting(*key, cx);
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         self.settings_panel = Some(panel);
         self.settings_panel_focus_pending = true;
@@ -1421,7 +1462,11 @@ impl MainWindow {
         let s = cx.global::<crate::settings::Settings>();
         match key {
             SettingKey::Keyboard => {
-                let next = if s.keyboard_mode == "standard" { "helix" } else { "standard" };
+                let next = if s.keyboard_mode == "standard" {
+                    "helix"
+                } else {
+                    "standard"
+                };
                 self.set_keyboard_mode(next, cx);
             }
             SettingKey::Theme => {
@@ -1437,7 +1482,11 @@ impl MainWindow {
                 self.set_line_number_mode(next, cx);
             }
             SettingKey::Preview => {
-                let next = if s.preview_mode == "paged" { "html" } else { "paged" };
+                let next = if s.preview_mode == "paged" {
+                    "html"
+                } else {
+                    "paged"
+                };
                 self.set_preview_mode(next, cx);
             }
         }
@@ -1452,7 +1501,11 @@ impl MainWindow {
     // so the displayed value, the live state, and the saved value can never drift.
 
     fn set_keyboard_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
-        let mode = if mode == "standard" { "standard" } else { "helix" };
+        let mode = if mode == "standard" {
+            "standard"
+        } else {
+            "helix"
+        };
         for entry in &self.panes {
             entry.editor.update(cx, |pane, c| {
                 pane.set_keyboard_mode(mode);
@@ -1490,7 +1543,8 @@ impl MainWindow {
                 c.notify();
             });
         }
-        cx.global_mut::<crate::settings::Settings>().line_number_mode = name.to_string();
+        cx.global_mut::<crate::settings::Settings>()
+            .line_number_mode = name.to_string();
         crate::settings::save_global_setting("line_number_mode", name);
         cx.notify();
     }
@@ -1507,19 +1561,18 @@ impl MainWindow {
         }
         cx.global_mut::<crate::settings::Settings>().preview_mode = name.to_string();
         crate::settings::save_global_setting("preview_mode", name);
-        self.active_editor().clone().update(cx, |pane, cx| pane.trigger_compile(cx));
+        self.active_editor()
+            .clone()
+            .update(cx, |pane, cx| pane.trigger_compile(cx));
         cx.notify();
     }
 
     // ── Story 18: Note Templates ──────────────────────────────────────────────
 
-    fn new_note(
-        &mut self,
-        _: &NewNote,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(root) = self.vault.read(cx).root.clone() else { return };
+    fn new_note(&mut self, _: &NewNote, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.vault.read(cx).root.clone() else {
+            return;
+        };
 
         let templates = scan_templates(&root);
         if templates.is_empty() {
@@ -1561,7 +1614,8 @@ impl MainWindow {
                     this.create_new_note_deferred(template_path, root, cx);
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         self.template_picker = Some(picker);
         cx.notify();
@@ -1585,7 +1639,9 @@ impl MainWindow {
                 .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
             let date_str = format!(
                 "{:04}-{:02}-{:02}",
-                today.year(), today.month() as u8, today.day()
+                today.year(),
+                today.month() as u8,
+                today.day()
             );
             // Derive stem from date/datetime-substituted content (title not yet known).
             let partial = apply_template_substitutions(&raw, "");
@@ -1616,12 +1672,7 @@ impl MainWindow {
 
     // ── Story 19: Graph View ──────────────────────────────────────────────────
 
-    fn open_graph_view(
-        &mut self,
-        _: &OpenGraphView,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_graph_view(&mut self, _: &OpenGraphView, window: &mut Window, cx: &mut Context<Self>) {
         if self.graph_view.is_some() {
             self.graph_view = None;
             cx.notify();
@@ -1635,19 +1686,18 @@ impl MainWindow {
         let view = cx.new(|cx| GraphView::new(files, &backlinks, cx));
         view.read(cx).focus_handle.clone().focus(window);
 
-        cx.subscribe(&view, |this, _, event: &GraphViewEvent, cx| {
-            match event {
-                GraphViewEvent::Close => {
-                    this.graph_view = None;
-                    cx.notify();
-                }
-                GraphViewEvent::Open(path) => {
-                    this.graph_view = None;
-                    cx.notify();
-                    this.open_path(path.clone(), cx);
-                }
+        cx.subscribe(&view, |this, _, event: &GraphViewEvent, cx| match event {
+            GraphViewEvent::Close => {
+                this.graph_view = None;
+                cx.notify();
             }
-        }).detach();
+            GraphViewEvent::Open(path) => {
+                this.graph_view = None;
+                cx.notify();
+                this.open_path(path.clone(), cx);
+            }
+        })
+        .detach();
 
         self.graph_view = Some(view);
         cx.notify();
@@ -1666,7 +1716,9 @@ impl MainWindow {
         }
 
         let all_files = self.vault.read(cx).files.clone();
-        let mut ordered: Vec<_> = self.recent_paths.iter()
+        let mut ordered: Vec<_> = self
+            .recent_paths
+            .iter()
             .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
             .collect();
         for f in &all_files {
@@ -1679,21 +1731,20 @@ impl MainWindow {
         qs.read(cx).focus_handle.clone().focus(window);
         self.refocus_editor_pending = false;
 
-        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| {
-            match event {
-                QuickSwitchEvent::Close => {
-                    this.quick_switch = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                }
-                QuickSwitchEvent::Open(path) => {
-                    this.quick_switch = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                    this.open_path(path.clone(), cx);
-                }
+        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| match event {
+            QuickSwitchEvent::Close => {
+                this.quick_switch = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
             }
-        }).detach();
+            QuickSwitchEvent::Open(path) => {
+                this.quick_switch = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
+                this.open_path(path.clone(), cx);
+            }
+        })
+        .detach();
 
         self.quick_switch = Some(qs);
         cx.notify();
@@ -1716,7 +1767,9 @@ impl MainWindow {
 
         // Build file list: recency-first, then the rest of the vault.
         let all_files = self.vault.read(cx).files.clone();
-        let mut ordered: Vec<_> = self.recent_paths.iter()
+        let mut ordered: Vec<_> = self
+            .recent_paths
+            .iter()
             .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
             .collect();
         for f in &all_files {
@@ -1729,21 +1782,20 @@ impl MainWindow {
         fp.read(cx).focus_handle.clone().focus(window);
         self.refocus_editor_pending = false;
 
-        cx.subscribe(&fp, |this, _, event: &FilePickerEvent, cx| {
-            match event {
-                FilePickerEvent::Close => {
-                    this.file_picker = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                }
-                FilePickerEvent::Open(path) => {
-                    this.file_picker = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                    this.open_path(path.clone(), cx);
-                }
+        cx.subscribe(&fp, |this, _, event: &FilePickerEvent, cx| match event {
+            FilePickerEvent::Close => {
+                this.file_picker = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
             }
-        }).detach();
+            FilePickerEvent::Open(path) => {
+                this.file_picker = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
+                this.open_path(path.clone(), cx);
+            }
+        })
+        .detach();
 
         self.file_picker = Some(fp);
         cx.notify();
@@ -1765,7 +1817,9 @@ impl MainWindow {
         // Build a file list of only the recently-opened paths, in recency order.
         // Filter to paths that are still in the vault (or still on disk).
         let all_files = self.vault.read(cx).files.clone();
-        let recent: Vec<_> = self.recent_paths.iter()
+        let recent: Vec<_> = self
+            .recent_paths
+            .iter()
             .filter_map(|p| all_files.iter().find(|f| &f.abs_path == p).cloned())
             .collect();
 
@@ -1779,30 +1833,24 @@ impl MainWindow {
         let qs = cx.new(|cx| QuickSwitch::new(recent, cx));
         qs.read(cx).focus_handle.clone().focus(window);
 
-        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| {
-            match event {
-                QuickSwitchEvent::Close => {
-                    this.quick_switch = None;
-                    cx.notify();
-                }
-                QuickSwitchEvent::Open(path) => {
-                    this.quick_switch = None;
-                    cx.notify();
-                    this.open_path(path.clone(), cx);
-                }
+        cx.subscribe(&qs, |this, _, event: &QuickSwitchEvent, cx| match event {
+            QuickSwitchEvent::Close => {
+                this.quick_switch = None;
+                cx.notify();
             }
-        }).detach();
+            QuickSwitchEvent::Open(path) => {
+                this.quick_switch = None;
+                cx.notify();
+                this.open_path(path.clone(), cx);
+            }
+        })
+        .detach();
 
         self.quick_switch = Some(qs);
         cx.notify();
     }
 
-    fn open_backlinks(
-        &mut self,
-        _: &OpenBacklinks,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_backlinks(&mut self, _: &OpenBacklinks, window: &mut Window, cx: &mut Context<Self>) {
         if self.backlinks.is_some() {
             self.backlinks = None;
             cx.notify();
@@ -1818,8 +1866,12 @@ impl MainWindow {
                 .unwrap_or(&rel_path)
                 .to_string();
             let vault = self.vault.read(cx);
-            let links = if rel_path.is_empty() { vec![] } else {
-                vault.backlinks.incoming_links(std::path::Path::new(&rel_path))
+            let links = if rel_path.is_empty() {
+                vec![]
+            } else {
+                vault
+                    .backlinks
+                    .incoming_links(std::path::Path::new(&rel_path))
             };
             (title, links)
         };
@@ -1828,8 +1880,9 @@ impl MainWindow {
         panel.read(cx).focus_handle.clone().focus(window);
         self.refocus_editor_pending = false;
 
-        cx.subscribe(&panel, |this, _, event: &BacklinkPanelEvent, cx| {
-            match event {
+        cx.subscribe(
+            &panel,
+            |this, _, event: &BacklinkPanelEvent, cx| match event {
                 BacklinkPanelEvent::Close => {
                     this.backlinks = None;
                     this.refocus_editor_pending = true;
@@ -1841,19 +1894,15 @@ impl MainWindow {
                     cx.notify();
                     this.open_path(path.clone(), cx);
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         self.backlinks = Some(panel);
         cx.notify();
     }
 
-    fn open_outline(
-        &mut self,
-        _: &OpenOutline,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_outline(&mut self, _: &OpenOutline, window: &mut Window, cx: &mut Context<Self>) {
         if self.outline.is_some() {
             self.outline = None;
             cx.notify();
@@ -1866,8 +1915,9 @@ impl MainWindow {
         // Cancel pending editor refocus so the outline panel keeps focus.
         self.refocus_editor_pending = false;
 
-        cx.subscribe(&panel, |this, _, event: &OutlinePanelEvent, cx| {
-            match event {
+        cx.subscribe(
+            &panel,
+            |this, _, event: &OutlinePanelEvent, cx| match event {
                 OutlinePanelEvent::Close => {
                     this.outline = None;
                     this.refocus_editor_pending = true;
@@ -1882,8 +1932,9 @@ impl MainWindow {
                         pane.jump_to_line(line, cx);
                     });
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         self.outline = Some(panel);
         cx.notify();
@@ -1906,8 +1957,9 @@ impl MainWindow {
         panel.read(cx).focus_handle.clone().focus(window);
         self.refocus_editor_pending = false;
 
-        cx.subscribe(&panel, |this, _, event: &VaultSearchEvent, cx| {
-            match event {
+        cx.subscribe(
+            &panel,
+            |this, _, event: &VaultSearchEvent, cx| match event {
                 VaultSearchEvent::Close => {
                     this.vault_search = None;
                     this.refocus_editor_pending = true;
@@ -1923,8 +1975,9 @@ impl MainWindow {
                         pane.jump_to_line(line, cx);
                     });
                 }
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         self.vault_search = Some(panel);
         cx.notify();
@@ -1997,10 +2050,10 @@ impl MainWindow {
             "split-pane-vertical" => cx.dispatch_action(&SplitPaneVertical),
             "split-pane-horizontal" => cx.dispatch_action(&SplitPaneHorizontal),
             "close-pane" => cx.dispatch_action(&ClosePane),
-            "focus-pane-left"  => cx.dispatch_action(&FocusPaneLeft),
+            "focus-pane-left" => cx.dispatch_action(&FocusPaneLeft),
             "focus-pane-right" => cx.dispatch_action(&FocusPaneRight),
-            "focus-pane-up"    => cx.dispatch_action(&FocusPaneUp),
-            "focus-pane-down"  => cx.dispatch_action(&FocusPaneDown),
+            "focus-pane-up" => cx.dispatch_action(&FocusPaneUp),
+            "focus-pane-down" => cx.dispatch_action(&FocusPaneDown),
             "open-graph-view" => cx.dispatch_action(&OpenGraphView),
             "open-plugin-manager" => cx.dispatch_action(&OpenPluginManager),
             "open-backlinks" => cx.dispatch_action(&OpenBacklinks),
@@ -2088,7 +2141,9 @@ impl MainWindow {
     ) {
         let mut instances = HashMap::new();
         let mut info_out: Vec<(PluginMetadataJson, PluginStatus)> = Vec::new();
-        let Some(root) = vault_root else { return (instances, info_out); };
+        let Some(root) = vault_root else {
+            return (instances, info_out);
+        };
         for (entry, wasm) in load_vault_plugins(root) {
             // 1. Probe metadata to learn actual capabilities.
             let meta = match PluginInstance::probe_metadata(engine, &wasm) {
@@ -2207,7 +2262,11 @@ impl MainWindow {
     /// Drain pending plugin events and apply them to the UI + registries.
     fn drain_plugin_events(&mut self, cx: &mut Context<Self>) {
         let events: Vec<PluginEvent> = {
-            let guard = cx.global::<PluginRegistry>().event_rx.lock().unwrap();
+            let guard = cx
+                .global::<PluginRegistry>()
+                .event_rx
+                .lock()
+                .expect("mutex poisoned");
             guard.try_iter().collect()
         };
         if events.is_empty() {
@@ -2215,15 +2274,25 @@ impl MainWindow {
         }
         for event in events {
             match event {
-                PluginEvent::CommandRegistered { plugin_id, id, name, hint } => {
+                PluginEvent::CommandRegistered {
+                    plugin_id,
+                    id,
+                    name,
+                    hint,
+                } => {
                     let entry = CommandEntry::new(id.clone(), name, hint);
-                    cx.global_mut::<crate::command::CommandRegistry>().register(entry);
+                    cx.global_mut::<crate::command::CommandRegistry>()
+                        .register(entry);
                     let reg = cx.global_mut::<PluginRegistry>();
-                    reg.plugin_commands.entry(plugin_id.clone()).or_default().push(id.clone());
+                    reg.plugin_commands
+                        .entry(plugin_id.clone())
+                        .or_default()
+                        .push(id.clone());
                     reg.command_to_plugin.insert(id, plugin_id);
                 }
                 PluginEvent::PanelRegistered { plugin_id, panel } => {
-                    let panels = cx.global_mut::<PluginRegistry>()
+                    let panels = cx
+                        .global_mut::<PluginRegistry>()
                         .plugin_panels
                         .entry(plugin_id)
                         .or_default();
@@ -2237,7 +2306,8 @@ impl MainWindow {
                 }
                 PluginEvent::Panicked { plugin_id, message } => {
                     self.export_status = Some(format!("[plugin error] {plugin_id}: {message}"));
-                    cx.global_mut::<PluginRegistry>().mark_failed(&plugin_id, message);
+                    cx.global_mut::<PluginRegistry>()
+                        .mark_failed(&plugin_id, message);
                 }
             }
         }
@@ -2252,8 +2322,9 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.new(|cx| PluginPanel::new(panel, cx));
-        cx.subscribe(&entity, |this, _, event: &PluginPanelEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            |this, _, event: &PluginPanelEvent, cx| match event {
                 PluginPanelEvent::Close => {
                     this.plugin_panel = None;
                     cx.notify();
@@ -2262,8 +2333,8 @@ impl MainWindow {
                     let id = cmd_id.clone();
                     this.handle_palette_execute(&id, cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.plugin_panel = Some(entity);
         self.plugin_panel_focus_pending = true;
@@ -2271,12 +2342,7 @@ impl MainWindow {
     }
 
     /// Reload the active editor's file from disk (`:reload` / `ReloadFile` action).
-    fn reload_file(
-        &mut self,
-        _: &ReloadFile,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn reload_file(&mut self, _: &ReloadFile, _window: &mut Window, cx: &mut Context<Self>) {
         self.active_editor().clone().update(cx, |pane, cx| {
             pane.reload_from_disk(cx);
         });
@@ -2296,10 +2362,12 @@ impl MainWindow {
         }
         // Build a snapshot of current plugin info + status.
         let reg = cx.global::<PluginRegistry>();
-        let plugins: Vec<(PluginInfo, PluginStatus)> = reg.plugin_info
+        let plugins: Vec<(PluginInfo, PluginStatus)> = reg
+            .plugin_info
             .values()
             .map(|info| {
-                let status = reg.plugin_statuses
+                let status = reg
+                    .plugin_statuses
                     .get(&info.id)
                     .cloned()
                     .unwrap_or(PluginStatus::Loaded);
@@ -2309,14 +2377,15 @@ impl MainWindow {
         let _ = reg;
 
         let entity = cx.new(|cx| PluginManager::new(plugins, cx));
-        cx.subscribe(&entity, |this, _, event: &PluginManagerEvent, cx| {
-            match event {
+        cx.subscribe(
+            &entity,
+            |this, _, event: &PluginManagerEvent, cx| match event {
                 PluginManagerEvent::Close => {
                     this.plugin_manager = None;
                     cx.notify();
                 }
-            }
-        })
+            },
+        )
         .detach();
         self.plugin_manager = Some(entity);
         self.plugin_manager_focus_pending = true;
@@ -2339,21 +2408,20 @@ impl MainWindow {
         let palette = cx.new(|cx| CommandPalette::new(cx));
         palette.read(cx).focus_handle.clone().focus(window);
 
-        cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
-            match event {
-                PaletteEvent::Close => {
-                    this.palette = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                }
-                PaletteEvent::Execute(id) => {
-                    this.palette = None;
-                    this.refocus_editor_pending = true;
-                    cx.notify();
-                    this.handle_palette_execute(id, cx);
-                }
+        cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
+            PaletteEvent::Close => {
+                this.palette = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
             }
-        }).detach();
+            PaletteEvent::Execute(id) => {
+                this.palette = None;
+                this.refocus_editor_pending = true;
+                cx.notify();
+                this.handle_palette_execute(id, cx);
+            }
+        })
+        .detach();
 
         self.palette = Some(palette);
         cx.notify();
@@ -2457,16 +2525,20 @@ fn minimal_daily_template(date: &str) -> String {
 /// - `{{datetime}}` → YYYY-MM-DD HH:MM
 /// - `{{title}}`    → note title derived from the filename stem (or empty)
 fn apply_template_substitutions(content: &str, title: &str) -> String {
-    let now = time::OffsetDateTime::now_local()
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let date_str = format!(
         "{:04}-{:02}-{:02}",
-        now.year(), now.month() as u8, now.day()
+        now.year(),
+        now.month() as u8,
+        now.day()
     );
     let datetime_str = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}",
-        now.year(), now.month() as u8, now.day(),
-        now.hour(), now.minute()
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute()
     );
     content
         .replace("{{date}}", &date_str)
@@ -2475,7 +2547,7 @@ fn apply_template_substitutions(content: &str, title: &str) -> String {
 }
 
 fn open_file_in_editor(
-    abs_path: &PathBuf,
+    abs_path: &Path,
     editor: &Entity<EditorPane>,
     vault: &Entity<VaultState>,
     cx: &mut App,
@@ -2484,13 +2556,23 @@ fn open_file_in_editor(
         Some(r) => r,
         None => return,
     };
-    let rel_path = abs_path.strip_prefix(&vault_root).unwrap_or(abs_path).to_path_buf();
-    let title = abs_path.file_stem()
+    let rel_path = abs_path
+        .strip_prefix(&vault_root)
+        .unwrap_or(abs_path)
+        .to_path_buf();
+    let title = abs_path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("untitled")
         .to_string();
-    let file = crate::vault::VaultFile { rel_path, abs_path: abs_path.clone(), title };
-    editor.update(cx, |pane, cx| pane.open_file_no_focus(&file, vault_root, cx));
+    let file = crate::vault::VaultFile {
+        rel_path,
+        abs_path: abs_path.to_path_buf(),
+        title,
+    };
+    editor.update(cx, |pane, cx| {
+        pane.open_file_no_focus(&file, vault_root, cx)
+    });
 }
 
 // ── Focusable ─────────────────────────────────────────────────────────────────
@@ -2504,7 +2586,10 @@ impl Focusable for MainWindow {
 impl MainWindow {
     /// Headings of the active buffer, for the docked Outline panel and its
     /// keyboard nav — re-parsed on demand so it can't go stale.
-    fn docked_outline_headings(&self, cx: &Context<Self>) -> Vec<crate::ui::outline_panel::OutlineHeading> {
+    fn docked_outline_headings(
+        &self,
+        cx: &Context<Self>,
+    ) -> Vec<crate::ui::outline_panel::OutlineHeading> {
         let text = self.active_editor().read(cx).buffer_text();
         crate::ui::outline_panel::parse_headings(&text)
     }
@@ -2512,11 +2597,19 @@ impl MainWindow {
     /// Notes linking to the active one, for the docked Backlinks panel and
     /// its keyboard nav — re-derived from the backlink index on demand.
     fn docked_backlink_files(&self, cx: &Context<Self>) -> Vec<crate::vault::VaultFile> {
-        let rel_path = self.active_editor().read(cx).current_rel_path().unwrap_or("").to_string();
+        let rel_path = self
+            .active_editor()
+            .read(cx)
+            .current_rel_path()
+            .unwrap_or("")
+            .to_string();
         let mut links = if rel_path.is_empty() {
             vec![]
         } else {
-            self.vault.read(cx).backlinks.incoming_links(std::path::Path::new(&rel_path))
+            self.vault
+                .read(cx)
+                .backlinks
+                .incoming_links(std::path::Path::new(&rel_path))
         };
         links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         links
@@ -2525,7 +2618,12 @@ impl MainWindow {
     /// j/k/Enter navigation for whichever docked panel (Outline/Backlinks) is
     /// showing — mirrors the overlay `OutlinePanel`/`BacklinkPanel`'s own
     /// key handling, scoped to `docked_panel_focus` instead of a modal.
-    fn handle_docked_panel_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_docked_panel_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let k = &event.keystroke;
         let len = match self.sidebar_panel {
             SidebarPanel::Outline => self.docked_outline_headings(cx).len(),
@@ -2562,7 +2660,13 @@ impl MainWindow {
     /// Shared chrome for a docked sidebar panel: small header + scrollable,
     /// keyboard-navigable rows (click a row, or focus the panel and use
     /// j/k/Enter — see `handle_docked_panel_key`).
-    fn docked_panel(&self, title: &'static str, rows: Vec<gpui::AnyElement>, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn docked_panel(
+        &self,
+        title: &'static str,
+        rows: Vec<gpui::AnyElement>,
+        t: &ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         div()
             .flex()
             .flex_col()
@@ -2582,7 +2686,15 @@ impl MainWindow {
                     .border_color(gpui::rgb(t.border_subtle))
                     .child(title),
             )
-            .child(div().id(title).flex_1().flex().flex_col().overflow_y_scroll().children(rows))
+            .child(
+                div()
+                    .id(title)
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
             .into_any_element()
     }
 
@@ -2592,8 +2704,14 @@ impl MainWindow {
         let headings = self.docked_outline_headings(cx);
         let selected = self.docked_selected.min(headings.len().saturating_sub(1));
         let rows: Vec<gpui::AnyElement> = if headings.is_empty() {
-            vec![div().px_3().py_2().text_sm().font_family("Menlo")
-                .text_color(gpui::rgb(t.text_faint)).child("No headings.").into_any_element()]
+            vec![div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint))
+                .child("No headings.")
+                .into_any_element()]
         } else {
             headings
                 .into_iter()
@@ -2622,7 +2740,10 @@ impl MainWindow {
                             });
                         }))
                         .child(
-                            div().text_xs().text_color(gpui::rgb(t.ochre)).flex_shrink_0()
+                            div()
+                                .text_xs()
+                                .text_color(gpui::rgb(t.ochre))
+                                .flex_shrink_0()
                                 .child(format!("H{}", h.level.min(6))),
                         )
                         .child(div().overflow_hidden().child(h.title))
@@ -2635,12 +2756,22 @@ impl MainWindow {
 
     /// Docked backlinks: notes linking to the active one, re-derived from the
     /// backlink index each render.  Click a row to open that note.
-    fn render_docked_backlinks(&self, t: &ThemePalette, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_docked_backlinks(
+        &self,
+        t: &ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let links = self.docked_backlink_files(cx);
         let selected = self.docked_selected.min(links.len().saturating_sub(1));
         let rows: Vec<gpui::AnyElement> = if links.is_empty() {
-            vec![div().px_3().py_2().text_sm().font_family("Menlo")
-                .text_color(gpui::rgb(t.text_faint)).child("No backlinks.").into_any_element()]
+            vec![div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .font_family("Menlo")
+                .text_color(gpui::rgb(t.text_faint))
+                .child("No backlinks.")
+                .into_any_element()]
         } else {
             links
                 .into_iter()
@@ -2675,39 +2806,74 @@ impl MainWindow {
         // Handlers call the MainWindow method via cx.listener — NOT
         // cx.dispatch_action on a bare App, which falls back to main.rs's
         // no-op global stubs and the clicks go silently dead (shipped bug).
-        type Btn = (&'static str, &'static str, bool, &'static str,
-            fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>));
+        type Btn = (
+            &'static str,
+            &'static str,
+            bool,
+            &'static str,
+            fn(&mut MainWindow, &mut Window, &mut Context<MainWindow>),
+        );
         let buttons: [Btn; 6] = [
-            ("rail-files", "☰", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Files,
+            (
+                "rail-files",
+                "☰",
+                self.sidebar_visible && self.sidebar_panel == SidebarPanel::Files,
                 "Toggle file sidebar",
                 |this, window, cx| {
                     if this.sidebar_panel != SidebarPanel::Files {
                         this.sidebar_panel = SidebarPanel::Files;
                         this.sidebar_visible = true;
-                        crate::session::save_sidebar_state(this.sidebar_panel.as_str(), this.sidebar_width);
+                        crate::session::save_sidebar_state(
+                            this.sidebar_panel.as_str(),
+                            this.sidebar_width,
+                        );
                         cx.notify();
                     } else {
                         this.toggle_sidebar(&ToggleSidebar, window, cx);
                     }
-                }),
-            ("rail-search", "⌕", self.vault_search.is_some(), "Vault search",
-                |this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx)),
-            ("rail-graph", "◎", self.graph_view.is_some(), "Graph view",
-                |this, window, cx| this.open_graph_view(&OpenGraphView, window, cx)),
-            ("rail-outline", "≡", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Outline,
+                },
+            ),
+            (
+                "rail-search",
+                "⌕",
+                self.vault_search.is_some(),
+                "Vault search",
+                |this, window, cx| this.open_vault_search(&OpenVaultSearch, window, cx),
+            ),
+            (
+                "rail-graph",
+                "◎",
+                self.graph_view.is_some(),
+                "Graph view",
+                |this, window, cx| this.open_graph_view(&OpenGraphView, window, cx),
+            ),
+            (
+                "rail-outline",
+                "≡",
+                self.sidebar_visible && self.sidebar_panel == SidebarPanel::Outline,
                 "Outline",
                 |this, window, cx| {
                     this.toggle_docked_panel(SidebarPanel::Outline, cx);
                     this.docked_panel_focus.clone().focus(window);
-                }),
-            ("rail-backlinks", "↩", self.sidebar_visible && self.sidebar_panel == SidebarPanel::Backlinks,
+                },
+            ),
+            (
+                "rail-backlinks",
+                "↩",
+                self.sidebar_visible && self.sidebar_panel == SidebarPanel::Backlinks,
                 "Backlinks",
                 |this, window, cx| {
                     this.toggle_docked_panel(SidebarPanel::Backlinks, cx);
                     this.docked_panel_focus.clone().focus(window);
-                }),
-            ("rail-plugins", "⬡", self.plugin_manager.is_some(), "Plugin manager",
-                |this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx)),
+                },
+            ),
+            (
+                "rail-plugins",
+                "⬡",
+                self.plugin_manager.is_some(),
+                "Plugin manager",
+                |this, window, cx| this.open_plugin_manager(&OpenPluginManager, window, cx),
+            ),
         ];
 
         let mut rail = div()
@@ -2752,8 +2918,13 @@ impl MainWindow {
         // Settings pinned to the bottom.
         rail = rail.child(div().flex_1()).child(
             make_btn(
-                ("rail-settings", "⚙", self.settings_panel.is_some(), "Settings",
-                    |this, window, cx| this.open_settings(&OpenSettings, window, cx)),
+                (
+                    "rail-settings",
+                    "⚙",
+                    self.settings_panel.is_some(),
+                    "Settings",
+                    |this, window, cx| this.open_settings(&OpenSettings, window, cx),
+                ),
                 t,
                 cx,
             )
@@ -2840,28 +3011,31 @@ impl Render for MainWindow {
             if self.palette.is_none() {
                 let palette = cx.new(|cx| CommandPalette::new(cx));
                 palette.read(cx).focus_handle.clone().focus(window);
-                cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| {
-                    match event {
-                        PaletteEvent::Close => {
-                            this.palette = None;
-                            this.refocus_editor_pending = true;
-                            cx.notify();
-                        }
-                        PaletteEvent::Execute(id) => {
-                            this.palette = None;
-                            this.refocus_editor_pending = true;
-                            cx.notify();
-                            this.handle_palette_execute(id, cx);
-                        }
+                cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
+                    PaletteEvent::Close => {
+                        this.palette = None;
+                        this.refocus_editor_pending = true;
+                        cx.notify();
                     }
-                }).detach();
+                    PaletteEvent::Execute(id) => {
+                        this.palette = None;
+                        this.refocus_editor_pending = true;
+                        cx.notify();
+                        this.handle_palette_execute(id, cx);
+                    }
+                })
+                .detach();
                 self.palette = Some(palette);
             }
         }
 
         // Refocus the active editor after any modal (palette, etc.) is dismissed.
         if self.refocus_editor_pending {
-            self.active_editor().read(cx).focus_handle.clone().focus(window);
+            self.active_editor()
+                .read(cx)
+                .focus_handle
+                .clone()
+                .focus(window);
             self.refocus_editor_pending = false;
         }
 
@@ -2958,7 +3132,9 @@ impl Render for MainWindow {
                 }
             }
             PreviewMode::Paged => {
-                if let Some(ref wv) = self.html_webview { wv.set_hidden(true); }
+                if let Some(ref wv) = self.html_webview {
+                    wv.set_hidden(true);
+                }
             }
         }
 
@@ -2970,9 +3146,12 @@ impl Render for MainWindow {
             let d = div()
                 .bg(gpui::rgb(border_subtle))
                 .hover(move |s| s.bg(gpui::rgb(ochre_dim)))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event, window, cx| {
-                    this.on_handle_mouse_down(target, event, window, cx);
-                }));
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event, window, cx| {
+                        this.on_handle_mouse_down(target, event, window, cx);
+                    }),
+                );
             if vertical {
                 d.w(px(4.0)).h_full().cursor_ew_resize()
             } else {
@@ -2993,9 +3172,15 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_quick_switch))
             .on_action(cx.listener(Self::open_file_picker))
             .on_action(cx.listener(Self::open_settings))
-            .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| this.set_line_number_mode("relative", cx)))
-            .on_action(cx.listener(|this, _: &LineNumbersAbsolute, _, cx| this.set_line_number_mode("absolute", cx)))
-            .on_action(cx.listener(|this, _: &LineNumbersOff, _, cx| this.set_line_number_mode("off", cx)))
+            .on_action(cx.listener(|this, _: &LineNumbersRelative, _, cx| {
+                this.set_line_number_mode("relative", cx)
+            }))
+            .on_action(cx.listener(|this, _: &LineNumbersAbsolute, _, cx| {
+                this.set_line_number_mode("absolute", cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &LineNumbersOff, _, cx| this.set_line_number_mode("off", cx)),
+            )
             .on_action(cx.listener(Self::open_recent_files))
             .on_action(cx.listener(Self::open_backlinks))
             .on_action(cx.listener(Self::open_outline))
@@ -3036,8 +3221,13 @@ impl Render for MainWindow {
                 SidebarPanel::Backlinks => self.render_docked_backlinks(&t, cx),
             };
             root = root
-                .child(div().w(px(self.sidebar_width)).h_full().overflow_hidden()
-                    .child(content))
+                .child(
+                    div()
+                        .w(px(self.sidebar_width))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(content),
+                )
                 .child(handle(DragTarget::Sidebar, true, cx));
         }
 
@@ -3049,9 +3239,17 @@ impl Render for MainWindow {
         // Each sub-pane is rendered as a flex-col with a tab bar at the top.
 
         let rail_w = if self.zen_mode { 0.0 } else { 40.0 };
-        let sidebar_w = if self.sidebar_visible { self.sidebar_width + 4.0 } else { 0.0 };
+        let sidebar_w = if self.sidebar_visible {
+            self.sidebar_width + 4.0
+        } else {
+            0.0
+        };
         // In Zen Mode the preview is hidden, so do not subtract preview_width.
-        let effective_preview_w = if self.zen_mode { 0.0 } else { self.preview_width + 4.0 };
+        let effective_preview_w = if self.zen_mode {
+            0.0
+        } else {
+            self.preview_width + 4.0
+        };
         let editor_area_w =
             (content_w as f32 - rail_w - sidebar_w - effective_preview_w).max(200.0);
 
@@ -3065,7 +3263,8 @@ impl Render for MainWindow {
             let tab_bar: gpui::AnyElement = if pane.tabs.is_empty() {
                 div().into_any_element()
             } else {
-                let tab_items: Vec<gpui::AnyElement> = pane.tabs
+                let tab_items: Vec<gpui::AnyElement> = pane
+                    .tabs
                     .iter()
                     .enumerate()
                     .map(|(i, tab)| {
@@ -3126,11 +3325,7 @@ impl Render for MainWindow {
                             .hover(|s| s.text_color(gpui::rgb(t.text)))
                             .child(label)
                             .when(dirty, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(gpui::rgb(t.ochre))
-                                        .child("●"),
-                                )
+                                d.child(div().text_color(gpui::rgb(t.ochre)).child("●"))
                             })
                             .child(close_btn)
                             .on_mouse_down(
@@ -3184,7 +3379,12 @@ impl Render for MainWindow {
                 self.panes[1].editor.update(cx, |p, _| p.set_pane_width(w1));
                 let col0 = pane_col(0, self, cx);
                 let col1 = pane_col(1, self, cx);
-                div().flex_1().min_w_0().h_full().flex().flex_row()
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_row()
                     .child(div().w(px(w0)).h_full().overflow_hidden().child(col0))
                     .child(handle(DragTarget::PaneDivider, true, cx))
                     .child(div().w(px(w1)).h_full().overflow_hidden().child(col1))
@@ -3194,11 +3394,20 @@ impl Render for MainWindow {
                 let h0 = (content_h as f32 * self.pane_split_frac).round();
                 let h1 = content_h as f32 - h0 - 4.0;
 
-                self.panes[0].editor.update(cx, |p, _| p.set_pane_width(editor_area_w));
-                self.panes[1].editor.update(cx, |p, _| p.set_pane_width(editor_area_w));
+                self.panes[0]
+                    .editor
+                    .update(cx, |p, _| p.set_pane_width(editor_area_w));
+                self.panes[1]
+                    .editor
+                    .update(cx, |p, _| p.set_pane_width(editor_area_w));
                 let col0 = pane_col(0, self, cx);
                 let col1 = pane_col(1, self, cx);
-                div().flex_1().min_w_0().h_full().flex().flex_col()
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
                     .child(div().w_full().h(px(h0)).overflow_hidden().child(col0))
                     .child(handle(DragTarget::PaneDivider, false, cx))
                     .child(div().w_full().h(px(h1)).overflow_hidden().child(col1))
@@ -3214,7 +3423,11 @@ impl Render for MainWindow {
                 };
                 self.panes[0].editor.update(cx, |p, _| p.set_pane_width(w));
                 let col0 = pane_col(0, self, cx);
-                div().flex_1().min_w_0().h_full().overflow_hidden()
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
                     .child(col0)
                     .into_any_element()
             }
@@ -3223,11 +3436,14 @@ impl Render for MainWindow {
         // ── Preview column ────────────────────────────────────────────────────
         let preview_col = match preview_mode {
             PreviewMode::Paged => div()
-                .w(px(self.preview_width)).h_full().overflow_hidden()
+                .w(px(self.preview_width))
+                .h_full()
+                .overflow_hidden()
                 .child(self.preview.clone())
                 .into_any_element(),
             PreviewMode::Html => div()
-                .w(px(self.preview_width)).h_full()
+                .w(px(self.preview_width))
+                .h_full()
                 .bg(gpui::rgb(t.bg_panel))
                 .into_any_element(),
         };
@@ -3254,8 +3470,9 @@ impl Render for MainWindow {
                             .text_color(gpui::rgb(t.text))
                             .font_family("Menlo")
                             .child(msg),
-                    )
-            ).with_priority(150)
+                    ),
+            )
+            .with_priority(150)
         });
 
         let root = if show_welcome {

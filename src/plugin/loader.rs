@@ -56,7 +56,9 @@ pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
     if actual == expected {
         Ok(())
     } else {
-        Err(format!("SHA-256 mismatch: expected {expected}, got {actual}"))
+        Err(format!(
+            "SHA-256 mismatch: expected {expected}, got {actual}"
+        ))
     }
 }
 
@@ -105,7 +107,10 @@ pub fn update_plugins(vault_root: &Path) -> Result<(), String> {
     for entry in &mut lock.plugins {
         let bytes = match fetch_bytes(&entry.url) {
             Ok(b) => b,
-            Err(e) => { eprintln!("Failed to fetch plugin '{}': {}", entry.id, e); continue; }
+            Err(e) => {
+                eprintln!("Failed to fetch plugin '{}': {}", entry.id, e);
+                continue;
+            }
         };
         let new_sha = sha256_hex(&bytes);
         if new_sha == entry.sha256 {
@@ -114,7 +119,10 @@ pub fn update_plugins(vault_root: &Path) -> Result<(), String> {
         }
         let meta = match read_wasm_metadata(&bytes) {
             Ok(m) => m,
-            Err(e) => { eprintln!("Failed to read metadata for '{}': {}", entry.id, e); continue; }
+            Err(e) => {
+                eprintln!("Failed to read metadata for '{}': {}", entry.id, e);
+                continue;
+            }
         };
         let wasm_path = dir.join(format!("{}.wasm", entry.id));
         if let Err(e) = std::fs::write(&wasm_path, &bytes) {

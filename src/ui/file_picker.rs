@@ -13,8 +13,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -71,12 +71,7 @@ impl FilePicker {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {
@@ -152,9 +147,21 @@ impl Render for FilePicker {
             let file = &self.files[file_idx];
             let is_selected = row_idx == self.selected;
 
-            let bg = if is_selected { gpui::rgb(t.bg_hover) } else { gpui::rgb(t.bg_surface) };
-            let accent = if is_selected { gpui::rgb(t.ochre) } else { gpui::rgb(t.border_subtle) };
-            let name_color = if is_selected { gpui::rgb(t.text) } else { gpui::rgb(t.text_muted) };
+            let bg = if is_selected {
+                gpui::rgb(t.bg_hover)
+            } else {
+                gpui::rgb(t.bg_surface)
+            };
+            let accent = if is_selected {
+                gpui::rgb(t.ochre)
+            } else {
+                gpui::rgb(t.border_subtle)
+            };
+            let name_color = if is_selected {
+                gpui::rgb(t.text)
+            } else {
+                gpui::rgb(t.text_muted)
+            };
 
             // Split path into filename and parent directory for display.
             let rel = file.rel_path.to_string_lossy();
@@ -277,17 +284,13 @@ impl Render for FilePicker {
                             )
                             .child(query_el)
                             .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .justify_end()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_family("Menlo")
-                                            .text_color(gpui::rgb(t.text_faint))
-                                            .child(count_str),
-                                    ),
+                                div().flex_1().flex().justify_end().child(
+                                    div()
+                                        .text_xs()
+                                        .font_family("Menlo")
+                                        .text_color(gpui::rgb(t.text_faint))
+                                        .child(count_str),
+                                ),
                             ),
                     )
                     // ── Results list ───────────────────────────────────────

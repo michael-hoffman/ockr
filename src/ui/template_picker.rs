@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -58,7 +58,10 @@ impl TemplatePicker {
     pub fn new(templates: Vec<TemplateEntry>, cx: &mut Context<Self>) -> Self {
         let mut entries = Vec::with_capacity(templates.len() + 1);
         // Blank note is always first.
-        entries.push(TemplateEntry { name: "Blank note".to_string(), path: None });
+        entries.push(TemplateEntry {
+            name: "Blank note".to_string(),
+            path: None,
+        });
         entries.extend(templates);
 
         let mut picker = Self {
@@ -91,19 +94,15 @@ impl TemplatePicker {
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
-        let path = self.matches
+        let path = self
+            .matches
             .get(self.selected)
             .and_then(|&idx| self.entries.get(idx))
             .and_then(|e| e.path.clone());
         cx.emit(TemplatePickerEvent::Pick(path));
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {
@@ -326,7 +325,10 @@ pub fn scan_templates(vault_root: &std::path::Path) -> Vec<TemplateEntry> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("untitled")
                     .to_string();
-                Some(TemplateEntry { name, path: Some(path) })
+                Some(TemplateEntry {
+                    name,
+                    path: Some(path),
+                })
             } else {
                 None
             }
@@ -344,7 +346,13 @@ pub fn heading_to_filename_stem(content: &str) -> Option<String> {
         if let Some(rest) = trimmed.strip_prefix("= ") {
             let stem: String = rest
                 .chars()
-                .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .map(|c| {
+                    if c.is_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
                 .collect::<String>()
                 .trim_matches('-')
                 .to_string();

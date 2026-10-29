@@ -51,7 +51,10 @@ pub fn apply<B: Buffer>(
             let pos = state.cursor();
             // Smart indent: match previous line's leading whitespace.
             let current_line = buf.line(pos.line).to_string();
-            let leading_ws: String = current_line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let leading_ws: String = current_line
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
             // Extra indent if previous text (up to cursor) ends with an opener.
             let before_cursor = &current_line[..pos.col.min(current_line.len())];
             let extra = if before_cursor.trim_end().ends_with('{')
@@ -357,7 +360,8 @@ pub fn apply<B: Buffer>(
 
                     // Yank register gets the primary range's text only — this
                     // codebase has one yank register, not one per selection.
-                    state.yank_register = ranges.iter()
+                    state.yank_register = ranges
+                        .iter()
                         .find(|&&(s, _)| s == primary_start)
                         .map(|&(s, e)| yank_visual_char(s, e, buf))
                         .unwrap_or_default();
@@ -383,12 +387,20 @@ pub fn apply<B: Buffer>(
                     let mut col_shift: usize = 0;
                     let mut collapsed: Vec<Pos> = Vec::with_capacity(ranges.len());
                     for &(start, end) in &ranges {
-                        let shift = if col_shift_line == Some(start.line) { col_shift } else { 0 };
+                        let shift = if col_shift_line == Some(start.line) {
+                            col_shift
+                        } else {
+                            0
+                        };
                         collapsed.push(Pos::new(start.line - line_shift, start.col - shift));
 
                         let lines_removed = end.line - start.line;
                         if lines_removed == 0 {
-                            let base = if col_shift_line == Some(start.line) { col_shift } else { 0 };
+                            let base = if col_shift_line == Some(start.line) {
+                                col_shift
+                            } else {
+                                0
+                            };
                             col_shift = base + (end.col - start.col);
                         } else {
                             line_shift += lines_removed;
@@ -427,7 +439,7 @@ pub fn apply<B: Buffer>(
                 }
                 Mode::Visual(VisualKind::Char) => {
                     let start = state.selection.start();
-                    let end   = state.selection.end();
+                    let end = state.selection.end();
                     state.yank_register = yank_visual_char(start, end, buf);
                 }
                 _ => {
@@ -735,7 +747,8 @@ pub fn apply<B: Buffer>(
                     .unwrap_or_default();
 
                 // Measure and remove current leading whitespace.
-                let current_ws: usize = buf.line(l)
+                let current_ws: usize = buf
+                    .line(l)
                     .chars()
                     .take_while(|c| c.is_whitespace())
                     .map(|c| c.len_utf8())
@@ -803,7 +816,7 @@ pub fn apply<B: Buffer>(
                 }
                 Mode::Visual(_) => {
                     let mut start = state.selection.start();
-                    let mut end   = state.selection.end();
+                    let mut end = state.selection.end();
 
                     // ── Advance start past leading whitespace ──────────────
                     'fwd: loop {
@@ -861,9 +874,15 @@ pub fn apply<B: Buffer>(
                     let original_start_was_anchor =
                         state.selection.anchor <= state.selection.cursor;
                     state.selection = if original_start_was_anchor {
-                        Selection { anchor: start, cursor: end }
+                        Selection {
+                            anchor: start,
+                            cursor: end,
+                        }
                     } else {
-                        Selection { anchor: end, cursor: start }
+                        Selection {
+                            anchor: end,
+                            cursor: start,
+                        }
                     };
                     // Switch to Visual Char so the trimmed bounds make sense.
                     state.mode = Mode::Visual(VisualKind::Char);
@@ -1001,7 +1020,7 @@ pub fn apply<B: Buffer>(
         // ── Miscellaneous ──────────────────────────────────────────────────
         SelectWholeFile => {
             let last_line = buf.line_count() - 1;
-            let last_col  = buf.line(last_line).len();
+            let last_col = buf.line(last_line).len();
             state.selection = Selection {
                 anchor: Pos::new(0, 0),
                 cursor: Pos::new(last_line, last_col),
@@ -1015,7 +1034,11 @@ pub fn apply<B: Buffer>(
             let line = buf.line(pos.line);
             // Find a bracket at or after the cursor on the same line.
             let bracket_pos = line[pos.col..].char_indices().find_map(|(i, c)| {
-                if "(){}[]<>".contains(c) { Some((pos.col + i, c)) } else { Option::None }
+                if "(){}[]<>".contains(c) {
+                    Some((pos.col + i, c))
+                } else {
+                    Option::None
+                }
             });
             if let Some((bcol, bchar)) = bracket_pos {
                 let (open, close, forward) = match bchar {
@@ -1027,15 +1050,14 @@ pub fn apply<B: Buffer>(
                     ']' => ('[', ']', false),
                     '<' => ('<', '>', true),
                     '>' => ('<', '>', false),
-                    _   => return (state, None),
+                    _ => return (state, None),
                 };
                 let search_from = Pos::new(pos.line, bcol);
                 let maybe = if forward {
                     obj_surround(buf, search_from, open, close, false)
                         .map(|(_, e)| Pos::new(e.line, e.col.saturating_sub(close.len_utf8())))
                 } else {
-                    obj_surround(buf, search_from, open, close, false)
-                        .map(|(s, _)| s)
+                    obj_surround(buf, search_from, open, close, false).map(|(s, _)| s)
                 };
                 if let Some(dest) = maybe {
                     navigate(&mut state, dest);
@@ -1048,7 +1070,7 @@ pub fn apply<B: Buffer>(
             match state.mode {
                 Mode::Visual(VisualKind::Char) => {
                     let start = state.selection.start();
-                    let end   = state.selection.end();
+                    let end = state.selection.end();
                     if start.line == end.line {
                         let chunk = buf.line(start.line)[start.col..end.col].to_owned();
                         let toggled = toggle_case(&chunk);
@@ -1082,7 +1104,10 @@ pub fn apply<B: Buffer>(
                     let pos = state.cursor();
                     let line = buf.line(pos.line);
                     if pos.col < line.len() {
-                        let ch = line[pos.col..].chars().next().unwrap();
+                        let ch = line[pos.col..]
+                            .chars()
+                            .next()
+                            .expect("cursor is inside the line");
                         let new_ch = if ch.is_uppercase() {
                             ch.to_lowercase().to_string()
                         } else {
@@ -1138,7 +1163,10 @@ pub fn apply<B: Buffer>(
         SelectObject { inner, kind } => {
             let pos = state.cursor();
             if let Some((start, end)) = text_object_span(buf, pos, inner, kind) {
-                state.selection = Selection { anchor: start, cursor: end };
+                state.selection = Selection {
+                    anchor: start,
+                    cursor: end,
+                };
                 state.extra_selections.clear();
                 state.expand_stack.clear();
                 state.mode = Mode::Visual(VisualKind::Char);
@@ -1166,8 +1194,13 @@ pub fn apply<B: Buffer>(
             let (text, anchors) = selection_text_and_anchors(buf, Pos::new(0, 0), whole_end);
             let start_off = anchors[sel_start.line].text_start + sel_start.col;
             let end_off = anchors[sel_end.line].text_start + sel_end.col;
-            if let Some((new_start, new_end)) = crate::editor::syntax::expand_selection(&text, start_off, end_off) {
-                state.expand_stack.push(Selection { anchor: sel_start, cursor: sel_end });
+            if let Some((new_start, new_end)) =
+                crate::editor::syntax::expand_selection(&text, start_off, end_off)
+            {
+                state.expand_stack.push(Selection {
+                    anchor: sel_start,
+                    cursor: sel_end,
+                });
                 state.selection = Selection {
                     anchor: pos_at(&anchors, new_start),
                     cursor: pos_at(&anchors, new_end),
@@ -1236,7 +1269,11 @@ pub fn apply<B: Buffer>(
 
         // ── Increment / Decrement number under cursor ─────────────────────────
         IncrementNumber | DecrementNumber => {
-            let delta: i64 = if matches!(cmd, IncrementNumber) { 1 } else { -1 };
+            let delta: i64 = if matches!(cmd, IncrementNumber) {
+                1
+            } else {
+                -1
+            };
             let pos = state.cursor();
             let line_str = buf.line(pos.line).to_string();
             if let Some((byte_start, byte_end, value)) = find_integer_near(&line_str, pos.col) {
@@ -1379,8 +1416,12 @@ fn find_integer_near(line: &str, col: usize) -> Option<(usize, usize, i64)> {
         } else {
             // Scan right for the next digit.
             loop {
-                if i >= len { return None; }
-                if bytes[i].is_ascii_digit() { break; }
+                if i >= len {
+                    return None;
+                }
+                if bytes[i].is_ascii_digit() {
+                    break;
+                }
                 i += 1;
             }
             i
@@ -1389,7 +1430,8 @@ fn find_integer_near(line: &str, col: usize) -> Option<(usize, usize, i64)> {
 
     // Include a leading minus if the character immediately before is `-`
     // and that `-` is not itself preceded by a digit.
-    let start = if digit_pos > 0 && bytes[digit_pos - 1] == b'-'
+    let start = if digit_pos > 0
+        && bytes[digit_pos - 1] == b'-'
         && (digit_pos < 2 || !bytes[digit_pos - 2].is_ascii_digit())
     {
         digit_pos - 1
@@ -1462,15 +1504,19 @@ fn word_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     loop {
         let s = buf.line(line);
         let rest = &s[col..];
-        let after_word = col + rest.chars()
-            .take_while(|c| !c.is_whitespace())
-            .map(|c| c.len_utf8())
-            .sum::<usize>();
+        let after_word = col
+            + rest
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .map(|c| c.len_utf8())
+                .sum::<usize>();
         let rest2 = &s[after_word..];
-        let after_ws = after_word + rest2.chars()
-            .take_while(|c| c.is_whitespace())
-            .map(|c| c.len_utf8())
-            .sum::<usize>();
+        let after_ws = after_word
+            + rest2
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(|c| c.len_utf8())
+                .sum::<usize>();
 
         if after_ws > col || after_ws == s.len() && line + 1 >= buf.line_count() {
             return Pos::new(line, after_ws.min(s.len()));
@@ -1549,7 +1595,11 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     loop {
         let s = buf.line(line);
         let chars_before: Vec<char> = s[..col].chars().collect();
-        let ws_count = chars_before.iter().rev().take_while(|c| c.is_whitespace()).count();
+        let ws_count = chars_before
+            .iter()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .count();
         let after_ws_skip = chars_before.len() - ws_count;
         let word_start_idx = chars_before[..after_ws_skip]
             .iter()
@@ -1557,7 +1607,8 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
             .take_while(|c| !c.is_whitespace())
             .count();
         let new_char_idx = after_ws_skip.saturating_sub(word_start_idx);
-        let new_col = s.char_indices()
+        let new_col = s
+            .char_indices()
             .nth(new_char_idx)
             .map(|(b, _)| b)
             .unwrap_or(0);
@@ -1594,7 +1645,11 @@ fn all_selection_ranges(state: &EditorState) -> Vec<(Pos, Pos)> {
     ranges
 }
 
-fn yank_visual_char<B: Buffer>(start: crate::editor::state::Pos, end: crate::editor::state::Pos, buf: &B) -> String {
+fn yank_visual_char<B: Buffer>(
+    start: crate::editor::state::Pos,
+    end: crate::editor::state::Pos,
+    buf: &B,
+) -> String {
     if start.line == end.line {
         buf.line(start.line)[start.col..end.col].to_string()
     } else {
@@ -1616,7 +1671,11 @@ fn yank_visual_char<B: Buffer>(start: crate::editor::state::Pos, end: crate::edi
 fn find_char_forward(line: &str, col: usize, c: char, till: bool) -> Option<usize> {
     // Start scanning one byte past the current char.
     let start = if col < line.len() {
-        col + line[col..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1)
+        col + line[col..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(1)
     } else {
         return None;
     };
@@ -1625,7 +1684,11 @@ fn find_char_forward(line: &str, col: usize, c: char, till: bool) -> Option<usiz
             let found = start + i;
             return if till {
                 // Position just before: last char boundary before `found`.
-                if found > 0 { Some(prev_char_boundary(line, found)) } else { None }
+                if found > 0 {
+                    Some(prev_char_boundary(line, found))
+                } else {
+                    None
+                }
             } else {
                 Some(found)
             };
@@ -1637,11 +1700,17 @@ fn find_char_forward(line: &str, col: usize, c: char, till: bool) -> Option<usiz
 /// Find the previous occurrence of `c` before `col` on `line`.
 /// If `till`, returns the position just after `c`.
 fn find_char_backward(line: &str, col: usize, c: char, till: bool) -> Option<usize> {
-    if col == 0 { return None; }
+    if col == 0 {
+        return None;
+    }
     // Walk backwards through chars (char_indices is double-ended).
     for (i, ch) in line[..col].char_indices().rev() {
         if ch == c {
-            return if till { Some(i + ch.len_utf8()) } else { Some(i) };
+            return if till {
+                Some(i + ch.len_utf8())
+            } else {
+                Some(i)
+            };
         }
     }
     None
@@ -1655,7 +1724,9 @@ fn paragraph_back<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     let mut line = pos.line;
 
     // If already at top, stay.
-    if line == 0 { return Pos::new(0, 0); }
+    if line == 0 {
+        return Pos::new(0, 0);
+    }
 
     // Step over any blank lines directly above.
     while line > 0 && is_blank(line) {
@@ -1674,7 +1745,9 @@ fn paragraph_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
     let is_blank = |l: usize| buf.line(l).trim().is_empty();
     let mut line = pos.line;
 
-    if line + 1 >= total { return Pos::new(line, buf.line(line).len()); }
+    if line + 1 >= total {
+        return Pos::new(line, buf.line(line).len());
+    }
 
     // Step over non-blank lines first (skip current block).
     while line + 1 < total && !is_blank(line) {
@@ -1692,8 +1765,11 @@ fn paragraph_forward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 fn toggle_case(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_uppercase() { c.to_lowercase().collect::<String>() }
-            else { c.to_uppercase().collect::<String>() }
+            if c.is_uppercase() {
+                c.to_lowercase().collect::<String>()
+            } else {
+                c.to_uppercase().collect::<String>()
+            }
         })
         .collect()
 }
@@ -1721,23 +1797,24 @@ pub fn text_object_span<B: Buffer>(
     kind: TextObjectKind,
 ) -> Option<(Pos, Pos)> {
     match kind {
-        TextObjectKind::Word      => obj_word(buf.line(pos.line), pos.col, inner, false)
+        TextObjectKind::Word => obj_word(buf.line(pos.line), pos.col, inner, false)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-        TextObjectKind::WORD      => obj_word(buf.line(pos.line), pos.col, inner, true)
+        TextObjectKind::WORD => obj_word(buf.line(pos.line), pos.col, inner, true)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
         TextObjectKind::Paragraph => obj_paragraph(buf, pos, inner),
-        TextObjectKind::Paren     => obj_surround(buf, pos, '(', ')', inner),
-        TextObjectKind::Brace     => obj_surround(buf, pos, '{', '}', inner),
-        TextObjectKind::Bracket | TextObjectKind::TypstContent
-                                  => obj_surround(buf, pos, '[', ']', inner),
-        TextObjectKind::Angle     => obj_surround(buf, pos, '<', '>', inner),
+        TextObjectKind::Paren => obj_surround(buf, pos, '(', ')', inner),
+        TextObjectKind::Brace => obj_surround(buf, pos, '{', '}', inner),
+        TextObjectKind::Bracket | TextObjectKind::TypstContent => {
+            obj_surround(buf, pos, '[', ']', inner)
+        }
+        TextObjectKind::Angle => obj_surround(buf, pos, '<', '>', inner),
         TextObjectKind::DoubleQuote => obj_quote(buf.line(pos.line), pos.col, '"', inner)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
         TextObjectKind::SingleQuote => obj_quote(buf.line(pos.line), pos.col, '\'', inner)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-        TextObjectKind::Backtick    => obj_quote(buf.line(pos.line), pos.col, '`', inner)
+        TextObjectKind::Backtick => obj_quote(buf.line(pos.line), pos.col, '`', inner)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
-        TextObjectKind::InlineMath  => obj_quote(buf.line(pos.line), pos.col, '$', inner)
+        TextObjectKind::InlineMath => obj_quote(buf.line(pos.line), pos.col, '$', inner)
             .map(|(s, e)| (Pos::new(pos.line, s), Pos::new(pos.line, e))),
     }
 }
@@ -1769,25 +1846,36 @@ fn obj_word(line: &str, col: usize, inner: bool, whitespace_word: bool) -> Optio
         // Scan left for start of run.
         let mut start = col;
         for (i, c) in line[..col].char_indices().rev() {
-            if is_target(c) { start = i; } else { break; }
+            if is_target(c) {
+                start = i;
+            } else {
+                break;
+            }
         }
         // Scan right for end of run (exclusive).
         let mut end = col;
         for (i, c) in line[col..].char_indices() {
-            if is_target(c) { end = col + i + c.len_utf8(); } else { break; }
+            if is_target(c) {
+                end = col + i + c.len_utf8();
+            } else {
+                break;
+            }
         }
         if inner {
             Some((start, end))
         } else {
             // Add trailing whitespace; fall back to leading.
-            let trail: usize = line[end..].chars()
+            let trail: usize = line[end..]
+                .chars()
                 .take_while(|c| c.is_whitespace())
                 .map(|c| c.len_utf8())
                 .sum();
             if trail > 0 {
                 Some((start, end + trail))
             } else {
-                let lead: usize = line[..start].chars().rev()
+                let lead: usize = line[..start]
+                    .chars()
+                    .rev()
                     .take_while(|c| c.is_whitespace())
                     .map(|c| c.len_utf8())
                     .sum();
@@ -1798,11 +1886,19 @@ fn obj_word(line: &str, col: usize, inner: bool, whitespace_word: bool) -> Optio
         // Cursor on whitespace — select the whitespace run.
         let mut start = col;
         for (i, c) in line[..col].char_indices().rev() {
-            if c.is_whitespace() { start = i; } else { break; }
+            if c.is_whitespace() {
+                start = i;
+            } else {
+                break;
+            }
         }
         let mut end = col;
         for (i, c) in line[col..].char_indices() {
-            if c.is_whitespace() { end = col + i + c.len_utf8(); } else { break; }
+            if c.is_whitespace() {
+                end = col + i + c.len_utf8();
+            } else {
+                break;
+            }
         }
         Some((start, end))
     }
@@ -1819,8 +1915,18 @@ struct LineAnchor {
 }
 
 /// Append one line's slice onto `text`, recording its `LineAnchor`.
-fn push_line(text: &mut String, anchors: &mut Vec<LineAnchor>, line: usize, slice: &str, col_base: usize) {
-    anchors.push(LineAnchor { text_start: text.len(), line, col_base });
+fn push_line(
+    text: &mut String,
+    anchors: &mut Vec<LineAnchor>,
+    line: usize,
+    slice: &str,
+    col_base: usize,
+) {
+    anchors.push(LineAnchor {
+        text_start: text.len(),
+        line,
+        col_base,
+    });
     text.push_str(slice);
 }
 
@@ -1828,23 +1934,45 @@ fn push_line(text: &mut String, anchors: &mut Vec<LineAnchor>, line: usize, slic
 /// possibly multi-line, lines joined by `\n`) plus one `LineAnchor` per
 /// included line, for translating regex byte-range matches (`SelectRegex`/
 /// `SplitSelection`) back into buffer positions via `pos_at`.
-fn selection_text_and_anchors<B: Buffer>(buf: &B, start: Pos, end: Pos) -> (String, Vec<LineAnchor>) {
+fn selection_text_and_anchors<B: Buffer>(
+    buf: &B,
+    start: Pos,
+    end: Pos,
+) -> (String, Vec<LineAnchor>) {
     let mut text = String::new();
     let mut anchors = Vec::new();
 
     if start.line == end.line {
         let line = buf.line(start.line);
-        push_line(&mut text, &mut anchors, start.line, &line[start.col..end.col], start.col);
+        push_line(
+            &mut text,
+            &mut anchors,
+            start.line,
+            &line[start.col..end.col],
+            start.col,
+        );
     } else {
         let first = buf.line(start.line);
-        push_line(&mut text, &mut anchors, start.line, &first[start.col..], start.col);
+        push_line(
+            &mut text,
+            &mut anchors,
+            start.line,
+            &first[start.col..],
+            start.col,
+        );
         text.push('\n');
         for l in start.line + 1..end.line {
             let s = buf.line(l).to_string();
             push_line(&mut text, &mut anchors, l, &s, 0);
             text.push('\n');
         }
-        push_line(&mut text, &mut anchors, end.line, &buf.line(end.line)[..end.col], 0);
+        push_line(
+            &mut text,
+            &mut anchors,
+            end.line,
+            &buf.line(end.line)[..end.col],
+            0,
+        );
     }
     (text, anchors)
 }
@@ -1853,7 +1981,10 @@ fn selection_text_and_anchors<B: Buffer>(buf: &B, start: Pos, end: Pos) -> (Stri
 /// back to its buffer `Pos` — the anchor for the line it falls in, plus the
 /// offset from that line's start (a `\n` join byte resolves to end-of-line).
 fn pos_at(anchors: &[LineAnchor], offset: usize) -> Pos {
-    let a = anchors.iter().rev().find(|a| a.text_start <= offset)
+    let a = anchors
+        .iter()
+        .rev()
+        .find(|a| a.text_start <= offset)
         .expect("anchors always start at text offset 0");
     Pos::new(a.line, a.col_base + (offset - a.text_start))
 }
@@ -1902,8 +2033,17 @@ fn apply_regex_select<B: Buffer>(
     let Some((&(first_open, first_close), rest)) = ranges.split_first() else {
         return state;
     };
-    state.selection = Selection { anchor: first_open, cursor: first_close };
-    state.extra_selections = rest.iter().map(|&(a, c)| Selection { anchor: a, cursor: c }).collect();
+    state.selection = Selection {
+        anchor: first_open,
+        cursor: first_close,
+    };
+    state.extra_selections = rest
+        .iter()
+        .map(|&(a, c)| Selection {
+            anchor: a,
+            cursor: c,
+        })
+        .collect();
     state.mode = Mode::Visual(VisualKind::Char);
     state
 }
@@ -1975,11 +2115,17 @@ fn obj_surround<B: Buffer>(
         } else {
             (open_line + 1, 0)
         };
-        Some((Pos::new(start_line, start_col), Pos::new(close_line, close_col)))
+        Some((
+            Pos::new(start_line, start_col),
+            Pos::new(close_line, close_col),
+        ))
     } else {
         // Include both delimiters.
         let after_close = close_col + close.len_utf8();
-        Some((Pos::new(open_line, open_col), Pos::new(close_line, after_close)))
+        Some((
+            Pos::new(open_line, open_col),
+            Pos::new(close_line, after_close),
+        ))
     }
 }
 
@@ -2189,7 +2335,10 @@ mod tests {
         // survives unless it's cleared first).
         let mut b = buf("foo\nbar\nbaz");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(2, 1) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 1),
+            cursor: Pos::new(2, 1),
+        };
         let (s2, _) = apply(DeleteSelection, s, &mut b);
         assert_eq!(b.line_count(), 1);
         assert_eq!(b.line(0), "faz");
@@ -2278,7 +2427,10 @@ mod tests {
     fn motion_extends_selection_in_visual_mode() {
         let mut b = buf("hello");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 0) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 0),
+        };
         let (s2, _) = apply(MoveRight, s, &mut b);
         // Anchor stays, cursor moves.
         assert_eq!(s2.selection.anchor, Pos::new(0, 0));
@@ -2290,7 +2442,10 @@ mod tests {
     fn motion_collapses_selection_in_normal_mode() {
         let mut b = buf("hello");
         let mut s = normal_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 0) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 0),
+        };
         let (s2, _) = apply(MoveRight, s, &mut b);
         assert_eq!(s2.selection.anchor, Pos::new(0, 1));
         assert_eq!(s2.selection.cursor, Pos::new(0, 1));
@@ -2300,7 +2455,10 @@ mod tests {
     fn escape_from_visual_saves_last_selection() {
         let mut b = buf("hello");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(0, 3) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 1),
+            cursor: Pos::new(0, 3),
+        };
         let (s2, _) = apply(EnterNormal, s, &mut b);
         assert_eq!(s2.mode, Mode::Normal);
         assert!(s2.last_visual_selection.is_some());
@@ -2313,7 +2471,10 @@ mod tests {
     fn reselect_last_visual() {
         let mut b = buf("hello");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 1), cursor: Pos::new(0, 4) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 1),
+            cursor: Pos::new(0, 4),
+        };
         let (s2, _) = apply(EnterNormal, s, &mut b); // saves last visual
         let (s3, _) = apply(ReselectLastVisual, s2, &mut b);
         assert_eq!(s3.mode, Mode::Visual(VisualKind::Char));
@@ -2325,7 +2486,10 @@ mod tests {
     fn indent_lines_adds_two_spaces() {
         let mut b = buf("aaa\nbbb\nccc");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(1, 2) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(1, 2),
+        };
         let (_, effect) = apply(IndentLines, s, &mut b);
         assert_eq!(b.line(0), "  aaa");
         assert_eq!(b.line(1), "  bbb");
@@ -2337,7 +2501,10 @@ mod tests {
     fn dedent_lines_removes_two_spaces() {
         let mut b = buf("  aaa\n  bbb");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(1, 0) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(1, 0),
+        };
         let (_, _) = apply(DedentLines, s, &mut b);
         assert_eq!(b.line(0), "aaa");
         assert_eq!(b.line(1), "bbb");
@@ -2347,7 +2514,10 @@ mod tests {
     fn change_selection_enters_insert() {
         let mut b = buf("hello world");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 5) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 5),
+        };
         let (s2, _) = apply(ChangeSelection, s, &mut b);
         assert_eq!(s2.mode, Mode::Insert);
     }
@@ -2455,7 +2625,10 @@ mod tests {
 
     #[test]
     fn scroll_half_down_moves_cursor_20_lines() {
-        let text = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut b = InMemoryBuffer::from_text(&text);
         let s = normal_state();
         let (s2, _) = apply(ScrollHalfDown, s, &mut b);
@@ -2464,7 +2637,10 @@ mod tests {
 
     #[test]
     fn scroll_half_up_moves_cursor_20_lines() {
-        let text = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut b = InMemoryBuffer::from_text(&text);
         let mut s = normal_state();
         s.move_cursor_to(Pos::new(30, 0));
@@ -2527,9 +2703,9 @@ mod tests {
         let (s2, _) = apply(TrimSelection, s, &mut b);
         // Should trim to col 2 (start of "hello") and col 7 (end of "hello")
         let sel_start = s2.selection.start();
-        let sel_end   = s2.selection.end();
+        let sel_end = s2.selection.end();
         assert_eq!(sel_start, Pos::new(0, 2));
-        assert_eq!(sel_end,   Pos::new(0, 7));
+        assert_eq!(sel_end, Pos::new(0, 7));
         assert_eq!(s2.mode, Mode::Visual(VisualKind::Char));
     }
 
@@ -2543,14 +2719,17 @@ mod tests {
         };
         let (s2, _) = apply(TrimSelection, s, &mut b);
         assert_eq!(s2.selection.start(), Pos::new(0, 0));
-        assert_eq!(s2.selection.end(),   Pos::new(0, 5));
+        assert_eq!(s2.selection.end(), Pos::new(0, 5));
     }
 
     // ── Text object tests ──────────────────────────────────────────────────────
 
-    fn select_obj(text: &str, col: usize, inner: bool, kind: TextObjectKind)
-        -> Option<(usize, usize)>
-    {
+    fn select_obj(
+        text: &str,
+        col: usize,
+        inner: bool,
+        kind: TextObjectKind,
+    ) -> Option<(usize, usize)> {
         let mut b = buf(text);
         let mut s = normal_state();
         s.move_cursor_to(Pos::new(0, col));
@@ -2565,59 +2744,89 @@ mod tests {
     #[test]
     fn obj_inner_word_from_middle() {
         // "hello world" — cursor on 'l' at col 2
-        assert_eq!(select_obj("hello world", 2, true, TextObjectKind::Word), Some((0, 5)));
+        assert_eq!(
+            select_obj("hello world", 2, true, TextObjectKind::Word),
+            Some((0, 5))
+        );
     }
 
     #[test]
     fn obj_around_word_adds_trailing_space() {
         // "hello world" — cursor on 'h' (col 0), around = word + space
-        assert_eq!(select_obj("hello world", 0, false, TextObjectKind::Word), Some((0, 6)));
+        assert_eq!(
+            select_obj("hello world", 0, false, TextObjectKind::Word),
+            Some((0, 6))
+        );
     }
 
     #[test]
     fn obj_inner_word_whitespace_cursor() {
         // "foo  bar" — cursor on first space (col 3), inner = whitespace run
-        assert_eq!(select_obj("foo  bar", 3, true, TextObjectKind::Word), Some((3, 5)));
+        assert_eq!(
+            select_obj("foo  bar", 3, true, TextObjectKind::Word),
+            Some((3, 5))
+        );
     }
 
     #[test]
     fn obj_inner_paren() {
         // "(hello)" — cursor on 'e' (col 2), inner = "hello" (cols 1-5 exclusive)
-        assert_eq!(select_obj("(hello)", 2, true, TextObjectKind::Paren), Some((1, 6)));
+        assert_eq!(
+            select_obj("(hello)", 2, true, TextObjectKind::Paren),
+            Some((1, 6))
+        );
     }
 
     #[test]
     fn obj_around_paren() {
         // "(hello)" — around = whole string "(hello)" 0-7 exclusive
-        assert_eq!(select_obj("(hello)", 2, false, TextObjectKind::Paren), Some((0, 7)));
+        assert_eq!(
+            select_obj("(hello)", 2, false, TextObjectKind::Paren),
+            Some((0, 7))
+        );
     }
 
     #[test]
     fn obj_inner_double_quote() {
         // `say "hi" now` — cursor inside quotes (col 5)
-        assert_eq!(select_obj("say \"hi\" now", 5, true, TextObjectKind::DoubleQuote), Some((5, 7)));
+        assert_eq!(
+            select_obj("say \"hi\" now", 5, true, TextObjectKind::DoubleQuote),
+            Some((5, 7))
+        );
     }
 
     #[test]
     fn obj_around_double_quote() {
-        assert_eq!(select_obj("say \"hi\" now", 5, false, TextObjectKind::DoubleQuote), Some((4, 8)));
+        assert_eq!(
+            select_obj("say \"hi\" now", 5, false, TextObjectKind::DoubleQuote),
+            Some((4, 8))
+        );
     }
 
     #[test]
     fn obj_inner_inline_math() {
         // "$x + 1$" — cursor inside (col 2), inner = "x + 1" (cols 1-6 exclusive)
-        assert_eq!(select_obj("$x + 1$", 2, true, TextObjectKind::InlineMath), Some((1, 6)));
+        assert_eq!(
+            select_obj("$x + 1$", 2, true, TextObjectKind::InlineMath),
+            Some((1, 6))
+        );
     }
 
     #[test]
     fn obj_around_inline_math() {
-        assert_eq!(select_obj("$x + 1$", 2, false, TextObjectKind::InlineMath), Some((0, 7)));
+        assert_eq!(
+            select_obj("$x + 1$", 2, false, TextObjectKind::InlineMath),
+            Some((0, 7))
+        );
     }
 
     #[test]
     fn obj_inner_brace_nested() {
         // "{a{b}c}" — cursor on 'a' (col 1), inner = "a{b}c" cols 1-6
-        assert_eq!(select_obj("{a{b}c}", 1, true, TextObjectKind::Brace), Some((1, 6)));
+        assert_eq!(
+            select_obj("{a{b}c}", 1, true, TextObjectKind::Brace),
+            Some((1, 6))
+        );
     }
 
     #[test]
@@ -2625,7 +2834,14 @@ mod tests {
         let mut b = buf("hello world");
         let mut s = normal_state();
         s.move_cursor_to(Pos::new(0, 2));
-        let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::Word }, s, &mut b);
+        let (s2, _) = apply(
+            SelectObject {
+                inner: true,
+                kind: TextObjectKind::Word,
+            },
+            s,
+            &mut b,
+        );
         assert!(matches!(s2.mode, Mode::Visual(VisualKind::Char)));
     }
 
@@ -2655,7 +2871,12 @@ mod tests {
 
     /// Select "foo", "bar", "baz" as a Visual selection, then run `SelectRegex`
     /// or `SplitSelection`, returning the resulting ranges as `(line, col)` pairs.
-    fn regex_select_ranges(text: &str, sel: (usize, usize, usize, usize), pattern: &str, split: bool) -> Vec<((usize, usize), (usize, usize))> {
+    fn regex_select_ranges(
+        text: &str,
+        sel: (usize, usize, usize, usize),
+        pattern: &str,
+        split: bool,
+    ) -> Vec<((usize, usize), (usize, usize))> {
         let mut b = buf(text);
         let mut s = visual_char_state();
         s.selection = Selection {
@@ -2670,7 +2891,12 @@ mod tests {
         let (s2, _) = apply(cmd, s, &mut b);
         std::iter::once(s2.selection)
             .chain(s2.extra_selections.iter().copied())
-            .map(|sel| ((sel.start().line, sel.start().col), (sel.end().line, sel.end().col)))
+            .map(|sel| {
+                (
+                    (sel.start().line, sel.start().col),
+                    (sel.end().line, sel.end().col),
+                )
+            })
             .collect()
     }
 
@@ -2678,39 +2904,49 @@ mod tests {
     fn select_regex_finds_each_match_in_selection() {
         // "foo bar foo baz foo" selected in full — 3 matches of "foo".
         let ranges = regex_select_ranges("foo bar foo baz foo", (0, 0, 0, 19), "foo", false);
-        assert_eq!(ranges, vec![
-            ((0, 0), (0, 3)),
-            ((0, 8), (0, 11)),
-            ((0, 16), (0, 19)),
-        ]);
+        assert_eq!(
+            ranges,
+            vec![((0, 0), (0, 3)), ((0, 8), (0, 11)), ((0, 16), (0, 19)),]
+        );
     }
 
     #[test]
     fn select_regex_supports_real_regex_syntax() {
         // Word-boundary digit runs: "a1 b22 c333".
         let ranges = regex_select_ranges("a1 b22 c333", (0, 0, 0, 11), r"\d+", false);
-        assert_eq!(ranges, vec![
-            ((0, 1), (0, 2)),
-            ((0, 4), (0, 6)),
-            ((0, 8), (0, 11)),
-        ]);
+        assert_eq!(
+            ranges,
+            vec![((0, 1), (0, 2)), ((0, 4), (0, 6)), ((0, 8), (0, 11)),]
+        );
     }
 
     #[test]
     fn select_regex_invalid_pattern_is_noop() {
         let mut b = buf("foo bar");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 7),
+        };
         let (s2, _) = apply(EditorCommand::SelectRegex("(".to_string()), s, &mut b);
         assert!(s2.extra_selections.is_empty());
-        assert_eq!(s2.selection, Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) });
+        assert_eq!(
+            s2.selection,
+            Selection {
+                anchor: Pos::new(0, 0),
+                cursor: Pos::new(0, 7)
+            }
+        );
     }
 
     #[test]
     fn select_regex_no_match_is_noop() {
         let mut b = buf("foo bar");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 7) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 7),
+        };
         let (s2, _) = apply(EditorCommand::SelectRegex("zzz".to_string()), s, &mut b);
         assert!(s2.extra_selections.is_empty());
     }
@@ -2719,11 +2955,10 @@ mod tests {
     fn split_selection_keeps_segments_between_matches() {
         // "a,b,c" split on "," — segments "a", "b", "c".
         let ranges = regex_select_ranges("a,b,c", (0, 0, 0, 5), ",", true);
-        assert_eq!(ranges, vec![
-            ((0, 0), (0, 1)),
-            ((0, 2), (0, 3)),
-            ((0, 4), (0, 5)),
-        ]);
+        assert_eq!(
+            ranges,
+            vec![((0, 0), (0, 1)), ((0, 2), (0, 3)), ((0, 4), (0, 5)),]
+        );
     }
 
     #[test]
@@ -2739,10 +2974,19 @@ mod tests {
         // and the survivors collapse into extra_cursors for a following Insert.
         let mut b = buf("foo bar foo baz foo");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 3) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 3),
+        };
         s.extra_selections = vec![
-            Selection { anchor: Pos::new(0, 8), cursor: Pos::new(0, 11) },
-            Selection { anchor: Pos::new(0, 16), cursor: Pos::new(0, 19) },
+            Selection {
+                anchor: Pos::new(0, 8),
+                cursor: Pos::new(0, 11),
+            },
+            Selection {
+                anchor: Pos::new(0, 16),
+                cursor: Pos::new(0, 19),
+            },
         ];
         let (s2, effect) = apply(EditorCommand::DeleteSelection, s, &mut b);
         assert_eq!(b.line(0), " bar  baz ");
@@ -2766,11 +3010,23 @@ mod tests {
         let mut b = buf("11 x 2222 y 333 z 4");
         let mut s = visual_char_state();
         // Ranges: "11" [0,2), "2222" [5,9), "333" [12,15), "4" [18,19).
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 2) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 2),
+        };
         s.extra_selections = vec![
-            Selection { anchor: Pos::new(0, 5), cursor: Pos::new(0, 9) },
-            Selection { anchor: Pos::new(0, 12), cursor: Pos::new(0, 15) },
-            Selection { anchor: Pos::new(0, 18), cursor: Pos::new(0, 19) },
+            Selection {
+                anchor: Pos::new(0, 5),
+                cursor: Pos::new(0, 9),
+            },
+            Selection {
+                anchor: Pos::new(0, 12),
+                cursor: Pos::new(0, 15),
+            },
+            Selection {
+                anchor: Pos::new(0, 18),
+                cursor: Pos::new(0, 19),
+            },
         ];
         let (s2, _) = apply(EditorCommand::DeleteSelection, s, &mut b);
         let expected = " x  y  z ";
@@ -2778,12 +3034,15 @@ mod tests {
 
         let mut cursors = vec![s2.cursor()];
         cursors.extend(s2.extra_cursors.iter().copied());
-        assert_eq!(cursors, vec![
-            Pos::new(0, 0),
-            Pos::new(0, 3),
-            Pos::new(0, 6),
-            Pos::new(0, 9),
-        ]);
+        assert_eq!(
+            cursors,
+            vec![
+                Pos::new(0, 0),
+                Pos::new(0, 3),
+                Pos::new(0, 6),
+                Pos::new(0, 9),
+            ]
+        );
     }
 
     // ── Find-char tests ────────────────────────────────────────────────────────
@@ -2855,7 +3114,10 @@ mod tests {
     fn switch_case_visual_toggles_selection() {
         let mut b = buf("Hello World");
         let mut s = visual_char_state();
-        s.selection = Selection { anchor: Pos::new(0, 0), cursor: Pos::new(0, 5) };
+        s.selection = Selection {
+            anchor: Pos::new(0, 0),
+            cursor: Pos::new(0, 5),
+        };
         let (_, _) = apply(SwitchCase, s, &mut b);
         assert_eq!(&b.line(0)[..5], "hELLO");
     }
@@ -2877,7 +3139,14 @@ mod tests {
         // No quotes on the line — mode should stay Normal.
         let mut b = buf("hello world");
         let mut s = normal_state();
-        let (s2, _) = apply(SelectObject { inner: true, kind: TextObjectKind::DoubleQuote }, s, &mut b);
+        let (s2, _) = apply(
+            SelectObject {
+                inner: true,
+                kind: TextObjectKind::DoubleQuote,
+            },
+            s,
+            &mut b,
+        );
         assert_eq!(s2.mode, Mode::Normal);
     }
 

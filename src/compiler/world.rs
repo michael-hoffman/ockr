@@ -23,7 +23,6 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt, World};
 
-
 /// The in-memory World presented to the typst compiler.
 ///
 /// This struct is `Send + Sync` and can be moved to the compiler background
@@ -91,8 +90,8 @@ impl OckrWorld {
     /// Update the vault root (called when the user opens a vault).
     pub fn set_vault_root(&mut self, root: PathBuf) {
         self.vault_root = Some(root);
-        self.file_cache.lock().unwrap().clear();
-        self.source_cache.lock().unwrap().clear();
+        self.file_cache.lock().expect("mutex poisoned").clear();
+        self.source_cache.lock().expect("mutex poisoned").clear();
     }
 
     /// Remove a single entry from the source import cache.
@@ -100,7 +99,10 @@ impl OckrWorld {
     /// Called before each compilation for any file that was saved to disk since
     /// the last compile, so the compiler re-reads the updated content.
     pub fn invalidate_source(&mut self, path: &Path) {
-        self.source_cache.lock().unwrap().remove(path);
+        self.source_cache
+            .lock()
+            .expect("mutex poisoned")
+            .remove(path);
     }
 
     /// Update the plugin packages map (swapped each compile request).
@@ -122,7 +124,7 @@ impl OckrWorld {
         let vpath = format!("/{}", vault_rel_path.trim_start_matches('/'));
         let new_id = FileId::new(None, VirtualPath::new(&vpath));
 
-        let mut src = self.source.lock().unwrap();
+        let mut src = self.source.lock().expect("mutex poisoned");
         if new_id == self.main_id {
             // Same file — incremental replace preserves the parse cache.
             src.replace(&text);
@@ -149,14 +151,14 @@ impl World for OckrWorld {
 
     fn source(&self, id: FileId) -> FileResult<Source> {
         if id == self.main_id {
-            return Ok(self.source.lock().unwrap().clone());
+            return Ok(self.source.lock().expect("mutex poisoned").clone());
         }
 
         // Check for `@plugin/<name>/...` packages contributed by plugins.
         if let Some(pkg) = id.package() {
             if pkg.namespace.as_str() == "plugin" {
                 if let Some(ref pkgs) = self.plugin_packages {
-                    let guard = pkgs.read().unwrap();
+                    let guard = pkgs.read().expect("rwlock poisoned");
                     let key = format!(
                         "@plugin/{}/{}",
                         pkg.name,
@@ -173,25 +175,41 @@ impl World for OckrWorld {
         }
 
         // For imported files, read from disk relative to the vault root.
-        let path = resolve_vault_path(&self.vault_root, id)?;
-        if let Some(cached) = self.source_cache.lock().unwrap().get(&path).cloned() {
+        let path = resolve_vault_path(self.vault_root.as_deref(), id)?;
+        if let Some(cached) = self
+            .source_cache
+            .lock()
+            .expect("mutex poisoned")
+            .get(&path)
+            .cloned()
+        {
             return Ok(Source::new(id, cached));
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| file_io_error(e, &path))?;
-        self.source_cache.lock().unwrap().insert(path, text.clone());
+        let text = std::fs::read_to_string(&path).map_err(|e| file_io_error(e, &path))?;
+        self.source_cache
+            .lock()
+            .expect("mutex poisoned")
+            .insert(path, text.clone());
         Ok(Source::new(id, text))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        let path = resolve_vault_path(&self.vault_root, id)?;
-        if let Some(cached) = self.file_cache.lock().unwrap().get(&path).cloned() {
+        let path = resolve_vault_path(self.vault_root.as_deref(), id)?;
+        if let Some(cached) = self
+            .file_cache
+            .lock()
+            .expect("mutex poisoned")
+            .get(&path)
+            .cloned()
+        {
             return Ok(cached);
         }
-        let data = std::fs::read(&path)
-            .map_err(|e| file_io_error(e, &path))?;
+        let data = std::fs::read(&path).map_err(|e| file_io_error(e, &path))?;
         let bytes = Bytes::new(data);
-        self.file_cache.lock().unwrap().insert(path, bytes.clone());
+        self.file_cache
+            .lock()
+            .expect("mutex poisoned")
+            .insert(path, bytes.clone());
         Ok(bytes)
     }
 
@@ -203,8 +221,7 @@ impl World for OckrWorld {
         // Use the `time` crate to get the current local or UTC date.
         let now = if offset.is_none() {
             // Local time — may fail on some platforms; fall back to UTC.
-            time::OffsetDateTime::now_local()
-                .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         } else {
             let offset_hours = offset.unwrap_or(0);
             let tz_offset =
@@ -246,13 +263,9 @@ fn load_bundled_fonts() -> (Vec<Font>, FontBook) {
 }
 
 /// Resolve a `FileId` to a real path on disk using the vault root.
-fn resolve_vault_path(
-    vault_root: &Option<PathBuf>,
-    id: FileId,
-) -> FileResult<PathBuf> {
-    let root = vault_root.as_deref().ok_or_else(|| {
-        FileError::NotFound(Path::new("<no vault>").to_path_buf())
-    })?;
+fn resolve_vault_path(vault_root: Option<&Path>, id: FileId) -> FileResult<PathBuf> {
+    let root =
+        vault_root.ok_or_else(|| FileError::NotFound(Path::new("<no vault>").to_path_buf()))?;
     // The virtual path always starts with '/', strip it.
     let rel = id.vpath().as_rootless_path();
     Ok(root.join(rel))

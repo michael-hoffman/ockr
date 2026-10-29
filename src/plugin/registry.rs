@@ -77,7 +77,8 @@ impl PluginRegistry {
 
     /// Record that a plugin failed to load or panicked at runtime.
     pub fn mark_failed(&mut self, plugin_id: &str, reason: String) {
-        self.plugin_statuses.insert(plugin_id.to_string(), PluginStatus::Failed(reason));
+        self.plugin_statuses
+            .insert(plugin_id.to_string(), PluginStatus::Failed(reason));
     }
 
     /// Remove all tracking data for a set of plugin IDs (called on vault switch).

@@ -29,8 +29,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Bounds, ClipboardItem, Context, Corners, EventEmitter, MouseButton, MouseDownEvent, Pixels,
-    Render, RenderImage, Window, canvas, div, prelude::*, px,
+    canvas, div, prelude::*, px, Bounds, ClipboardItem, Context, Corners, EventEmitter,
+    MouseButton, MouseDownEvent, Pixels, Render, RenderImage, Window,
 };
 
 use crate::compiler::{Diagnostic, DiagnosticSeverity};
@@ -137,11 +137,14 @@ impl PreviewPane {
     /// Convenience wrapper for a single plain error string (panics, etc.).
     pub fn set_error(&mut self, msg: String, cx: &mut Context<Self>) {
         self.set_diagnostics(
-            vec![Diagnostic { severity: DiagnosticSeverity::Error, message: msg, line: None }],
+            vec![Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: msg,
+                line: None,
+            }],
             cx,
         );
     }
-
 
     // ── Click handling ────────────────────────────────────────────────────────
 
@@ -153,9 +156,15 @@ impl PreviewPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(bounds) = self.preview_bounds.get() else { return };
-        let Some((iw, ih)) = self.image_px else { return };
-        if self.link_regions.is_empty() { return; }
+        let Some(bounds) = self.preview_bounds.get() else {
+            return;
+        };
+        let Some((iw, ih)) = self.image_px else {
+            return;
+        };
+        if self.link_regions.is_empty() {
+            return;
+        }
 
         // GPUI reports positions in *logical* pixels; the display scale factor
         // converts between logical and physical pixels.
@@ -163,8 +172,8 @@ impl PreviewPane {
 
         let cont_x0 = f32::from(bounds.origin.x);
         let cont_y0 = f32::from(bounds.origin.y);
-        let cont_w  = f32::from(bounds.size.width);
-        let cont_h  = f32::from(bounds.size.height);
+        let cont_w = f32::from(bounds.size.width);
+        let cont_h = f32::from(bounds.size.height);
 
         // Container-relative click position (logical px).
         let rel_x = f32::from(win_pos.x) - cont_x0;
@@ -185,7 +194,8 @@ impl PreviewPane {
         let img_rel_y = rel_y - img_y0;
 
         // Reject clicks outside the image.
-        if img_rel_x < 0.0 || img_rel_y < 0.0
+        if img_rel_x < 0.0
+            || img_rel_y < 0.0
             || img_rel_x > log_iw * fit_scale
             || img_rel_y > log_ih * fit_scale
         {
@@ -223,7 +233,8 @@ impl Render for PreviewPane {
 
         // ── Diagnostics state ─────────────────────────────────────────────────
         if !self.diagnostics.is_empty() {
-            let all_text = self.diagnostics
+            let all_text = self
+                .diagnostics
                 .iter()
                 .map(|d| d.message.clone())
                 .collect::<Vec<_>>()
@@ -233,46 +244,58 @@ impl Render for PreviewPane {
             let text_subtle = t.text_subtle;
             let text = t.text;
 
-            let error_count = self.diagnostics.iter()
+            let error_count = self
+                .diagnostics
+                .iter()
                 .filter(|d| d.severity == DiagnosticSeverity::Error)
                 .count();
-            let warn_count = self.diagnostics.iter()
+            let warn_count = self
+                .diagnostics
+                .iter()
                 .filter(|d| d.severity == DiagnosticSeverity::Warning)
                 .count();
             let header_label = match (error_count, warn_count) {
                 (e, 0) => format!("{e} error{}", if e == 1 { "" } else { "s" }),
                 (0, w) => format!("{w} warning{}", if w == 1 { "" } else { "s" }),
-                (e, w) => format!("{e} error{}, {w} warning{}", if e == 1 { "" } else { "s" }, if w == 1 { "" } else { "s" }),
+                (e, w) => format!(
+                    "{e} error{}, {w} warning{}",
+                    if e == 1 { "" } else { "s" },
+                    if w == 1 { "" } else { "s" }
+                ),
             };
 
-            let diag_rows: Vec<_> = self.diagnostics.iter().map(|d| {
-                let (badge_color, msg_color) = match d.severity {
-                    DiagnosticSeverity::Error   => (0xff5555u32, 0xffaaaau32),
-                    DiagnosticSeverity::Warning => (0xffcc55u32, 0xffe8aau32),
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(gpui::rgb(badge_color))
-                            .text_xs()
-                            .font_family("Menlo")
-                            .flex_shrink_0()
-                            .child(match d.severity {
-                                DiagnosticSeverity::Error   => "E",
-                                DiagnosticSeverity::Warning => "W",
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_color(gpui::rgb(msg_color))
-                            .text_xs()
-                            .font_family("Menlo")
-                            .child(d.message.clone()),
-                    )
-            }).collect();
+            let diag_rows: Vec<_> = self
+                .diagnostics
+                .iter()
+                .map(|d| {
+                    let (badge_color, msg_color) = match d.severity {
+                        DiagnosticSeverity::Error => (0xff5555u32, 0xffaaaau32),
+                        DiagnosticSeverity::Warning => (0xffcc55u32, 0xffe8aau32),
+                    };
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(badge_color))
+                                .text_xs()
+                                .font_family("Menlo")
+                                .flex_shrink_0()
+                                .child(match d.severity {
+                                    DiagnosticSeverity::Error => "E",
+                                    DiagnosticSeverity::Warning => "W",
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(msg_color))
+                                .text_xs()
+                                .font_family("Menlo")
+                                .child(d.message.clone()),
+                        )
+                })
+                .collect();
 
             let mut container = div()
                 .size_full()
@@ -366,13 +389,7 @@ impl Render for PreviewPane {
                         origin: gpui::point(px(ox), px(oy)),
                         size: gpui::size(px(disp_w), px(disp_h)),
                     };
-                    let _ = window.paint_image(
-                        img_bounds,
-                        Corners::default(),
-                        image,
-                        0,
-                        false,
-                    );
+                    let _ = window.paint_image(img_bounds, Corners::default(), image, 0, false);
                 },
             )
             .size_full();
@@ -416,12 +433,7 @@ impl Render for PreviewPane {
 /// top-left.  `GroupItem::transform` is intentionally ignored (identity is
 /// assumed) — typst generates pure-translation groups for normal body text,
 /// so this is correct for wikilink anchors in prose documents.
-fn extract_links(
-    frame: &typst::layout::Frame,
-    off_x: f32,
-    off_y: f32,
-    out: &mut Vec<LinkRegion>,
-) {
+fn extract_links(frame: &typst::layout::Frame, off_x: f32, off_y: f32, out: &mut Vec<LinkRegion>) {
     for (pt, item) in frame.items() {
         let x = off_x + pt.x.to_pt() as f32;
         let y = off_y + pt.y.to_pt() as f32;

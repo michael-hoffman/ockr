@@ -7,8 +7,8 @@
 //! Navigation: arrow keys / Ctrl-J / Ctrl-K; Enter jumps; Escape dismisses.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -42,7 +42,11 @@ pub fn parse_headings(text: &str) -> Vec<OutlineHeading> {
         if rest.starts_with(' ') {
             let title = rest.trim_start().to_string();
             if !title.is_empty() {
-                out.push(OutlineHeading { line: line_no, level, title });
+                out.push(OutlineHeading {
+                    line: line_no,
+                    level,
+                    title,
+                });
             }
         }
     }
@@ -77,12 +81,7 @@ impl OutlinePanel {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {

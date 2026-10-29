@@ -10,12 +10,19 @@ mod ui;
 mod undo_store;
 mod vault;
 
-use actions::*;
+use actions::{
+    BufferClose, BufferNext, BufferPrevious, ExportPdf, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, FollowLink, ForceQuit, LineNumbersAbsolute, LineNumbersOff,
+    LineNumbersRelative, NewNote, OpenBacklinks, OpenCommandPalette, OpenDailyNote, OpenFilePicker,
+    OpenGraphView, OpenOutline, OpenPluginManager, OpenQuickSwitch, OpenRecentFiles, OpenReplace,
+    OpenSearch, OpenSettings, OpenVault, OpenVaultSearch, Quit, ReloadFile, SaveFile,
+    SplitPaneHorizontal, SplitPaneVertical, TogglePreviewMode, ToggleSidebar, ToggleZenMode,
+};
 use command::{CommandEntry, CommandRegistry};
 use compiler::PreviewMode;
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction,
-    PathPromptOptions, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction,
+    PathPromptOptions, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
 };
 use ui::theme::ThemePalette;
 use vault::VaultState;
@@ -27,7 +34,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 {
         let vault_root = plugin::loader::detect_vault_root()
-            .unwrap_or_else(|| std::env::current_dir().unwrap());
+            .unwrap_or_else(|| std::env::current_dir().expect("current directory is accessible"));
         match args[1].as_str() {
             "install" => {
                 let url = match args.get(2) {
@@ -39,14 +46,20 @@ fn main() {
                 };
                 match plugin::loader::install_plugin(&vault_root, url) {
                     Ok(entry) => println!("Installed: {} v{}", entry.id, entry.version),
-                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 return;
             }
             "update" => {
                 match plugin::loader::update_plugins(&vault_root) {
                     Ok(()) => println!("Plugins updated."),
-                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 return;
             }
@@ -72,7 +85,10 @@ fn main() {
                 };
                 match plugin::loader::remove_plugin(&vault_root, id) {
                     Ok(()) => println!("Removed plugin '{}'.", id),
-                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
                 return;
             }
@@ -248,9 +264,7 @@ fn main() {
             },
             Menu {
                 name: "Plugins".into(),
-                items: vec![
-                    MenuItem::action("Plugin Manager", OpenPluginManager),
-                ],
+                items: vec![MenuItem::action("Plugin Manager", OpenPluginManager)],
             },
         ]);
 
@@ -351,7 +365,7 @@ fn main() {
                 entity
             },
         )
-        .unwrap();
+        .expect("failed to open main window");
 
         cx.activate(true);
     });
@@ -363,13 +377,12 @@ fn main() {
 /// This replaces it with the ockr `o|` icon at startup.
 #[cfg(target_os = "macos")]
 fn set_dock_icon() {
-    use objc2::AnyThread;
     use objc2::rc::Retained;
+    use objc2::AnyThread;
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::{MainThreadMarker, NSData};
 
-    const ICON_PNG: &[u8] =
-        include_bytes!("../assets/ockr.iconset/icon_512x512@2x.png");
+    const ICON_PNG: &[u8] = include_bytes!("../assets/ockr.iconset/icon_512x512@2x.png");
 
     unsafe {
         let mtm = MainThreadMarker::new_unchecked();
@@ -412,56 +425,100 @@ fn register_builtin_commands(registry: &mut CommandRegistry) {
     // short-form prefixes (e.g. typing "w" surfaces "write").
     let cmds: &[(&'static str, &'static str, Option<&'static str>)] = &[
         // ── Helix :commands ──────────────────────────────────────────────────
-        ("write",           "write  · save file",                   Some(":w")),
-        ("write-quit",      "write-quit  · save and quit",          Some(":wq")),
-        ("quit",            "quit  · close ockr",                   Some(":q")),
-        ("quit-force",      "quit!  · quit without saving",         Some(":q!")),
-        ("reload",          "reload  · discard changes, reload",    Some(":reload")),
-        ("open",            "open  · open vault / file",            Some(":o")),
-        ("new",             "new  · new note",                      Some(":new")),
-        ("buffer-next",     "buffer-next  · next open buffer",      Some(":bn")),
-        ("buffer-previous", "buffer-previous  · previous buffer",   Some(":bp")),
-        ("buffer-close",    "buffer-close  · close current buffer", Some(":bc")),
-        ("toggle-sidebar",  "toggle-sidebar",                       Some(":toggle-sidebar")),
-        ("toggle-zen-mode", "Zen Mode",                             Some("Ctrl-Cmd-Z")),
+        ("write", "write  · save file", Some(":w")),
+        ("write-quit", "write-quit  · save and quit", Some(":wq")),
+        ("quit", "quit  · close ockr", Some(":q")),
+        ("quit-force", "quit!  · quit without saving", Some(":q!")),
+        (
+            "reload",
+            "reload  · discard changes, reload",
+            Some(":reload"),
+        ),
+        ("open", "open  · open vault / file", Some(":o")),
+        ("new", "new  · new note", Some(":new")),
+        (
+            "buffer-next",
+            "buffer-next  · next open buffer",
+            Some(":bn"),
+        ),
+        (
+            "buffer-previous",
+            "buffer-previous  · previous buffer",
+            Some(":bp"),
+        ),
+        (
+            "buffer-close",
+            "buffer-close  · close current buffer",
+            Some(":bc"),
+        ),
+        ("toggle-sidebar", "toggle-sidebar", Some(":toggle-sidebar")),
+        ("toggle-zen-mode", "Zen Mode", Some("Ctrl-Cmd-Z")),
         // ── GUI commands (Cmd-* shortcuts) ───────────────────────────────────
-        ("open-command-palette", "Open Command Palette",            Some("Cmd-P / :")),
-        ("open-vault",           "Open Vault",                      Some("Cmd-O")),
-        ("new-note",             "New Note",                        Some("Cmd-N")),
-        ("save-file",            "Save File",                       Some("Cmd-S")),
-        ("open-quick-switch",    "Quick Switch",                    Some("Cmd-K")),
-        ("open-recent-files",    "Recent Files",                    Some("Cmd-Shift-R")),
-        ("open-backlinks",       "Open Backlinks",                  Some("Cmd-Shift-K")),
-        ("open-outline",         "Document Outline",                Some("Cmd-Shift-O")),
-        ("vault-search",         "Vault Search",                    Some("Cmd-Shift-F")),
-        ("open-search",          "Search",                          Some("Cmd-F")),
-        ("open-replace",         "Find & Replace",                  Some("Cmd-H")),
-        ("follow-link",          "Follow Link",                     Some("Cmd-Enter")),
-        ("open-daily-note",      "Open Daily Note",                 Some("Cmd-T")),
-        ("split-pane-vertical",  "Split Pane Vertical",             Some("Cmd-\\")),
-        ("split-pane-horizontal","Split Pane Horizontal",           Some("Cmd-Shift-\\")),
-        ("close-pane",           "Close Pane",                      Some("Cmd-W")),
-        ("focus-pane-left",      "Focus Pane Left",                 Some("Ctrl-H")),
-        ("focus-pane-right",     "Focus Pane Right",                Some("Ctrl-L")),
-        ("focus-pane-up",        "Focus Pane Up",                   Some("Ctrl-K")),
-        ("focus-pane-down",      "Focus Pane Down",                 Some("Ctrl-J")),
-        ("toggle-preview-mode",  "Toggle Preview Mode (HTML / PDF)", Some("Cmd-Opt-H")),
-        ("export-pdf",           "Export PDF",                       Some("Cmd-Shift-E")),
-        ("open-graph-view",      "Graph View",                       Some("Cmd-Shift-G")),
-        ("open-plugin-manager",  "Plugin Manager",                   None),
+        (
+            "open-command-palette",
+            "Open Command Palette",
+            Some("Cmd-P / :"),
+        ),
+        ("open-vault", "Open Vault", Some("Cmd-O")),
+        ("new-note", "New Note", Some("Cmd-N")),
+        ("save-file", "Save File", Some("Cmd-S")),
+        ("open-quick-switch", "Quick Switch", Some("Cmd-K")),
+        ("open-recent-files", "Recent Files", Some("Cmd-Shift-R")),
+        ("open-backlinks", "Open Backlinks", Some("Cmd-Shift-K")),
+        ("open-outline", "Document Outline", Some("Cmd-Shift-O")),
+        ("vault-search", "Vault Search", Some("Cmd-Shift-F")),
+        ("open-search", "Search", Some("Cmd-F")),
+        ("open-replace", "Find & Replace", Some("Cmd-H")),
+        ("follow-link", "Follow Link", Some("Cmd-Enter")),
+        ("open-daily-note", "Open Daily Note", Some("Cmd-T")),
+        ("split-pane-vertical", "Split Pane Vertical", Some("Cmd-\\")),
+        (
+            "split-pane-horizontal",
+            "Split Pane Horizontal",
+            Some("Cmd-Shift-\\"),
+        ),
+        ("close-pane", "Close Pane", Some("Cmd-W")),
+        ("focus-pane-left", "Focus Pane Left", Some("Ctrl-H")),
+        ("focus-pane-right", "Focus Pane Right", Some("Ctrl-L")),
+        ("focus-pane-up", "Focus Pane Up", Some("Ctrl-K")),
+        ("focus-pane-down", "Focus Pane Down", Some("Ctrl-J")),
+        (
+            "toggle-preview-mode",
+            "Toggle Preview Mode (HTML / PDF)",
+            Some("Cmd-Opt-H"),
+        ),
+        ("export-pdf", "Export PDF", Some("Cmd-Shift-E")),
+        ("open-graph-view", "Graph View", Some("Cmd-Shift-G")),
+        ("open-plugin-manager", "Plugin Manager", None),
         // Editor display
-        ("line-numbers-relative", "Line Numbers: Relative",          Some(":set nu rel")),
-        ("line-numbers-absolute", "Line Numbers: Absolute",          Some(":set nu abs")),
-        ("line-numbers-off",      "Line Numbers: Off",               Some(":set nonu")),
+        (
+            "line-numbers-relative",
+            "Line Numbers: Relative",
+            Some(":set nu rel"),
+        ),
+        (
+            "line-numbers-absolute",
+            "Line Numbers: Absolute",
+            Some(":set nu abs"),
+        ),
+        ("line-numbers-off", "Line Numbers: Off", Some(":set nonu")),
         // Settings
-        ("reload-settings",       "Reload Settings",                  None),
-        ("settings",              "Settings…",                        Some("Cmd-,")),
-        ("switch-keyboard-mode",  "Switch Keyboard Mode",             None),
-        ("switch-theme",          "Switch Theme",                     None),
-        ("toggle-typewriter-mode", "Toggle Typewriter Mode",           None),
-        ("open-file-picker",      "Open File…  · fuzzy path search",  Some("^P")),
-        ("noh",                   "noh  · clear search highlights",   Some(":noh")),
-        ("nohlsearch",            "nohlsearch  · clear search highlights", Some(":nohlsearch")),
+        ("reload-settings", "Reload Settings", None),
+        ("settings", "Settings…", Some("Cmd-,")),
+        ("switch-keyboard-mode", "Switch Keyboard Mode", None),
+        ("switch-theme", "Switch Theme", None),
+        ("toggle-typewriter-mode", "Toggle Typewriter Mode", None),
+        (
+            "open-file-picker",
+            "Open File…  · fuzzy path search",
+            Some("^P"),
+        ),
+        ("noh", "noh  · clear search highlights", Some(":noh")),
+        (
+            "nohlsearch",
+            "nohlsearch  · clear search highlights",
+            Some(":nohlsearch"),
+        ),
     ];
     for &(id, name, hint) in cmds {
         registry.register(CommandEntry::new(id, name, hint));

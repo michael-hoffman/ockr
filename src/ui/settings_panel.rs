@@ -7,8 +7,8 @@
 //! `save_global_setting`, so this view stays stateless.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, Render, Window, div,
-    prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    Render, Window,
 };
 
 use crate::settings::Settings;
@@ -42,7 +42,9 @@ pub struct SettingsPanel {
 
 impl SettingsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle() }
+        Self {
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -66,14 +68,26 @@ impl Render for SettingsPanel {
         let s = cx.global::<Settings>().clone();
 
         // Current display value per row.
-        let kbd = if s.keyboard_mode == "standard" { "Standard" } else { "Helix" };
-        let theme = if s.theme == "ochre" { "Ochre (light)" } else { "Oxide (dark)" };
+        let kbd = if s.keyboard_mode == "standard" {
+            "Standard"
+        } else {
+            "Helix"
+        };
+        let theme = if s.theme == "ochre" {
+            "Ochre (light)"
+        } else {
+            "Oxide (dark)"
+        };
         let lines = match s.line_number_mode.as_str() {
             "absolute" => "Absolute",
             "off" => "Off",
             _ => "Relative",
         };
-        let preview = if s.preview_mode == "paged" { "Paged / PDF" } else { "HTML" };
+        let preview = if s.preview_mode == "paged" {
+            "Paged / PDF"
+        } else {
+            "HTML"
+        };
 
         let rows = [
             (SettingKey::Keyboard, "Keyboard mode", kbd),

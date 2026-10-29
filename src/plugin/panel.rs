@@ -26,8 +26,10 @@ pub struct PluginLayout {
 
 #[derive(Debug, Clone)]
 pub struct RegisteredPanel {
-    #[allow(dead_code)] pub plugin_id: String,
-    #[allow(dead_code)] pub panel_id: String,
+    #[allow(dead_code)]
+    pub plugin_id: String,
+    #[allow(dead_code)]
+    pub panel_id: String,
     pub title: String,
     pub position: PanelPosition,
     pub layout: PluginLayout,

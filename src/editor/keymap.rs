@@ -75,10 +75,7 @@ pub enum KeymapResult {
     /// Operator + doubled key → linewise (e.g. `dd`, `yy`).
     OperatorLinewise(OperatorKind),
     /// Wrap the Visual selection in delimiters.
-    Surround {
-        open: String,
-        close: &'static str,
-    },
+    Surround { open: String, close: &'static str },
     /// Open the regex-pattern prompt for select-regex (`s`) / split-selection
     /// (`S`) within the current Visual selection. `split` distinguishes them.
     OpenRegexPrompt { split: bool },

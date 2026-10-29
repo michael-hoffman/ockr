@@ -125,7 +125,10 @@ impl CompilerHandle {
     /// Mark a vault file as saved so the compiler re-reads it on the next
     /// compilation instead of serving the stale cached version.
     pub fn invalidate_import(&self, path: PathBuf) {
-        self.pending_invalidations.lock().unwrap().push(path);
+        self.pending_invalidations
+            .lock()
+            .expect("mutex poisoned")
+            .push(path);
     }
 }
 
@@ -136,9 +139,7 @@ impl CompilerHandle {
 /// `on_result` is called on the compiler thread each time a compilation
 /// completes (or panics). Callers typically use this to push a result into
 /// a `futures::channel::mpsc` channel that a GPUI spawn task monitors.
-pub fn spawn_compiler_thread(
-    on_result: impl Fn(CompileResult) + Send + 'static,
-) -> CompilerHandle {
+pub fn spawn_compiler_thread(on_result: impl Fn(CompileResult) + Send + 'static) -> CompilerHandle {
     // Bounded channel with capacity 1 — we only need the latest request.
     let (tx, rx) = std::sync::mpsc::sync_channel::<CompileRequest>(1);
     let pending_invalidations = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
@@ -151,7 +152,10 @@ pub fn spawn_compiler_thread(
         })
         .expect("failed to spawn compiler thread");
 
-    CompilerHandle { tx, pending_invalidations }
+    CompilerHandle {
+        tx,
+        pending_invalidations,
+    }
 }
 
 // ── Compiler loop ─────────────────────────────────────────────────────────────
@@ -187,7 +191,7 @@ fn compiler_loop(
         // Drain any import invalidations accumulated since the last compile
         // (e.g. the user saved a shared template in another tab).
         {
-            let mut list = pending_invalidations.lock().unwrap();
+            let mut list = pending_invalidations.lock().expect("mutex poisoned");
             for path in list.drain(..) {
                 world.invalidate_source(&path);
             }
@@ -203,9 +207,8 @@ fn compiler_loop(
         let mode = req.mode;
 
         // Compile, catching any panics so the thread stays alive.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compile(&world, mode)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(&world, mode)));
 
         let outcome = match result {
             Ok(r) => r,
@@ -277,22 +280,20 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
     let warned = typst::compile::<typst_html::HtmlDocument>(world);
 
     match warned.output {
-        Ok(doc) => {
-            match typst_html::html(&doc) {
-                Ok(html_string) => return CompileResult::OkHtml(html_string),
-                Err(extra_diags) => {
-                    let diags: Vec<Diagnostic> = extra_diags
-                        .iter()
-                        .map(|d| Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message: d.message.to_string(),
-                            line: span_to_line(world, d.span),
-                        })
-                        .collect();
-                    return CompileResult::Err(diags);
-                }
+        Ok(doc) => match typst_html::html(&doc) {
+            Ok(html_string) => return CompileResult::OkHtml(html_string),
+            Err(extra_diags) => {
+                let diags: Vec<Diagnostic> = extra_diags
+                    .iter()
+                    .map(|d| Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: d.message.to_string(),
+                        line: span_to_line(world, d.span),
+                    })
+                    .collect();
+                return CompileResult::Err(diags);
             }
-        }
+        },
         Err(errors) => {
             let diags = errors
                 .iter()

@@ -4,8 +4,8 @@
 //! on Button items, Escape to close.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::plugin::panel::{LayoutItem, PanelPosition, RegisteredPanel};
@@ -49,12 +49,7 @@ impl PluginPanel {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {
@@ -213,19 +208,31 @@ impl Render for PluginPanel {
             match &self.panel.position {
                 PanelPosition::Sidebar => (
                     true, // flex_col + items_end = right side
-                    "end", px(8.0), px(8.0), px(8.0), px(0.0),
+                    "end",
+                    px(8.0),
+                    px(8.0),
+                    px(8.0),
+                    px(0.0),
                 ),
                 PanelPosition::Bottom => (
                     false, // flex_row + items_end = bottom
-                    "bottom", px(0.0), px(8.0), px(8.0), px(8.0),
+                    "bottom",
+                    px(0.0),
+                    px(8.0),
+                    px(8.0),
+                    px(8.0),
                 ),
-                PanelPosition::Float => (
-                    true,
-                    "center", px(100.0), px(0.0), px(0.0), px(0.0),
-                ),
+                PanelPosition::Float => (true, "center", px(100.0), px(0.0), px(0.0), px(0.0)),
             };
 
-        let _ = (backdrop_flex_dir, backdrop_items, backdrop_pt, backdrop_pr, backdrop_pb, backdrop_pl);
+        let _ = (
+            backdrop_flex_dir,
+            backdrop_items,
+            backdrop_pt,
+            backdrop_pr,
+            backdrop_pb,
+            backdrop_pl,
+        );
 
         let modal_width = match &self.panel.position {
             PanelPosition::Bottom => px(800.0),

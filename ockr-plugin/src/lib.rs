@@ -8,16 +8,23 @@
 
 extern "C" {
     fn ockr_register_command(
-        id_p: i32, id_l: i32,
-        nm_p: i32, nm_l: i32,
-        ht_p: i32, ht_l: i32,
+        id_p: i32,
+        id_l: i32,
+        nm_p: i32,
+        nm_l: i32,
+        ht_p: i32,
+        ht_l: i32,
     ) -> i32;
     fn ockr_log(ptr: i32, len: i32);
     fn ockr_register_panel(
-        id_p: i32, id_l: i32,
-        ti_p: i32, ti_l: i32,
-        po_p: i32, po_l: i32,
-        la_p: i32, la_l: i32,
+        id_p: i32,
+        id_l: i32,
+        ti_p: i32,
+        ti_l: i32,
+        po_p: i32,
+        po_l: i32,
+        la_p: i32,
+        la_l: i32,
     ) -> i32;
     fn ockr_register_package(name_p: i32, name_l: i32, src_p: i32, src_l: i32) -> i32;
     /// Fetch `url` via HTTP GET. Response body is written into `HTTP_BUF`.
@@ -33,16 +40,21 @@ pub fn register_command(id: &str, name: &str, hint: Option<&str>) {
     let hint_str = hint.unwrap_or("");
     unsafe {
         ockr_register_command(
-            id.as_ptr() as i32, id.len() as i32,
-            name.as_ptr() as i32, name.len() as i32,
-            hint_str.as_ptr() as i32, hint_str.len() as i32,
+            id.as_ptr() as i32,
+            id.len() as i32,
+            name.as_ptr() as i32,
+            name.len() as i32,
+            hint_str.as_ptr() as i32,
+            hint_str.len() as i32,
         );
     }
 }
 
 /// Write a log line visible in ockr's notification toast.
 pub fn log(msg: &str) {
-    unsafe { ockr_log(msg.as_ptr() as i32, msg.len() as i32); }
+    unsafe {
+        ockr_log(msg.as_ptr() as i32, msg.len() as i32);
+    }
 }
 
 /// Register a typst package accessible as `#import "@plugin/<plugin_id>/<name>"`.
@@ -52,8 +64,10 @@ pub fn log(msg: &str) {
 pub fn register_typst_package(name: &str, source: &str) {
     unsafe {
         ockr_register_package(
-            name.as_ptr() as i32,   name.len() as i32,
-            source.as_ptr() as i32, source.len() as i32,
+            name.as_ptr() as i32,
+            name.len() as i32,
+            source.as_ptr() as i32,
+            source.len() as i32,
         );
     }
 }
@@ -63,10 +77,14 @@ pub fn register_typst_package(name: &str, source: &str) {
 pub fn register_panel(id: &str, title: &str, position: &str, layout_json: &str) {
     unsafe {
         ockr_register_panel(
-            id.as_ptr() as i32,           id.len() as i32,
-            title.as_ptr() as i32,        title.len() as i32,
-            position.as_ptr() as i32,     position.len() as i32,
-            layout_json.as_ptr() as i32,  layout_json.len() as i32,
+            id.as_ptr() as i32,
+            id.len() as i32,
+            title.as_ptr() as i32,
+            title.len() as i32,
+            position.as_ptr() as i32,
+            position.len() as i32,
+            layout_json.as_ptr() as i32,
+            layout_json.len() as i32,
         );
     }
 }

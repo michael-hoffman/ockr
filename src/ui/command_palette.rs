@@ -5,8 +5,8 @@
 //! `Enter` executes, `Escape` dismisses.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::command::CommandRegistry;
@@ -54,12 +54,7 @@ impl CommandPalette {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         // Close on Escape.
@@ -229,8 +224,8 @@ impl Render for CommandPalette {
             )
             .flex()
             .flex_col()
-            .items_center()  // center modal horizontally
-            .pt(px(48.0))    // offset from top
+            .items_center() // center modal horizontally
+            .pt(px(48.0)) // offset from top
             .child(
                 // Modal container — stop click propagation to backdrop.
                 div()

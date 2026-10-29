@@ -165,13 +165,46 @@ pub enum LspMessage {
 // ── Internal request enum ──────────────────────────────────────────────────────
 
 enum LspRequest {
-    DidOpen { uri: String, text: String },
-    DidChange { uri: String, version: i32, text: String },
-    Hover { uri: String, line: usize, col: usize, id: i64 },
-    Definition { uri: String, line: usize, col: usize, id: i64 },
-    Rename { uri: String, line: usize, col: usize, new_name: String, id: i64 },
-    CodeAction { uri: String, line: usize, col: usize, id: i64 },
-    Completion { uri: String, line: usize, col: usize, id: i64 },
+    DidOpen {
+        uri: String,
+        text: String,
+    },
+    DidChange {
+        uri: String,
+        version: i32,
+        text: String,
+    },
+    Hover {
+        uri: String,
+        line: usize,
+        col: usize,
+        id: i64,
+    },
+    Definition {
+        uri: String,
+        line: usize,
+        col: usize,
+        id: i64,
+    },
+    Rename {
+        uri: String,
+        line: usize,
+        col: usize,
+        new_name: String,
+        id: i64,
+    },
+    CodeAction {
+        uri: String,
+        line: usize,
+        col: usize,
+        id: i64,
+    },
+    Completion {
+        uri: String,
+        line: usize,
+        col: usize,
+        id: i64,
+    },
     #[allow(dead_code)] // sent when LspHandle is explicitly shut down
     Shutdown,
 }
@@ -221,7 +254,13 @@ impl LspHandle {
     /// Request renaming the symbol at `(line, col)` to `new_name`.  Returns the request ID.
     pub fn request_rename(&self, uri: String, line: usize, col: usize, new_name: String) -> i64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.tx.send(LspRequest::Rename { uri, line, col, new_name, id });
+        let _ = self.tx.send(LspRequest::Rename {
+            uri,
+            line,
+            col,
+            new_name,
+            id,
+        });
         id
     }
 
@@ -453,7 +492,13 @@ fn handle_outgoing(
             });
             let _ = send_request(stdin, id, "textDocument/completion", params);
         }
-        LspRequest::Rename { uri, line, col, new_name, id } => {
+        LspRequest::Rename {
+            uri,
+            line,
+            col,
+            new_name,
+            id,
+        } => {
             pending.insert(id, "rename");
             let params = json!({
                 "textDocument": { "uri": uri },
@@ -518,14 +563,20 @@ fn dispatch_incoming(
                     HoverResult { content }
                 })
                 .filter(|h| !h.content.is_empty());
-            on_message(LspMessage::HoverResult { request_id: id, result });
+            on_message(LspMessage::HoverResult {
+                request_id: id,
+                result,
+            });
         }
         Some("definition") => {
             let result = msg
                 .get("result")
                 .filter(|r| !r.is_null())
                 .and_then(|r| parse_definition_result(r));
-            on_message(LspMessage::DefinitionResult { request_id: id, result });
+            on_message(LspMessage::DefinitionResult {
+                request_id: id,
+                result,
+            });
         }
         Some("completion") => {
             let items = msg
@@ -533,14 +584,20 @@ fn dispatch_incoming(
                 .filter(|r| !r.is_null())
                 .map(parse_completion_items)
                 .unwrap_or_default();
-            on_message(LspMessage::CompletionResult { request_id: id, items });
+            on_message(LspMessage::CompletionResult {
+                request_id: id,
+                items,
+            });
         }
         Some("rename") => {
             let result = msg
                 .get("result")
                 .filter(|r| !r.is_null())
                 .and_then(parse_workspace_edit);
-            on_message(LspMessage::RenameResult { request_id: id, result });
+            on_message(LspMessage::RenameResult {
+                request_id: id,
+                result,
+            });
         }
         Some("codeAction") => {
             let actions = msg
@@ -548,7 +605,10 @@ fn dispatch_incoming(
                 .filter(|r| !r.is_null())
                 .map(parse_code_actions)
                 .unwrap_or_default();
-            on_message(LspMessage::CodeActionResult { request_id: id, actions });
+            on_message(LspMessage::CodeActionResult {
+                request_id: id,
+                actions,
+            });
         }
         _ => {} // initialize / shutdown / unknown
     }
@@ -634,7 +694,7 @@ fn send_notification(
 }
 
 fn write_message(stdin: &Mutex<ChildStdin>, body: &str) -> std::io::Result<()> {
-    let mut lock = stdin.lock().unwrap();
+    let mut lock = stdin.lock().expect("mutex poisoned");
     write!(lock, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
     lock.flush()
 }
@@ -655,7 +715,11 @@ fn parse_diagnostics(arr: &Value) -> Vec<LspDiagnostic> {
                 _ => LspSeverity::Hint,
             };
             let range = parse_range(&d["range"])?;
-            Some(LspDiagnostic { severity, message, range })
+            Some(LspDiagnostic {
+                severity,
+                message,
+                range,
+            })
         })
         .collect()
 }
@@ -725,8 +789,15 @@ fn parse_completion_items(result: &Value) -> Vec<CompletionItem> {
                 .or_else(|| item.pointer("/textEdit/newText").and_then(|v| v.as_str()))
                 .unwrap_or(&label)
                 .to_string();
-            let detail = item.get("detail").and_then(|v| v.as_str()).map(str::to_string);
-            Some(CompletionItem { label, insert_text, detail })
+            let detail = item
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Some(CompletionItem {
+                label,
+                insert_text,
+                detail,
+            })
         })
         .collect()
 }
@@ -778,7 +849,9 @@ fn parse_workspace_edit(edit: &Value) -> Option<WorkspaceEdits> {
             let Some(uri) = dc.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
                 continue; // resource operation (create/rename/delete), not a content edit
             };
-            let Some(edits_val) = dc.get("edits") else { continue };
+            let Some(edits_val) = dc.get("edits") else {
+                continue;
+            };
             let edits = parse_text_edits(edits_val);
             if !edits.is_empty() {
                 out.push((uri.to_string(), edits));

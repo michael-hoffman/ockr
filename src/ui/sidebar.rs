@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent,
+    Pixels, Point, Render, Window,
 };
 
 use crate::actions::NewNote;
@@ -33,10 +33,7 @@ pub enum SidebarEvent {
     /// User chose "Reveal in Finder".
     RevealFile(PathBuf),
     /// User clicked a plugin panel button in the sidebar.
-    OpenPluginPanel {
-        plugin_id: String,
-        panel_id: String,
-    },
+    OpenPluginPanel { plugin_id: String, panel_id: String },
 }
 
 /// Right-click context menu state: which file, anchored at which window point.
@@ -172,13 +169,17 @@ impl Render for Sidebar {
         };
 
         // ── Plugin panels registered for sidebar position ─────────────────────
-        let plugin_panel_buttons: Vec<gpui::AnyElement> = if let Some(reg) = cx.try_global::<PluginRegistry>() {
+        let plugin_panel_buttons: Vec<gpui::AnyElement> = if let Some(reg) =
+            cx.try_global::<PluginRegistry>()
+        {
             let mut buttons: Vec<gpui::AnyElement> = Vec::new();
             // Collect all sidebar panels from all plugins, sorted by title.
-            let mut sidebar_panels: Vec<(String, String, String)> = reg.plugin_panels
+            let mut sidebar_panels: Vec<(String, String, String)> = reg
+                .plugin_panels
                 .iter()
                 .flat_map(|(plugin_id, panels)| {
-                    panels.iter()
+                    panels
+                        .iter()
                         .filter(|p| matches!(p.position, PanelPosition::Sidebar))
                         .map(|p| (plugin_id.clone(), p.panel_id.clone(), p.title.clone()))
                         .collect::<Vec<_>>()
@@ -277,45 +278,44 @@ impl Render for Sidebar {
                     }),
                 );
 
-            let menu_box = div()
-                .absolute()
-                .left(menu.pos.x)
-                .top(menu.pos.y)
-                .min_w(px(160.0))
-                .bg(gpui::rgb(t.bg_surface))
-                .border_1()
-                .border_color(gpui::rgb(t.border_subtle))
-                .rounded(px(6.0))
-                .shadow_lg()
-                .py(px(4.0))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    item("Rename…", false, &t)
-                        .id("ctx-rename")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.emit(SidebarEvent::RenameFile(path_ren.clone()));
-                            this.context_menu = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    item("Reveal in Finder", false, &t)
-                        .id("ctx-reveal")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.emit(SidebarEvent::RevealFile(path_rev.clone()));
-                            this.context_menu = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    item("Delete to Trash", true, &t)
-                        .id("ctx-delete")
-                        .on_click(cx.listener(move |this, _, _, cx| {
+            let menu_box =
+                div()
+                    .absolute()
+                    .left(menu.pos.x)
+                    .top(menu.pos.y)
+                    .min_w(px(160.0))
+                    .bg(gpui::rgb(t.bg_surface))
+                    .border_1()
+                    .border_color(gpui::rgb(t.border_subtle))
+                    .rounded(px(6.0))
+                    .shadow_lg()
+                    .py(px(4.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        item("Rename…", false, &t)
+                            .id("ctx-rename")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.emit(SidebarEvent::RenameFile(path_ren.clone()));
+                                this.context_menu = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        item("Reveal in Finder", false, &t)
+                            .id("ctx-reveal")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.emit(SidebarEvent::RevealFile(path_rev.clone()));
+                                this.context_menu = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(item("Delete to Trash", true, &t).id("ctx-delete").on_click(
+                        cx.listener(move |this, _, _, cx| {
                             cx.emit(SidebarEvent::DeleteFile(path_del.clone()));
                             this.context_menu = None;
                             cx.notify();
-                        })),
-                );
+                        }),
+                    ));
 
             gpui::deferred(div().absolute().inset_0().child(backdrop).child(menu_box))
                 .with_priority(200)

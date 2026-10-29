@@ -32,9 +32,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render,
-    ScrollWheelEvent, Window, canvas, div, point, prelude::*, px, quad, rgba, size,
+    canvas, div, point, prelude::*, px, quad, rgba, size, App, Bounds, Context, EventEmitter,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Render, ScrollWheelEvent, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -89,11 +89,7 @@ pub struct GraphView {
 
 impl GraphView {
     /// Build the graph from the vault's file list and backlink index.
-    pub fn new(
-        files: Vec<VaultFile>,
-        backlinks: &BacklinkIndex,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(files: Vec<VaultFile>, backlinks: &BacklinkIndex, cx: &mut Context<Self>) -> Self {
         let n = files.len();
 
         // Build edge list from the incoming-link index.
@@ -117,17 +113,25 @@ impl GraphView {
         // Place nodes on a circle so initial positions are spread out.
         let init_r = (50.0f32).max(n as f32 * 10.0);
         let tau = 2.0 * std::f32::consts::PI;
-        let nodes: Vec<GraphNode> = files.into_iter().enumerate().map(|(i, file)| {
-            let a = if n > 0 { (i as f32 / n as f32) * tau } else { 0.0 };
-            GraphNode {
-                x: a.cos() * init_r,
-                y: a.sin() * init_r,
-                vx: 0.0,
-                vy: 0.0,
-                degree: degree[i],
-                file,
-            }
-        }).collect();
+        let nodes: Vec<GraphNode> = files
+            .into_iter()
+            .enumerate()
+            .map(|(i, file)| {
+                let a = if n > 0 {
+                    (i as f32 / n as f32) * tau
+                } else {
+                    0.0
+                };
+                GraphNode {
+                    x: a.cos() * init_r,
+                    y: a.sin() * init_r,
+                    vx: 0.0,
+                    vy: 0.0,
+                    degree: degree[i],
+                    file,
+                }
+            })
+            .collect();
 
         let mut view = Self {
             focus_handle: cx.focus_handle(),
@@ -150,7 +154,9 @@ impl GraphView {
 
     fn simulate(&mut self, steps: usize) {
         let n = self.nodes.len();
-        if n < 2 { return; }
+        if n < 2 {
+            return;
+        }
 
         const K_REPEL: f32 = 6_000.0;
         const K_SPRING: f32 = 0.02;
@@ -215,7 +221,9 @@ impl GraphView {
             (0..self.nodes.len()).collect()
         } else {
             let q = self.query.to_lowercase();
-            self.nodes.iter().enumerate()
+            self.nodes
+                .iter()
+                .enumerate()
                 .filter(|(_, n)| n.file.title.to_lowercase().contains(&q))
                 .map(|(i, _)| i)
                 .collect()
@@ -237,17 +245,24 @@ impl GraphView {
     fn node_at(&self, sx: f32, sy: f32, radius: f32) -> Option<usize> {
         let visible = self.visible();
         let r2 = radius * radius;
-        visible.iter().min_by(|&&a, &&b| {
-            let (ax, ay) = self.screen_pos(a);
-            let (bx, by) = self.screen_pos(b);
-            let da = (ax - sx).powi(2) + (ay - sy).powi(2);
-            let db = (bx - sy).powi(2) + (by - sy).powi(2);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        }).and_then(|&i| {
-            let (nx, ny) = self.screen_pos(i);
-            let d2 = (nx - sx).powi(2) + (ny - sy).powi(2);
-            if d2 <= r2 { Some(i) } else { None }
-        })
+        visible
+            .iter()
+            .min_by(|&&a, &&b| {
+                let (ax, ay) = self.screen_pos(a);
+                let (bx, by) = self.screen_pos(b);
+                let da = (ax - sx).powi(2) + (ay - sy).powi(2);
+                let db = (bx - sy).powi(2) + (by - sy).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|&i| {
+                let (nx, ny) = self.screen_pos(i);
+                let d2 = (nx - sx).powi(2) + (ny - sy).powi(2);
+                if d2 <= r2 {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Move focus to the nearest visible node in direction `(dir_x, dir_y)`.
@@ -258,7 +273,8 @@ impl GraphView {
         };
         let (cx, cy) = self.screen_pos(cur);
         let visible = self.visible();
-        let best = visible.iter()
+        let best = visible
+            .iter()
             .filter(|&&i| i != cur)
             .filter_map(|&i| {
                 let (nx, ny) = self.screen_pos(i);
@@ -286,7 +302,10 @@ impl GraphView {
         let k = &event.keystroke;
 
         match k.key.as_str() {
-            "escape" => { cx.emit(GraphViewEvent::Close); return; }
+            "escape" => {
+                cx.emit(GraphViewEvent::Close);
+                return;
+            }
             "enter" => {
                 if let Some(idx) = self.focused_idx {
                     cx.emit(GraphViewEvent::Open(self.nodes[idx].file.abs_path.clone()));
@@ -295,13 +314,37 @@ impl GraphView {
                 }
                 return;
             }
-            "h" | "left"  => { self.move_focus(-1.0,  0.0); cx.notify(); return; }
-            "l" | "right" => { self.move_focus( 1.0,  0.0); cx.notify(); return; }
-            "k" | "up"    => { self.move_focus( 0.0, -1.0); cx.notify(); return; }
-            "j" | "down"  => { self.move_focus( 0.0,  1.0); cx.notify(); return; }
-            "=" | "+"     => { self.zoom = (self.zoom * 1.2).min(8.0); cx.notify(); return; }
-            "-"           => { self.zoom = (self.zoom / 1.2).max(0.05); cx.notify(); return; }
-            "backspace"   => {
+            "h" | "left" => {
+                self.move_focus(-1.0, 0.0);
+                cx.notify();
+                return;
+            }
+            "l" | "right" => {
+                self.move_focus(1.0, 0.0);
+                cx.notify();
+                return;
+            }
+            "k" | "up" => {
+                self.move_focus(0.0, -1.0);
+                cx.notify();
+                return;
+            }
+            "j" | "down" => {
+                self.move_focus(0.0, 1.0);
+                cx.notify();
+                return;
+            }
+            "=" | "+" => {
+                self.zoom = (self.zoom * 1.2).min(8.0);
+                cx.notify();
+                return;
+            }
+            "-" => {
+                self.zoom = (self.zoom / 1.2).max(0.05);
+                cx.notify();
+                return;
+            }
+            "backspace" => {
                 self.query.pop();
                 // Ensure focused node is still visible.
                 if let Some(f) = self.focused_idx {
@@ -362,21 +405,11 @@ impl GraphView {
         }
     }
 
-    fn handle_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _w: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
+    fn handle_mouse_up(&mut self, _event: &MouseUpEvent, _w: &mut Window, _cx: &mut Context<Self>) {
         self.drag = None;
     }
 
-    fn handle_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(20.0));
         let dy = f32::from(delta.y);
         if dy < 0.0 {
@@ -411,29 +444,39 @@ impl Render for GraphView {
         // ── Snapshot data for canvas closure (must be 'static) ───────────────
         #[derive(Clone)]
         struct NodeSnap {
-            x: f32, y: f32, degree: usize, focused: bool, visible: bool,
+            x: f32,
+            y: f32,
+            degree: usize,
+            focused: bool,
+            visible: bool,
         }
-        let node_snaps: Vec<NodeSnap> = self.nodes.iter().enumerate().map(|(i, n)| NodeSnap {
-            x: n.x, y: n.y,
-            degree: n.degree,
-            focused: focused_idx == Some(i),
-            visible: visible_set.contains(&i),
-        }).collect();
+        let node_snaps: Vec<NodeSnap> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| NodeSnap {
+                x: n.x,
+                y: n.y,
+                degree: n.degree,
+                focused: focused_idx == Some(i),
+                visible: visible_set.contains(&i),
+            })
+            .collect();
         let edges_snap = self.edges.clone();
         let pan_x = self.pan_x;
         let pan_y = self.pan_y;
         let zoom = self.zoom;
         // Colors from theme.
-        let bg_color           = rgba(((t.bg_base as u64) << 8 | 0xee) as u32);
-        let edge_color         = rgba(((t.text_faint as u64) << 8 | 0xcc) as u32);
-        let node_isolated      = rgba(((t.text_faint as u64) << 8 | 0xff) as u32);
-        let node_normal        = rgba(((t.text_muted as u64) << 8 | 0xff) as u32);
-        let node_hub           = rgba(((t.ochre as u64) << 8 | 0xff) as u32);
+        let bg_color = rgba(((t.bg_base as u64) << 8 | 0xee) as u32);
+        let edge_color = rgba(((t.text_faint as u64) << 8 | 0xcc) as u32);
+        let node_isolated = rgba(((t.text_faint as u64) << 8 | 0xff) as u32);
+        let node_normal = rgba(((t.text_muted as u64) << 8 | 0xff) as u32);
+        let node_hub = rgba(((t.ochre as u64) << 8 | 0xff) as u32);
         let node_focused_color = rgba(((t.ochre as u64) << 8 | 0xff) as u32);
 
         // ── Label divs (one per visible node) ────────────────────────────────
         let show_labels = zoom >= 0.5;
-        let label_color_normal  = gpui::rgb(t.text_muted);
+        let label_color_normal = gpui::rgb(t.text_muted);
         let label_color_focused = gpui::rgb(t.text);
 
         let mut labels: Vec<gpui::AnyElement> = Vec::new();
@@ -444,7 +487,11 @@ impl Render for GraphView {
                 let node_r: f32 = if n.degree >= 3 { 9.0 } else { 6.0 };
                 let is_focused = focused_idx == Some(i);
                 let title = n.file.title.clone();
-                let label_color = if is_focused { label_color_focused } else { label_color_normal };
+                let label_color = if is_focused {
+                    label_color_focused
+                } else {
+                    label_color_normal
+                };
 
                 // Truncate long titles.
                 let display = if title.len() > 22 {
@@ -472,7 +519,10 @@ impl Render for GraphView {
 
         // ── HUD: query bar + hint ────────────────────────────────────────────
         let query_display = if self.query.is_empty() {
-            format!("/ search…   {} nodes   Cmd-Shift-G: close", self.nodes.len())
+            format!(
+                "/ search…   {} nodes   Cmd-Shift-G: close",
+                self.nodes.len()
+            )
         } else {
             format!("/ {}  ({} matches)", self.query, visible_set.len())
         };
@@ -485,15 +535,9 @@ impl Render for GraphView {
             .track_focus(&self.focus_handle)
             .bg(bg_color)
             .on_key_down(cx.listener(Self::handle_key))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(Self::handle_mouse_down),
-            )
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
             .on_mouse_move(cx.listener(Self::handle_mouse_move))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(Self::handle_mouse_up),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
             // ── Canvas (edges + node circles) ──────────────────────────────
             .child(
@@ -511,7 +555,9 @@ impl Render for GraphView {
                         for &(a, b) in &edges_snap {
                             let na = &node_snaps[a];
                             let nb = &node_snaps[b];
-                            if !na.visible && !nb.visible { continue; }
+                            if !na.visible && !nb.visible {
+                                continue;
+                            }
                             let (x1, y1) = to_screen(na.x, na.y);
                             let (x2, y2) = to_screen(nb.x, nb.y);
                             let mut builder = PathBuilder::stroke(px(1.0));
@@ -524,9 +570,11 @@ impl Render for GraphView {
 
                         // Draw node circles.
                         const BASE_R: f32 = 6.0;
-                        const HUB_R:  f32 = 9.0;
+                        const HUB_R: f32 = 9.0;
                         for n in node_snaps.iter() {
-                            if !n.visible { continue; }
+                            if !n.visible {
+                                continue;
+                            }
                             let (sx, sy) = to_screen(n.x, n.y);
                             let r = if n.degree >= 3 { HUB_R } else { BASE_R };
                             let r = r * zoom.max(0.3);

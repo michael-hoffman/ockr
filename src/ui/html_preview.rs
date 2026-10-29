@@ -25,14 +25,14 @@
 //! action handlers satisfy this requirement.
 
 use futures::channel::mpsc::UnboundedSender;
-use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2::rc::Retained;
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
+use objc2::runtime::ProtocolObject;
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::NSApplication;
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{
-    WKScriptMessage, WKScriptMessageHandler, WKUserContentController,
-    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
+    WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKUserScript,
+    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
 
 // ── Wikilink click handler (WKScriptMessageHandler) ───────────────────────────
@@ -258,13 +258,13 @@ impl HtmlWebView {
             // Create with a zero frame; `update_frame` sets the real position.
             let frame = objc2_foundation::NSRect {
                 origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
-                size: objc2_foundation::NSSize { width: 1.0, height: 1.0 },
+                size: objc2_foundation::NSSize {
+                    width: 1.0,
+                    height: 1.0,
+                },
             };
-            let webview = WKWebView::initWithFrame_configuration(
-                WKWebView::alloc(mtm),
-                frame,
-                &config,
-            );
+            let webview =
+                WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
 
             // Layer-backed view for proper Metal compositing.
             webview.setWantsLayer(true);
@@ -374,7 +374,7 @@ fn inject_css(html: &str) -> String {
 /// Escape characters that are significant in HTML contexts.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

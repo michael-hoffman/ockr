@@ -12,9 +12,13 @@
 /// node at that range, or the selection is already the whole document.
 pub fn expand_selection(text: &str, sel_start: usize, sel_end: usize) -> Option<(usize, usize)> {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&codebook_tree_sitter_typst::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&codebook_tree_sitter_typst::LANGUAGE.into())
+        .ok()?;
     let tree = parser.parse(text, None)?;
-    let mut node = tree.root_node().descendant_for_byte_range(sel_start, sel_end)?;
+    let mut node = tree
+        .root_node()
+        .descendant_for_byte_range(sel_start, sel_end)?;
 
     // If the found node's range already exceeds the selection, it's the
     // immediate "smallest containing node" answer. Otherwise the selection
@@ -62,7 +66,10 @@ mod tests {
             range = (s, e);
             cur = expand_selection(text, s, e);
         }
-        assert!(cur.is_none(), "expand_selection should terminate at the root within 50 steps");
+        assert!(
+            cur.is_none(),
+            "expand_selection should terminate at the root within 50 steps"
+        );
         assert_eq!(range, (0, text.len()));
     }
 }

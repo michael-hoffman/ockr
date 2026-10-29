@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -90,12 +90,7 @@ impl VaultSearch {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {
@@ -106,7 +101,10 @@ impl VaultSearch {
         if k.key == "enter" {
             if let Some(m) = self.results.get(self.selected) {
                 // line_no is 1-based; jump_to_line expects 0-based.
-                cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone(), m.line_no.saturating_sub(1)));
+                cx.emit(VaultSearchEvent::Open(
+                    m.file.abs_path.clone(),
+                    m.line_no.saturating_sub(1),
+                ));
             } else {
                 cx.emit(VaultSearchEvent::Close);
             }
@@ -151,7 +149,10 @@ impl VaultSearch {
         cx: &mut Context<Self>,
     ) {
         if let Some(m) = self.results.get(idx) {
-            cx.emit(VaultSearchEvent::Open(m.file.abs_path.clone(), m.line_no.saturating_sub(1)));
+            cx.emit(VaultSearchEvent::Open(
+                m.file.abs_path.clone(),
+                m.line_no.saturating_sub(1),
+            ));
         }
     }
 }

@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    Render, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, Window,
 };
 
 use crate::ui::theme::ThemePalette;
@@ -38,11 +38,7 @@ pub struct BacklinkPanel {
 }
 
 impl BacklinkPanel {
-    pub fn new(
-        current_title: String,
-        mut links: Vec<VaultFile>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(current_title: String, mut links: Vec<VaultFile>, cx: &mut Context<Self>) -> Self {
         links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         Self {
             focus_handle: cx.focus_handle(),
@@ -52,12 +48,7 @@ impl BacklinkPanel {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
 
         if k.key == "escape" {

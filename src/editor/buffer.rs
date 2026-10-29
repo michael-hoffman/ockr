@@ -46,7 +46,13 @@ pub trait Buffer: Send + Sync + 'static {
     /// its line break) before the remaining pieces are joined — a bare
     /// `join_with_next` per boundary would otherwise just concatenate that
     /// line's untouched text back in.
-    fn delete_span(&mut self, start_line: usize, start_col: usize, end_line: usize, end_col: usize) {
+    fn delete_span(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) {
         if start_line == end_line {
             self.delete_range(start_line, start_col, end_col);
             return;
