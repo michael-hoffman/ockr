@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "ockr"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "A Typst-native, keyboard-driven note editor with a Helix-style modal interface."
 authors = ["Michael Hoffman <hoffman1512@gmail.com>"]
