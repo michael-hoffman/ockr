@@ -34,14 +34,14 @@ image = "0.25"
 time = { version = "0.3", features = ["local-offset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = { version = "0.8", features = ["parse", "display"] }
-dirs = "6"
+toml = { version = "1", features = ["parse", "display"] }
+dirs = "7"
 futures = "0.3"
 wasmtime = { version = "31", features = ["cranelift"] }
 wasmtime-wasi = "31"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.13", features = ["blocking"] }
 trash = "5"
 regex = "1"
 tree-sitter = "0.26"
