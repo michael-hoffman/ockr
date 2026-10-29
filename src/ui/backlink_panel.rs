@@ -39,7 +39,7 @@ pub struct BacklinkPanel {
 
 impl BacklinkPanel {
     pub fn new(current_title: String, mut links: Vec<VaultFile>, cx: &mut Context<Self>) -> Self {
-        links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        links.sort_by_key(|a| a.title.to_lowercase());
         Self {
             focus_handle: cx.focus_handle(),
             current_title,

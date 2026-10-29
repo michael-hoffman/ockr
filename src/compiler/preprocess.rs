@@ -39,11 +39,8 @@ pub fn preprocess_wikilinks(source: &str, index: &HashMap<String, String>) -> St
     let mut result = source.to_owned();
     let mut offset = 0usize;
 
-    loop {
-        // Find the next `[[` at or after `offset`.
-        let Some(rel_open) = result[offset..].find("[[") else {
-            break;
-        };
+    // Find the next `[[` at or after `offset`.
+    while let Some(rel_open) = result[offset..].find("[[") {
         let open = offset + rel_open;
 
         // Find the closing `]]` after the opening `[[`.

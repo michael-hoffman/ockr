@@ -485,7 +485,7 @@ fn rasterize(doc: &PagedDocument) -> (Option<Arc<RenderImage>>, Option<(u32, u32
     // typst-render produces premultiplied RGBA8; GPUI's sprite atlas expects BGRA8.
     // Swap R and B channels on each pixel (alpha and green are unchanged).
     let mut bytes = pixmap.data().to_vec();
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2); // R ↔ B
     }
 

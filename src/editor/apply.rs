@@ -165,7 +165,7 @@ pub fn apply<B: Buffer>(
             // Clamp cursor.
             let new_len = buf.line(pos.line).len();
             if pos.col > new_len {
-                let clamped = new_len.saturating_sub(1).max(0);
+                let clamped = new_len.saturating_sub(1);
                 state.move_cursor_to(Pos::new(pos.line, clamped));
             }
             state.is_dirty = true;
@@ -930,7 +930,7 @@ pub fn apply<B: Buffer>(
         }
 
         ReselectLastVisual => {
-            if let Some((sel, kind)) = state.last_visual_selection.clone() {
+            if let Some((sel, kind)) = state.last_visual_selection {
                 state.selection = sel;
                 state.mode = Mode::Visual(kind);
             }
@@ -1398,6 +1398,7 @@ fn byte_boundary_clamp(line: &str, col: usize) -> usize {
 /// Scanning strategy:
 /// 1. If the cursor is already inside a digit run, expand to its full extent.
 /// 2. Otherwise scan right to the next digit run.
+///
 /// A leading `-` is included when the character immediately before the digit
 /// run is `-` and is itself not preceded by a digit (i.e. not `x-5`).
 fn find_integer_near(line: &str, col: usize) -> Option<(usize, usize, i64)> {
@@ -1631,7 +1632,6 @@ fn word_backward<B: Buffer>(pos: Pos, buf: &B) -> Pos {
 ///
 /// Handles both single-line and multi-line selections.  The returned string
 /// does **not** end with `\n` unless the selection crosses a line boundary.
-
 /// Collect the primary selection plus any `extra_selections`, each normalized
 /// to `(start, end)` and deduplicated. Used by `DeleteSelection` to fan out
 /// across a multi-select (`s`/`S`) instead of just the primary.
@@ -3050,7 +3050,7 @@ mod tests {
     #[test]
     fn find_char_moves_to_next_occurrence() {
         let mut b = buf("hello world");
-        let mut s = normal_state(); // col 0
+        let s = normal_state(); // col 0
         let (s2, _) = apply(FindChar('o'), s, &mut b);
         assert_eq!(s2.cursor(), Pos::new(0, 4)); // 'o' in "hello"
     }
@@ -3066,7 +3066,7 @@ mod tests {
     #[test]
     fn till_char_stops_before_target() {
         let mut b = buf("hello world");
-        let mut s = normal_state();
+        let s = normal_state();
         let (s2, _) = apply(TillChar('o'), s, &mut b);
         assert_eq!(s2.cursor(), Pos::new(0, 3)); // just before 'o' at col 4
     }
@@ -3085,7 +3085,7 @@ mod tests {
     #[test]
     fn paragraph_forward_jumps_to_next_block() {
         let mut b = buf("line1\nline2\n\nline3\nline4");
-        let mut s = normal_state(); // col 0, line 0
+        let s = normal_state(); // col 0, line 0
         let (s2, _) = apply(MoveParagraphForward, s, &mut b);
         assert_eq!(s2.cursor().line, 3); // "line3"
     }
@@ -3138,7 +3138,7 @@ mod tests {
     fn obj_no_match_stays_normal() {
         // No quotes on the line — mode should stay Normal.
         let mut b = buf("hello world");
-        let mut s = normal_state();
+        let s = normal_state();
         let (s2, _) = apply(
             SelectObject {
                 inner: true,

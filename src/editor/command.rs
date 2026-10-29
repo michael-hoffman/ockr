@@ -250,6 +250,7 @@ pub enum TextObjectKind {
     /// Word (`w`): alphanumeric / `_` run.
     Word,
     /// WORD (`W`): any non-whitespace run.
+    #[allow(clippy::upper_case_acronyms)] // Vim terminology: `w` vs `W`
     WORD,
     /// Paragraph (`p`): blank-line-delimited block.
     Paragraph,

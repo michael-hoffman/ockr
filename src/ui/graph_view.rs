@@ -504,7 +504,7 @@ impl Render for GraphView {
                     div()
                         .absolute()
                         .left(px(sx - 60.0))
-                        .top(px(sy + node_r as f32 + 4.0))
+                        .top(px(sy + node_r + 4.0))
                         .w(px(120.0))
                         .flex()
                         .justify_center()

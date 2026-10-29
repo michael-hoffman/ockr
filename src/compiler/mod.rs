@@ -280,7 +280,7 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
 
     match warned.output {
         Ok(doc) => match typst_html::html(&doc, &typst_html::HtmlOptions::default()) {
-            Ok(html_string) => return CompileResult::OkHtml(html_string),
+            Ok(html_string) => CompileResult::OkHtml(html_string),
             Err(extra_diags) => {
                 let diags: Vec<Diagnostic> = extra_diags
                     .iter()
@@ -290,7 +290,7 @@ fn compile_html(world: &OckrWorld) -> CompileResult {
                         line: span_to_line(world, d.span),
                     })
                     .collect();
-                return CompileResult::Err(diags);
+                CompileResult::Err(diags)
             }
         },
         Err(errors) => {

@@ -334,7 +334,7 @@ pub fn scan_templates(vault_root: &std::path::Path) -> Vec<TemplateEntry> {
             }
         })
         .collect();
-    result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result.sort_by_key(|a| a.name.to_lowercase());
     result
 }
 

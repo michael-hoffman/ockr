@@ -283,6 +283,8 @@ pub struct MainWindow {
     settings_panel_focus_pending: bool,
 }
 
+type PluginInstances = HashMap<String, Arc<Mutex<PluginInstance>>>;
+
 impl MainWindow {
     pub fn new(vault: Entity<VaultState>, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(vault.clone(), cx));
@@ -390,7 +392,7 @@ impl MainWindow {
         .detach();
 
         // ── Initial pane ─────────────────────────────────────────────────────
-        let editor = cx.new(|cx| EditorPane::new(cx));
+        let editor = cx.new(EditorPane::new);
         editor.update(cx, |pane, _cx| pane.set_vault(vault.clone()));
         editor.update(cx, |pane, _cx| {
             pane.set_compiler(compiler_handle.clone(), preview.clone());
@@ -672,7 +674,7 @@ impl MainWindow {
 
     /// Spawn a new pane, wire compiler + vault + LSP, subscribe events.
     fn new_pane(&mut self, cx: &mut Context<Self>) -> Entity<EditorPane> {
-        let editor = cx.new(|cx| EditorPane::new(cx));
+        let editor = cx.new(EditorPane::new);
         editor.update(cx, |pane, _cx| pane.set_vault(self.vault.clone()));
         editor.update(cx, |pane, _cx| {
             pane.set_compiler(self.compiler_handle.clone(), self.preview.clone());
@@ -1436,7 +1438,7 @@ impl MainWindow {
         self.quick_switch = None;
         self.file_picker = None;
         self.rename_modal = None;
-        let panel = cx.new(|cx| SettingsPanel::new(cx));
+        let panel = cx.new(SettingsPanel::new);
         cx.subscribe(
             &panel,
             |this, _, event: &SettingsPanelEvent, cx| match event {
@@ -2136,10 +2138,7 @@ impl MainWindow {
         vault_root: Option<&std::path::Path>,
         event_tx: std::sync::mpsc::Sender<PluginEvent>,
         plugin_packages: Arc<RwLock<HashMap<String, String>>>,
-    ) -> (
-        HashMap<String, Arc<Mutex<PluginInstance>>>,
-        Vec<(PluginMetadataJson, PluginStatus)>,
-    ) {
+    ) -> (PluginInstances, Vec<(PluginMetadataJson, PluginStatus)>) {
         let mut instances = HashMap::new();
         let mut info_out: Vec<(PluginMetadataJson, PluginStatus)> = Vec::new();
         let Some(root) = vault_root else {
@@ -2406,7 +2405,7 @@ impl MainWindow {
             return;
         }
 
-        let palette = cx.new(|cx| CommandPalette::new(cx));
+        let palette = cx.new(CommandPalette::new);
         palette.read(cx).focus_handle.clone().focus(window);
 
         cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
@@ -2612,7 +2611,7 @@ impl MainWindow {
                 .backlinks
                 .incoming_links(std::path::Path::new(&rel_path))
         };
-        links.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        links.sort_by_key(|a| a.title.to_lowercase());
         links
     }
 
@@ -3010,7 +3009,7 @@ impl Render for MainWindow {
         if self.open_palette_pending {
             self.open_palette_pending = false;
             if self.palette.is_none() {
-                let palette = cx.new(|cx| CommandPalette::new(cx));
+                let palette = cx.new(CommandPalette::new);
                 palette.read(cx).focus_handle.clone().focus(window);
                 cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
                     PaletteEvent::Close => {

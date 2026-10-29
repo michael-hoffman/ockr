@@ -64,7 +64,7 @@ impl QuickSwitch {
             .filter_map(|(i, f)| fuzzy_score(&q, &f.title).map(|s| (i, s)))
             .collect();
         // Stable sort: ties preserve original order (recency from caller).
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|s| std::cmp::Reverse(s.1));
         self.matches = scored.into_iter().map(|(i, _)| i).collect();
         if self.selected >= self.matches.len() {
             self.selected = self.matches.len().saturating_sub(1);

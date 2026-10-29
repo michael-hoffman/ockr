@@ -1771,16 +1771,9 @@ impl EditorPane {
 
         // Scan backward from cursor for `[[` without an intervening `]]`.
         let prefix = &line[..col];
-        let open_col = if let Some(idx) = prefix.rfind("[[") {
-            // Ensure no `]]` between `[[` and cursor.
-            if prefix[idx + 2..].contains("]]") {
-                None
-            } else {
-                Some(idx)
-            }
-        } else {
-            None
-        };
+        let open_col = prefix
+            .rfind("[[")
+            .filter(|&idx| !prefix[idx + 2..].contains("]]"));
 
         if let Some(open) = open_col {
             let fragment = &line[open + 2..col];
@@ -2067,10 +2060,9 @@ impl EditorPane {
         if !matches!(
             result,
             KeymapResult::ShowHover | KeymapResult::Pending | KeymapResult::Passthrough
-        ) {
-            if self.hover_popup.is_some() {
-                self.hover_popup = None;
-            }
+        ) && self.hover_popup.is_some()
+        {
+            self.hover_popup = None;
         }
         match result {
             KeymapResult::Passthrough => {}
@@ -2607,13 +2599,14 @@ impl EditorPane {
         }
 
         // Smart backspace.
-        if cmd == EditorCommand::DeleteCharBefore && self.state.mode == Mode::Insert {
-            if self.handle_pair_backspace() {
-                self.update_viewport();
-                self.trigger_compile(cx);
-                cx.notify();
-                return;
-            }
+        if cmd == EditorCommand::DeleteCharBefore
+            && self.state.mode == Mode::Insert
+            && self.handle_pair_backspace()
+        {
+            self.update_viewport();
+            self.trigger_compile(cx);
+            cx.notify();
+            return;
         }
 
         let mutating = is_buffer_mutating(&cmd);
@@ -2817,38 +2810,40 @@ impl Render for EditorPane {
         // dataFromCheckingString timed out").  A timer captures the current
         // spell_seq; if any edit bumps the seq before it fires, it reschedules
         // via the next render instead of sending a stale request.
-        if self.spell_errors.is_none() && !self.spell_pending && !self.spell_scheduled {
-            if self.spell_tx.is_some() {
-                self.spell_scheduled = true;
-                let seq = self.spell_seq;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
-                        .await;
-                    let _ = cx.update(|cx| {
-                        let _ = this.update(cx, |pane, c| {
-                            pane.spell_scheduled = false;
-                            if pane.spell_seq == seq
-                                && pane.spell_errors.is_none()
-                                && !pane.spell_pending
-                            {
-                                if let Some(ref tx) = pane.spell_tx {
-                                    pane.spell_pending = true;
-                                    crate::ui::spellcheck::request(
-                                        &pane.buffer.text(),
-                                        pane.spell_seq,
-                                        tx.clone(),
-                                    );
-                                }
-                            } else {
-                                // Stale — a re-render will schedule a fresh timer.
-                                c.notify();
+        if self.spell_errors.is_none()
+            && !self.spell_pending
+            && !self.spell_scheduled
+            && self.spell_tx.is_some()
+        {
+            self.spell_scheduled = true;
+            let seq = self.spell_seq;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = this.update(cx, |pane, c| {
+                        pane.spell_scheduled = false;
+                        if pane.spell_seq == seq
+                            && pane.spell_errors.is_none()
+                            && !pane.spell_pending
+                        {
+                            if let Some(ref tx) = pane.spell_tx {
+                                pane.spell_pending = true;
+                                crate::ui::spellcheck::request(
+                                    &pane.buffer.text(),
+                                    pane.spell_seq,
+                                    tx.clone(),
+                                );
                             }
-                        });
+                        } else {
+                            // Stale — a re-render will schedule a fresh timer.
+                            c.notify();
+                        }
                     });
-                })
-                .detach();
-            }
+                });
+            })
+            .detach();
         }
         let spell_errors_cache = self.spell_errors.as_deref().unwrap_or(&[]);
         let diag_map = self.merged_diag_sev_map();
@@ -2868,7 +2863,7 @@ impl Render for EditorPane {
             let is_front_matter = front_matter_end.map(|end| i < end).unwrap_or(false);
 
             // Collect search match byte-ranges that fall on this line.
-            let (focused_match, other_matches): (Option<(usize, usize)>, Vec<(usize, usize)>) =
+            let (focused_match, other_matches): (Option<ByteRange>, Vec<ByteRange>) =
                 if let Some((matches, cur_idx)) = search_matches_ref {
                     let focused = matches
                         .get(cur_idx)
@@ -3679,6 +3674,9 @@ fn front_matter_end(buffer: &InMemoryBuffer, line_count: usize) -> Option<usize>
 /// All styling concerns are composed via a single segment-building pass:
 /// boundaries are collected from syntax spans, search ranges, and the cursor
 /// position, then each interval gets the highest-priority style applied.
+/// A `(start, end)` byte range within a line.
+type ByteRange = (usize, usize);
+
 #[allow(clippy::too_many_arguments)]
 /// Number of digits needed to display line numbers up to `count`.
 /// Minimum of 2 so the gutter always has a reasonable width.
@@ -3936,7 +3934,7 @@ pub(crate) fn apply_lsp_text_edits(
             )
         })
         .collect();
-    byte_edits.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    byte_edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0));
 
     for (start, end, new_text) in byte_edits {
         buf.delete_span(start.line, start.col, end.line, end.col);
@@ -3983,6 +3981,7 @@ fn find_all_matches(buf: &InMemoryBuffer, pattern: &str, whole_word: bool) -> Ve
     out
 }
 
+#[allow(clippy::too_many_arguments)] // ponytail: bundle into a context struct if it grows
 fn render_line(
     line_idx: usize,
     text: String,
@@ -4223,7 +4222,7 @@ fn render_line(
         // Extra cursor block — slightly dimmer than the primary cursor.
         // (Insert mode: extra carets are thin bars from the canvas instead.)
         let is_extra_cursor_block =
-            mode != Mode::Insert && extra_cursors.iter().any(|&ec| ec == a) && a < text_len;
+            mode != Mode::Insert && extra_cursors.contains(&a) && a < text_len;
         let extra_cursor_bg: gpui::Hsla = {
             // 60% opacity version of cursor_bg — mix toward background.
             let mut c = cursor_bg;

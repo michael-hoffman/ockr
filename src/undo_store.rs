@@ -95,10 +95,13 @@ pub fn save_undo_history(file_path: &Path, undo: &[(String, Pos)], redo: &[(Stri
     }
 }
 
+/// One undo or redo stack: buffer snapshots paired with the cursor to restore.
+type UndoStack = Vec<(String, Pos)>;
+
 /// Load the persisted undo and redo stacks for `file_path`.
 ///
 /// Returns empty vecs if no history file exists or parsing fails.
-pub fn load_undo_history(file_path: &Path) -> (Vec<(String, Pos)>, Vec<(String, Pos)>) {
+pub fn load_undo_history(file_path: &Path) -> (UndoStack, UndoStack) {
     let Some(p) = undo_path_for(file_path) else {
         return (vec![], vec![]);
     };
@@ -109,7 +112,7 @@ pub fn load_undo_history(file_path: &Path) -> (Vec<(String, Pos)>, Vec<(String, 
         return (vec![], vec![]);
     };
 
-    let to_stack = |entries: Vec<UndoEntry>| -> Vec<(String, Pos)> {
+    let to_stack = |entries: Vec<UndoEntry>| -> UndoStack {
         entries
             .into_iter()
             .map(|e| (e.text, Pos::new(e.line, e.col)))

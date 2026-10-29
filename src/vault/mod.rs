@@ -128,7 +128,7 @@ impl VaultState {
 pub fn scan_for_typ_files(root: &Path) -> Vec<VaultFile> {
     let mut files = Vec::new();
     collect_typ_files(root, root, &mut files);
-    files.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    files.sort_by_key(|a| a.title.to_lowercase());
     files
 }
 

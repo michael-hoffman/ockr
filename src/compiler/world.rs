@@ -254,14 +254,9 @@ fn load_bundled_fonts() -> (Vec<Font>, FontBook) {
         // Each font file may contain multiple faces (e.g. TTC).
         let bytes = Bytes::new(font_data);
         let mut index = 0u32;
-        loop {
-            match Font::new(bytes.clone(), index) {
-                Some(f) => {
-                    fonts.push(f);
-                    index += 1;
-                }
-                None => break,
-            }
+        while let Some(f) = Font::new(bytes.clone(), index) {
+            fonts.push(f);
+            index += 1;
         }
     }
     let book = FontBook::from_fonts(&fonts);

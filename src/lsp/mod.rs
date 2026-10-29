@@ -572,7 +572,7 @@ fn dispatch_incoming(
             let result = msg
                 .get("result")
                 .filter(|r| !r.is_null())
-                .and_then(|r| parse_definition_result(r));
+                .and_then(parse_definition_result);
             on_message(LspMessage::DefinitionResult {
                 request_id: id,
                 result,
@@ -754,10 +754,10 @@ fn extract_hover_content(contents: &Value) -> String {
             .filter_map(|item| {
                 if let Some(s) = item.as_str() {
                     Some(s.trim().to_string())
-                } else if let Some(v) = item.get("value").and_then(|v| v.as_str()) {
-                    Some(v.trim().to_string())
                 } else {
-                    None
+                    item.get("value")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.trim().to_string())
                 }
             })
             .filter(|s| !s.is_empty())
