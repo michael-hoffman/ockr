@@ -163,22 +163,18 @@ impl World for OckrWorld {
         }
 
         // Check for `@plugin/<name>/...` packages contributed by plugins.
-        if let Some(pkg) = id.package() {
+        if let VirtualRoot::Package(pkg) = id.root() {
             if pkg.namespace.as_str() == "plugin" {
                 if let Some(ref pkgs) = self.plugin_packages {
                     let guard = pkgs.read().expect("rwlock poisoned");
-                    let key = format!(
-                        "@plugin/{}/{}",
-                        pkg.name,
-                        id.vpath().as_rootless_path().display()
-                    );
+                    let key = format!("@plugin/{}/{}", pkg.name, id.vpath().get_without_slash());
                     if let Some(src) = guard.get(&key) {
                         return Ok(Source::new(id, src.clone()));
                     }
                 }
-                return Err(FileError::NotFound(
-                    id.vpath().as_rootless_path().to_path_buf(),
-                ));
+                return Err(FileError::NotFound(PathBuf::from(
+                    id.vpath().get_without_slash(),
+                )));
             }
         }
 
@@ -277,7 +273,7 @@ fn resolve_vault_path(vault_root: Option<&Path>, id: FileId) -> FileResult<PathB
     let root =
         vault_root.ok_or_else(|| FileError::NotFound(Path::new("<no vault>").to_path_buf()))?;
     // The virtual path always starts with '/', strip it.
-    let rel = id.vpath().as_rootless_path();
+    let rel = id.vpath().get_without_slash();
     Ok(root.join(rel))
 }
 
