@@ -1,6 +1,6 @@
 cask "ockr" do
-  version "0.3.0"
-  sha256 "334d07e56e1eda29ffc554bc9aefe4665f53eec652d2731558ef080fba8cd716"
+  version "0.4.0"
+  sha256 "b269d5e276bfc0d3bc75cd69afd957d87420e911407df70662986b7430695399"
 
   url "https://github.com/michael-hoffman/ockr/releases/download/v#{version}/ockr-#{version}.dmg"
   name "ockr"
