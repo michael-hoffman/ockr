@@ -458,3 +458,25 @@ impl PluginInstance {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Loads the example plugin through the real runtime. Skipped unless it has
+    /// been built with `cargo build --release --target wasm32-unknown-unknown`
+    /// (with `RUSTFLAGS="-C link-arg=--allow-undefined"`) in `ockr-plugin-example`.
+    #[test]
+    fn example_plugin_reports_metadata() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ockr-plugin-example/target/wasm32-unknown-unknown/release/ockr_plugin_example.wasm"
+        );
+        let Ok(wasm) = std::fs::read(path) else {
+            return;
+        };
+        let meta = PluginInstance::probe_metadata(&Engine::default(), &wasm)
+            .expect("plugin instantiates and reports metadata");
+        assert!(!meta.id.is_empty());
+    }
+}
