@@ -38,8 +38,8 @@ serde_json = "1"
 toml = { version = "1", features = ["parse", "display"] }
 dirs = "7"
 futures = "0.3"
-wasmtime = { version = "31", features = ["cranelift"] }
-wasmtime-wasi = "31"
+wasmtime = { version = "50", features = ["cranelift"] }
+wasmtime-wasi = "50"
 sha2 = "0.11"
 hex = "0.4"
 reqwest = { version = "0.13", features = ["blocking"] }

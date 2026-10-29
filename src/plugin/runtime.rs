@@ -6,8 +6,8 @@ use std::sync::{mpsc, Arc, RwLock};
 
 use serde::Deserialize;
 use wasmtime::{AsContext, Caller, Engine, Extern, Instance, Linker, Memory, Module, Store};
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+use wasmtime_wasi::p1::{self, WasiP1Ctx};
+use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 use super::panel::{PanelPosition, PluginLayout, RegisteredPanel};
 
@@ -135,11 +135,11 @@ impl PluginInstance {
         }
         if capabilities.vault_write {
             wasi_builder
-                .preopened_dir(vault_root, "/vault", DirPerms::all(), FilePerms::all())
+                .preopened_dir(vault_root, "/vault", FsPerms::ReadWrite)
                 .map_err(|e| e.to_string())?;
         } else if capabilities.file_read {
             wasi_builder
-                .preopened_dir(vault_root, "/vault", DirPerms::READ, FilePerms::READ)
+                .preopened_dir(vault_root, "/vault", FsPerms::ReadOnly)
                 .map_err(|e| e.to_string())?;
         }
         let wasi = wasi_builder.build_p1();
@@ -155,8 +155,7 @@ impl PluginInstance {
 
         // Build linker with WASI + host imports.
         let mut linker: Linker<PluginData> = Linker::new(engine);
-        preview1::add_to_linker_sync(&mut linker, |data| &mut data.wasi)
-            .map_err(|e| e.to_string())?;
+        p1::add_to_linker_sync(&mut linker, |data| &mut data.wasi).map_err(|e| e.to_string())?;
 
         // ockr_register_command(id_p, id_l, nm_p, nm_l, ht_p, ht_l) -> i32
         linker
