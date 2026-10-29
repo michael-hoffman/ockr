@@ -463,20 +463,47 @@ impl PluginInstance {
 mod tests {
     use super::*;
 
+    const EXAMPLE_WASM: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/ockr-plugin-example/target/wasm32-unknown-unknown/release/ockr_plugin_example.wasm"
+    );
+
     /// Loads the example plugin through the real runtime. Skipped unless it has
     /// been built with `cargo build --release --target wasm32-unknown-unknown`
     /// (with `RUSTFLAGS="-C link-arg=--allow-undefined"`) in `ockr-plugin-example`.
     #[test]
-    fn example_plugin_reports_metadata() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ockr-plugin-example/target/wasm32-unknown-unknown/release/ockr_plugin_example.wasm"
-        );
-        let Ok(wasm) = std::fs::read(path) else {
+    fn example_plugin_registers_commands() {
+        let Ok(wasm) = std::fs::read(EXAMPLE_WASM) else {
             return;
         };
-        let meta = PluginInstance::probe_metadata(&Engine::default(), &wasm)
+        let engine = Engine::default();
+        let meta = PluginInstance::probe_metadata(&engine, &wasm)
             .expect("plugin instantiates and reports metadata");
         assert!(!meta.id.is_empty());
+
+        // Exercise the capability-driven WASI setup (read-only vault preopen).
+        let capabilities = CapabilitiesJson {
+            file_read: true,
+            console: true,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        let packages = Arc::new(RwLock::new(HashMap::new()));
+        let mut instance = PluginInstance::new(
+            &engine,
+            &wasm,
+            &meta.id,
+            &capabilities,
+            &std::env::temp_dir(),
+            tx,
+            packages,
+        )
+        .expect("plugin instantiates with file_read capability");
+        instance.init().expect("init runs");
+        assert!(
+            rx.try_iter()
+                .any(|event| matches!(event, PluginEvent::CommandRegistered { .. })),
+            "init should register at least one command"
+        );
     }
 }
