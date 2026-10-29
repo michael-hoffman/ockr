@@ -111,24 +111,25 @@ static mut HTTP_BUF: [u8; 65536] = [0u8; 65536];
 /// Called by the host after `ockr_http_get` to locate where it should write.
 #[no_mangle]
 pub extern "C" fn ockr_http_buf_ptr() -> i32 {
-    unsafe { HTTP_BUF.as_ptr() as i32 }
+    std::ptr::addr_of!(HTTP_BUF) as *const u8 as i32
 }
 
 // ── Memory allocation export ──────────────────────────────────────────────────
 // The host calls ockr_alloc to write strings into WASM memory (e.g. command id
 // passed to ockr_dispatch_command).
 
-static mut ALLOC_BUF: [u8; 4096] = [0u8; 4096];
+const ALLOC_BUF_LEN: usize = 4096;
+static mut ALLOC_BUF: [u8; ALLOC_BUF_LEN] = [0u8; ALLOC_BUF_LEN];
 
 #[no_mangle]
 pub extern "C" fn ockr_alloc(len: i32) -> i32 {
     // Simple bump-pointer: always returns the start of ALLOC_BUF.
     // Plugins are single-threaded; the host writes, then immediately calls the
     // export that reads, so this is safe.
-    if (len as usize) > unsafe { ALLOC_BUF.len() } {
+    if (len as usize) > ALLOC_BUF_LEN {
         return -1;
     }
-    unsafe { ALLOC_BUF.as_ptr() as i32 }
+    std::ptr::addr_of!(ALLOC_BUF) as *const u8 as i32
 }
 
 // ── Metadata buffer (used by plugin_metadata! macro) ─────────────────────────
@@ -140,7 +141,7 @@ pub static mut METADATA_BUF: [u8; 512] = [0u8; 512];
 /// `ockr_get_metadata()` to locate the filled buffer.
 #[no_mangle]
 pub extern "C" fn ockr_metadata_buf_ptr() -> i32 {
-    unsafe { METADATA_BUF.as_ptr() as i32 }
+    std::ptr::addr_of!(METADATA_BUF) as *const u8 as i32
 }
 
 // ── plugin_metadata! macro ────────────────────────────────────────────────────
