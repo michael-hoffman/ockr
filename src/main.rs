@@ -21,8 +21,8 @@ use actions::{
 use command::{CommandEntry, CommandRegistry};
 use compiler::PreviewMode;
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction,
-    PathPromptOptions, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
+    px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, PathPromptOptions,
+    SharedString, TitlebarOptions, WindowBounds, WindowOptions,
 };
 use ui::theme::ThemePalette;
 use vault::VaultState;
@@ -183,8 +183,6 @@ fn main() {
             Menu {
                 name: "ockr".into(),
                 items: vec![
-                    MenuItem::action("About ockr", Quit), // placeholder
-                    MenuItem::separator(),
                     MenuItem::action("Settings…", OpenSettings),
                     MenuItem::separator(),
                     MenuItem::action("Quit ockr", Quit),
@@ -196,7 +194,7 @@ fn main() {
                     MenuItem::action("New Note", NewNote),
                     MenuItem::action("Open Vault…", OpenVault),
                     MenuItem::separator(),
-                    MenuItem::os_action("Save", SaveFile, OsAction::Undo), // Cmd-S handled by keybinding
+                    MenuItem::action("Save", SaveFile),
                     MenuItem::action("Export PDF", ExportPdf),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", BufferClose),
@@ -205,14 +203,6 @@ fn main() {
             Menu {
                 name: "Edit".into(),
                 items: vec![
-                    MenuItem::os_action("Undo", Quit, OsAction::Undo),
-                    MenuItem::os_action("Redo", Quit, OsAction::Redo),
-                    MenuItem::separator(),
-                    MenuItem::os_action("Cut", Quit, OsAction::Cut),
-                    MenuItem::os_action("Copy", Quit, OsAction::Copy),
-                    MenuItem::os_action("Paste", Quit, OsAction::Paste),
-                    MenuItem::os_action("Select All", Quit, OsAction::SelectAll),
-                    MenuItem::separator(),
                     MenuItem::action("Find…", OpenSearch),
                     MenuItem::action("Find & Replace…", OpenReplace),
                 ],
